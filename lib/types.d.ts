@@ -78,7 +78,7 @@ export declare type UploadOptions = {
     headers?: {
         [index: string]: string;
     };
-    isDiscretionary?: boolean;
+    wifiOnly?: boolean;
 } & (AndroidOnlyUploadOptions | IOSOnlyUploadOptions) & (RawUploadOptions | MultipartUploadOptions);
 declare type AndroidOnlyUploadOptions = {
     maxRetries?: number;

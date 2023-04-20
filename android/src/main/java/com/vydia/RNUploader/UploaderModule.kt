@@ -1,89 +1,31 @@
 package com.vydia.RNUploader
 
-import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
-import android.net.ConnectivityManager
 import android.util.Log
-import com.facebook.react.BuildConfig
 import com.facebook.react.bridge.*
-import com.vydia.RNUploader.Upload.Companion.defaultNotificationChannel
 import com.vydia.RNUploader.Upload.Companion.uploads
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import net.gotev.uploadservice.UploadService
-import net.gotev.uploadservice.UploadServiceConfig.initialize
-import net.gotev.uploadservice.UploadServiceConfig.retryPolicy
-import net.gotev.uploadservice.UploadServiceConfig.threadPool
-import net.gotev.uploadservice.data.RetryPolicyConfig
-import net.gotev.uploadservice.observer.request.GlobalRequestObserver
-import net.gotev.uploadservice.okhttp.OkHttpStack
 import java.util.*
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 
 class UploaderModule(val reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
   private val uploadEventListener = GlobalRequestObserverDelegate(reactContext)
-  private val connectivityManager =
-    reactContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
   private val ioCoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
 
   companion object {
     val TAG = "UploaderBridge"
-    var httpStack: OkHttpStack? = null
-    var wifiOnlyHttpStack: OkHttpStack? = null
   }
 
   override fun getName(): String {
     return "RNFileUploader"
   }
 
-
-  init {
-    // Initialize everything here so listeners can continue to listen
-    // seamlessly after JS reloads
-
-    // == limit number of concurrent uploads ==
-    val pool = threadPool as ThreadPoolExecutor
-    pool.corePoolSize = 1
-    pool.maximumPoolSize = 1
-
-    // == set retry policy ==
-    retryPolicy = RetryPolicyConfig(
-      // higher wait time to make time to wait for network change
-      // and get checked if the request needs to be cancelled instead of emitting errors
-      initialWaitTimeSeconds = 20,
-      maxWaitTimeSeconds = TimeUnit.HOURS.toSeconds(1).toInt(),
-      multiplier = 2,
-      defaultMaxRetries = 2 // this will be overridden by the `maxRetries` option
-    )
-
-
-    val application = reactContext.applicationContext as Application
-
-    // == initialize UploadService ==
-    initialize(application, defaultNotificationChannel, BuildConfig.DEBUG)
-
-    // == register upload listener ==
-    GlobalRequestObserver(application, uploadEventListener)
-
-    // == register network listener ==
-    observeNetwork(connectivityManager,
-      { network ->
-        httpStack = buildHttpStack(network)
-        handleNetworkChange(false)
-      },
-      { network ->
-        wifiOnlyHttpStack = buildHttpStack(network)
-        handleNetworkChange(true)
-      }
-    )
-  }
 
   @ReactMethod
   fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
@@ -95,17 +37,6 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
         promise.reject("chunkFileError", e)
       }
     }
-  }
-
-  private fun handleNetworkChange(wifiOnly: Boolean) {
-    uploads.values
-      .filter { it.wifiOnly == wifiOnly }
-      .forEach {
-        // stop the upload because we're switching network
-        // setting requestId to null to prevent cancellation event reporting
-        maybeCancelUpload(it.id, true)
-        maybeStartUpload(it)
-      }
   }
 
 
@@ -135,9 +66,6 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
    * @return whether the upload was started
    */
   private fun maybeStartUpload(upload: Upload) {
-    if (upload.wifiOnly && wifiOnlyHttpStack == null) return
-    if (!upload.wifiOnly && httpStack == null) return
-
     val notificationManager =
       (reactContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
     initializeNotificationChannel(upload.notificationChannel, notificationManager)
@@ -148,19 +76,14 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
       UploadRequestBinary(reactContext, upload.url, upload.wifiOnly).apply {
         setFileToUpload(upload.path)
       }
-    } else {
-      UploadRequestMultipart(reactContext, upload.url, upload.wifiOnly).apply {
-        addFileToUpload(upload.path, upload.field)
-        upload.parameters.forEach { (key, value) -> addParameter(key, value) }
-      }
     }
+
     Log.i(TAG, "starting request ID $requestId for ${upload.id}")
 
     request.apply {
       setMethod(upload.method)
       setMaxRetries(upload.maxRetries)
       setUploadID(requestId)
-      upload.notification.let { if (it != null) setNotificationConfig { _, _ -> it } }
       upload.headers.forEach { (key, value) -> addHeader(key, value) }
       startUpload()
     }

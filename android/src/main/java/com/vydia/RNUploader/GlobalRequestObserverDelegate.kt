@@ -8,17 +8,10 @@ import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
 import com.vydia.RNUploader.Upload.Companion.uploadByRequestId
 import com.vydia.RNUploader.Upload.Companion.uploads
-import net.gotev.uploadservice.data.UploadInfo
-import net.gotev.uploadservice.exceptions.UserCancelledUploadException
-import net.gotev.uploadservice.network.ServerResponse
-import net.gotev.uploadservice.observer.request.RequestObserverDelegate
 
-class GlobalRequestObserverDelegate(private val reactContext: ReactApplicationContext) :
-  RequestObserverDelegate {
+class GlobalRequestObserverDelegate(private val reactContext: ReactApplicationContext) : {
   private val TAG = "UploadReceiver"
 
-  override fun onCompleted(context: Context, uploadInfo: UploadInfo) {}
-  override fun onCompletedWhileNotObserving() {}
 
   fun reportCancelled(uploadId: RNUploadId) {
     uploads.remove(uploadId)

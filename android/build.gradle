@@ -67,8 +67,6 @@ dependencies {
 
     implementation "org.jetbrains.kotlin:$_kotlinStdlib:$_kotlinVersion"
 
-    implementation 'net.gotev:uploadservice-okhttp:4.7.0'
-
     implementation "com.squareup.okhttp3:okhttp:4.10.0"
 
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4'
