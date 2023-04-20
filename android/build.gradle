@@ -2,7 +2,7 @@ buildscript {
     ext {
         kotlinVersion = '1.6.21'
         buildToolsVersion = '29.0.2'
-        compileSdkVersion = 29
+        compileSdkVersion = 31 // this helps us use the latest Worker version
         targetSdkVersion = 29
         minSdkVersion = 18
     }
@@ -13,7 +13,7 @@ buildscript {
         google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.3'
+        classpath 'com.android.tools.build:gradle:3.5.4'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
     }
 }
@@ -61,7 +61,7 @@ def _kotlinVersion = _ext.has('detoxKotlinVersion') ? _ext.detoxKotlinVersion : 
 def _kotlinStdlib = _ext.has('detoxKotlinStdlib') ? _ext.detoxKotlinStdlib : 'kotlin-stdlib-jdk8'
 
 dependencies {
-    implementation "androidx.core:core-ktx:1.0.1"
+    implementation "androidx.core:core-ktx:1.10.0"
 
     implementation 'com.facebook.react:react-native:+'
 
@@ -71,9 +71,9 @@ dependencies {
 
     implementation "com.squareup.okhttp3:okhttp:4.10.0"
 
-    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.0.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4'
 
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.3'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
 
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.3'
+    implementation "androidx.work:work-runtime-ktx:2.8.1"
 }
