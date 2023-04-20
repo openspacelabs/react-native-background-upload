@@ -32,7 +32,7 @@ class Upload(options: ReadableMap) {
     private set
   var notificationChannel = defaultNotificationChannel
     private set
-  var discretionary = false
+  var wifiOnly = false
     private set
   var maxRetries = 2
     private set
@@ -72,8 +72,8 @@ class Upload(options: ReadableMap) {
     if (options.hasKey("maxRetries") && options.getType("maxRetries") == ReadableType.Number)
       maxRetries = options.getInt("maxRetries")
 
-    if (options.hasKey("isDiscretionary"))
-      discretionary = options.getBoolean("isDiscretionary")
+    if (options.hasKey("wifiOnly"))
+      wifiOnly = options.getBoolean("wifiOnly")
 
 
     val notification: WritableMap = WritableNativeMap()

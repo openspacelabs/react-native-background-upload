@@ -21,7 +21,7 @@ import java.io.FileNotFoundException
 // THERE IS NO CHANGE EXCEPT FOR ADDING DISCRETIONARY MODE
 // =========================================================
 
-private const val KEY_DISCRETIONARY = "discretionary"
+private const val KEY_DISCRETIONARY = "wifiOnly"
 
 
 /**
@@ -34,7 +34,7 @@ private const val KEY_DISCRETIONARY = "discretionary"
 class UploadRequestMultipart(
   context: Context,
   serverUrl: String,
-  private val discretionary: Boolean
+  private val wifiOnly: Boolean
 ) :
   HttpUploadRequest<UploadRequestMultipart>(context, serverUrl) {
 
@@ -44,7 +44,7 @@ class UploadRequestMultipart(
 
   override fun getAdditionalParameters(): PersistableData {
     return super.getAdditionalParameters().apply {
-      putBoolean(KEY_DISCRETIONARY, discretionary)
+      putBoolean(KEY_DISCRETIONARY, wifiOnly)
     }
   }
 
@@ -165,12 +165,12 @@ class MultipartUploadTask : HttpUploadTask() {
   }
 
   override fun upload(httpStack: HttpStack) {
-    val discretionary = params.additionalParameters.getBoolean(KEY_DISCRETIONARY)
+    val wifiOnly = params.additionalParameters.getBoolean(KEY_DISCRETIONARY)
     val stack =
-      if (discretionary) UploaderModule.discretionaryHttpStack
+      if (wifiOnly) UploaderModule.wifiOnlyHttpStack
       else UploaderModule.httpStack
     // throw error to kick off the retry mechanism
-    if (stack == null) throw Error("No available httpStack. Discretionary: $discretionary")
+    if (stack == null) throw Error("No available httpStack. WifiOnly: $wifiOnly")
     super.upload(httpStack)
   }
 }

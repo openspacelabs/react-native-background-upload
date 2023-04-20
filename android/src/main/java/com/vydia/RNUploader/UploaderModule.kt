@@ -36,7 +36,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
   companion object {
     val TAG = "UploaderBridge"
     var httpStack: OkHttpStack? = null
-    var discretionaryHttpStack: OkHttpStack? = null
+    var wifiOnlyHttpStack: OkHttpStack? = null
   }
 
   override fun getName(): String {
@@ -79,7 +79,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
         handleNetworkChange(false)
       },
       { network ->
-        discretionaryHttpStack = buildHttpStack(network)
+        wifiOnlyHttpStack = buildHttpStack(network)
         handleNetworkChange(true)
       }
     )
@@ -97,9 +97,9 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
     }
   }
 
-  private fun handleNetworkChange(discretionary: Boolean) {
+  private fun handleNetworkChange(wifiOnly: Boolean) {
     uploads.values
-      .filter { it.discretionary == discretionary }
+      .filter { it.wifiOnly == wifiOnly }
       .forEach {
         // stop the upload because we're switching network
         // setting requestId to null to prevent cancellation event reporting
@@ -135,8 +135,8 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
    * @return whether the upload was started
    */
   private fun maybeStartUpload(upload: Upload) {
-    if (upload.discretionary && discretionaryHttpStack == null) return
-    if (!upload.discretionary && httpStack == null) return
+    if (upload.wifiOnly && wifiOnlyHttpStack == null) return
+    if (!upload.wifiOnly && httpStack == null) return
 
     val notificationManager =
       (reactContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
@@ -145,11 +145,11 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
     val requestId = UUID.randomUUID().toString()
 
     val request = if (upload.requestType == Upload.RequestType.RAW) {
-      UploadRequestBinary(reactContext, upload.url, upload.discretionary).apply {
+      UploadRequestBinary(reactContext, upload.url, upload.wifiOnly).apply {
         setFileToUpload(upload.path)
       }
     } else {
-      UploadRequestMultipart(reactContext, upload.url, upload.discretionary).apply {
+      UploadRequestMultipart(reactContext, upload.url, upload.wifiOnly).apply {
         addFileToUpload(upload.path, upload.field)
         upload.parameters.forEach { (key, value) -> addParameter(key, value) }
       }

@@ -86,9 +86,8 @@ export type UploadOptions = {
   headers?: {
     [index: string]: string;
   };
-  // Whether the upload should wait for "good" conditions to trigger
-  // (connected to wifi internet, high in power, high in amount of cellular data quota)
-  isDiscretionary?: boolean;
+  // Whether the upload should wait for wifi before starting
+  wifiOnly?: boolean;
 } & (AndroidOnlyUploadOptions | IOSOnlyUploadOptions) &
   (RawUploadOptions | MultipartUploadOptions);
 

@@ -17,10 +17,10 @@ static int uploadId = 0;
 
 
 static NSString *BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload";
-static NSString *DISCRETIONARY_BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload_Discretionary";
+static NSString *WIFI_ONLY_BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload_WifiOnly";
 
 NSURLSession *_urlSession = nil;
-NSURLSession *_discretionaryUrlSession = nil;
+NSURLSession *_wifiOnlyUrlSession = nil;
 NSMutableDictionary *_responsesData = nil;
 
 + (BOOL)requiresMainQueueSetup {
@@ -29,13 +29,13 @@ NSMutableDictionary *_responsesData = nil;
 
 -(id) init {
     self = [super init];
-    
+
     _responsesData = [NSMutableDictionary dictionary];
-    
+
     // Initializes as early as possible to receive delegate events
     // sent from previously registered URLSessions
     [self urlSession];
-    [self discretionaryUrlSession];
+    [self wifiOnlyUrlSession];
     return self;
 }
 
@@ -55,11 +55,11 @@ NSMutableDictionary *_responsesData = nil;
 - (NSString *)guessMIMETypeFromFileName: (NSString *)fileName {
     CFStringRef UTI = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)[fileName pathExtension], NULL);
     CFStringRef MIMEType = UTTypeCopyPreferredTagWithClass(UTI, kUTTagClassMIMEType);
-    
+
     if (UTI) {
         CFRelease(UTI);
     }
-    
+
     if (!MIMEType) {
         return @"application/octet-stream";
     }
@@ -114,7 +114,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
     {
         thisUploadId = uploadId++;
     }
-    
+
     NSString *uploadUrl = options[@"url"];
     __block NSString *fileURI = options[@"path"];
     NSString *method = options[@"method"] ?: @"POST";
@@ -124,17 +124,17 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
     NSString *appGroup = options[@"appGroup"];
     NSDictionary *headers = options[@"headers"];
     NSDictionary *parameters = options[@"parameters"];
-    BOOL isDiscretionary = [options[@"isDiscretionary"] boolValue];
-    
+    BOOL wifiOnly = [options[@"wifiOnly"] boolValue];
+
     @try {
         NSURL *requestUrl = [NSURL URLWithString: uploadUrl];
         if (requestUrl == nil) {
             return reject(@"RN Uploader", @"URL not compliant with RFC 2396", nil);
         }
-        
+
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestUrl];
         [request setHTTPMethod: method];
-        
+
         [headers enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull val, BOOL * _Nonnull stop) {
             if ([val respondsToSelector:@selector(stringValue)]) {
                 val = [val stringValue];
@@ -143,8 +143,8 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
                 [request setValue:val forHTTPHeaderField:key];
             }
         }];
-        
-        
+
+
         // asset library files have to be copied over to a temp file.  they can't be uploaded directly
         if ([fileURI hasPrefix:@"assets-library"]) {
             dispatch_group_t group = dispatch_group_create();
@@ -160,34 +160,34 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             }];
             dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
         }
-        
+
         NSURLSessionDataTask *uploadTask;
-        
-        NSURLSession *session = isDiscretionary ? [self discretionaryUrlSession] : [self urlSession];
+
+        NSURLSession *session = wifiOnly ? [self wifiOnlyUrlSession] : [self urlSession];
         if (appGroup != nil && ![appGroup isEqualToString:@""]) {
             session.configuration.sharedContainerIdentifier = appGroup;
         }
-        
+
         if ([uploadType isEqualToString:@"multipart"]) {
             NSString *uuidStr = [[NSUUID UUID] UUIDString];
             [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
-            
+
             NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI parameters: parameters fieldName:fieldName];
             [request setHTTPBodyStream: [NSInputStream inputStreamWithData:httpBody]];
             [request setValue:[NSString stringWithFormat:@"%zd", httpBody.length] forHTTPHeaderField:@"Content-Length"];
-            
+
             uploadTask = [session uploadTaskWithStreamedRequest:request];
         } else {
             if (parameters.count > 0) {
                 reject(@"RN Uploader", @"Parameters supported only in multipart type", nil);
                 return;
             }
-            
+
             uploadTask = [session uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
         }
-        
+
         uploadTask.taskDescription = customUploadId ? customUploadId : [NSString stringWithFormat:@"%i", thisUploadId];
-        
+
         [uploadTask resume];
         resolve(uploadTask.taskDescription);
     }
@@ -207,8 +207,8 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
 RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject) {
     NSMutableArray<NSURLSession *> *sessions = [NSMutableArray array];
     if(_urlSession) [sessions addObject:_urlSession];
-    if(_discretionaryUrlSession) [sessions addObject:_discretionaryUrlSession];
-    
+    if(_wifiOnlyUrlSession) [sessions addObject:_wifiOnlyUrlSession];
+
     for (NSURLSession *session in sessions) {
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         [session getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
@@ -222,7 +222,7 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
         }];
         dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
     }
-    
+
     resolve([NSNumber numberWithBool:YES]);
 }
 
@@ -234,15 +234,15 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
 RCT_EXPORT_METHOD(getUploadStatus: (NSString *)uploadId resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject) {
     NSMutableArray<NSURLSession *> *sessions = [NSMutableArray array];
     if(_urlSession) [sessions addObject:_urlSession];
-    if(_discretionaryUrlSession) [sessions addObject:_discretionaryUrlSession];
-    
+    if(_wifiOnlyUrlSession) [sessions addObject:_wifiOnlyUrlSession];
+
     __block Boolean resolved = false;
-    
-    
+
+
     for (NSURLSession *session in sessions) {
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         [session getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-            
+
             for (NSURLSessionTask *uploadTask in uploadTasks) {
                 if (![uploadTask.taskDescription isEqualToString:uploadId]) continue;
                 NSDictionary *result = @{
@@ -257,11 +257,11 @@ RCT_EXPORT_METHOD(getUploadStatus: (NSString *)uploadId resolve:(RCTPromiseResol
 
             dispatch_semaphore_signal(sema);
         }];
-        
+
         dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
         if(resolved) return;
     }
-    
+
     resolve(NULL);
 }
 
@@ -275,7 +275,7 @@ RCT_EXPORT_METHOD(chunkFile: (NSString *)parentFilePath
                   reject: (RCTPromiseRejectBlock)reject
                   ) {
     __block NSError *error;
-    
+
     // Create a readonly mem map reference to the file.
     // This does not load the whole file into memory,
     // but converts the file into a memory region.
@@ -284,32 +284,32 @@ RCT_EXPORT_METHOD(chunkFile: (NSString *)parentFilePath
         reject(@"ChunkFile", @"Failed to get parent file", error);
         return;
     };
-    
+
     dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
     dispatch_group_t group = dispatch_group_create();
-    
-    
+
+
     for(int i = 0; i < chunks.count; i++) {
         NSDictionary * chunk = chunks[i];
         double rangeStart = [[chunk objectForKey:@"position"] doubleValue];
         double rangeLength = [[chunk objectForKey:@"size"] doubleValue];
         NSString * chunkPath = [chunk objectForKey:@"path"];
-        
-        
+
+
         dispatch_group_async(group, queue, ^{
             // This also doesn't load the file content into memory
             NSData *chunk = [parentFile subdataWithRange:NSMakeRange(rangeStart, rangeLength)];
             [chunk writeToFile:chunkPath options:0 error:&error];
         });
     }
-    
+
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-    
+
     if(error) {
         reject(@"ChunkFile", @"Failed to chunk file", error);
         return;
     };
-    
+
     resolve([NSNumber numberWithBool:YES]);
 }
 
@@ -318,86 +318,86 @@ RCT_EXPORT_METHOD(chunkFile: (NSString *)parentFilePath
                               path:(NSString *)path
                         parameters:(NSDictionary *)parameters
                          fieldName:(NSString *)fieldName {
-    
+
     NSMutableData *httpBody = [NSMutableData data];
-    
+
     // Escape non latin characters in filename
     NSString *escapedPath = [path stringByAddingPercentEncodingWithAllowedCharacters: NSCharacterSet.URLQueryAllowedCharacterSet];
-    
+
     // resolve path
     NSURL *fileUri = [NSURL URLWithString: escapedPath];
-    
+
     NSError* error = nil;
     NSData *data = [NSData dataWithContentsOfURL:fileUri options:NSDataReadingMappedAlways error: &error];
-    
+
     if (data == nil) {
         NSLog(@"Failed to read file %@", error);
     }
-    
+
     NSString *filename  = [path lastPathComponent];
     NSString *mimetype  = [self guessMIMETypeFromFileName:path];
-    
+
     [parameters enumerateKeysAndObjectsUsingBlock:^(NSString *parameterKey, NSString *parameterValue, BOOL *stop) {
         [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
         [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n", parameterKey] dataUsingEncoding:NSUTF8StringEncoding]];
         [httpBody appendData:[[NSString stringWithFormat:@"%@\r\n", parameterValue] dataUsingEncoding:NSUTF8StringEncoding]];
     }];
-    
+
     [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
     [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"; filename=\"%@\"\r\n", fieldName, filename] dataUsingEncoding:NSUTF8StringEncoding]];
     [httpBody appendData:[[NSString stringWithFormat:@"Content-Type: %@\r\n\r\n", mimetype] dataUsingEncoding:NSUTF8StringEncoding]];
     [httpBody appendData:data];
     [httpBody appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-    
+
     [httpBody appendData:[[NSString stringWithFormat:@"--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-    
+
     return httpBody;
 }
 
 - (NSURLSession *)urlSession {
     if (_urlSession) return _urlSession;
-    
+
     NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:BACKGROUND_SESSION_ID];
-    
+
     [sessionConfiguration setDiscretionary:NO];
     [sessionConfiguration setAllowsCellularAccess:YES];
     [sessionConfiguration setHTTPMaximumConnectionsPerHost:1];
-    
+
     if (@available(iOS 11.0, *)) {
         [sessionConfiguration setWaitsForConnectivity:YES];
     }
-    
+
     if (@available(iOS 13.0, *)) {
         [sessionConfiguration setAllowsConstrainedNetworkAccess:YES];
         [sessionConfiguration setAllowsExpensiveNetworkAccess:YES];
     }
-    
+
     _urlSession = [NSURLSession sessionWithConfiguration:sessionConfiguration delegate:self delegateQueue:nil];
-    
+
     return _urlSession;
 }
 
-- (NSURLSession *)discretionaryUrlSession {
-    if (_discretionaryUrlSession) return _discretionaryUrlSession;
-    
-    NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:DISCRETIONARY_BACKGROUND_SESSION_ID];
-    
-    [sessionConfiguration setDiscretionary:YES];
+- (NSURLSession *)wifiOnlyUrlSession {
+    if (_wifiOnlyUrlSession) return _wifiOnlyUrlSession;
+
+    NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:WIFI_ONLY_BACKGROUND_SESSION_ID];
+
+    [sessionConfiguration setDiscretionary:NO];
     [sessionConfiguration setAllowsCellularAccess:NO];
     [sessionConfiguration setHTTPMaximumConnectionsPerHost:1];
-    
+
     if (@available(iOS 11.0, *)) {
         [sessionConfiguration setWaitsForConnectivity:YES];
     }
-    
+
     if (@available(iOS 13.0, *)) {
         [sessionConfiguration setAllowsConstrainedNetworkAccess:NO];
         [sessionConfiguration setAllowsExpensiveNetworkAccess:NO];
     }
-    
-    _discretionaryUrlSession = [NSURLSession sessionWithConfiguration:sessionConfiguration delegate:self delegateQueue:nil];
-    
-    return _discretionaryUrlSession;
+
+    _wifiOnlyUrlSession = [NSURLSession sessionWithConfiguration:sessionConfiguration delegate:self delegateQueue:nil];
+
+    return _wifiOnlyUrlSession;
 }
 
 #pragma NSURLSessionTaskDelegate
@@ -420,7 +420,7 @@ didCompleteWithError:(NSError *)error {
     } else {
         [data setObject:[NSNull null] forKey:@"responseBody"];
     }
-    
+
     if (error == nil) {
         [self sendEventWithName:@"RNFileUploader-completed" body:data];
     }
@@ -444,12 +444,12 @@ totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
     if (totalBytesExpectedToSend > 0) {
         progress = 100.0 * (float)totalBytesSent / (float)totalBytesExpectedToSend;
     }
-    
+
     NSDictionary *data = @{
         @"id": task.taskDescription,
         @"progress": [NSNumber numberWithFloat:progress]
     };
-    
+
     [self sendEventWithName:@"RNFileUploader-progress" body:data];
 }
 
@@ -470,9 +470,9 @@ totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
 - (void)URLSession:(NSURLSession *)session
               task:(NSURLSessionTask *)task
  needNewBodyStream:(void (^)(NSInputStream *bodyStream))completionHandler {
-    
+
     NSInputStream *inputStream = task.originalRequest.HTTPBodyStream;
-    
+
     if (completionHandler) {
         completionHandler(inputStream);
     }

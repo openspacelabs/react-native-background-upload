@@ -9,7 +9,7 @@ import android.os.Build
 fun observeNetwork(
   connectivityManager: ConnectivityManager,
   onNetworkChange: (network: Network?) -> Unit,
-  onDiscretionaryNetworkChange: (network: Network?) -> Unit,
+  onWifiOnlyNetworkChange: (network: Network?) -> Unit,
 ) {
 
   // Technically we can pick and choose the network with available internet connection using
@@ -22,12 +22,12 @@ fun observeNetwork(
       onNetworkChange(network)
 
       val capabilities = connectivityManager.getNetworkCapabilities(network)
-      var discretionaryNetwork: Network? = network
+      var wifiOnlyNetwork: Network? = network
       if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true)
-        discretionaryNetwork = null
+        wifiOnlyNetwork = null
       if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) != true)
-        discretionaryNetwork = null
-      onDiscretionaryNetworkChange(discretionaryNetwork)
+        wifiOnlyNetwork = null
+      onWifiOnlyNetworkChange(wifiOnlyNetwork)
     }
   )
 }
