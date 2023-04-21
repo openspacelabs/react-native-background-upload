@@ -1,35 +1,36 @@
 package com.vydia.RNUploader
 
-import android.app.NotificationManager
-import android.content.Context
 import android.util.Log
+import androidx.work.*
 import com.facebook.react.bridge.*
-import com.vydia.RNUploader.Upload.Companion.uploads
+import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.util.*
+import java.util.concurrent.TimeUnit
 
 
-class UploaderModule(val reactContext: ReactApplicationContext) :
-  ReactContextBaseJavaModule(reactContext) {
-  private val uploadEventListener = GlobalRequestObserverDelegate(reactContext)
-  private val ioCoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
+class UploaderModule(context: ReactApplicationContext) :
+  ReactContextBaseJavaModule(context) {
 
   companion object {
-    val TAG = "UploaderBridge"
+    const val TAG = "UploaderModule"
+    const val WORKER_TAG = "RNUploader"
+    var eventReporter: EventReporter? = null
   }
 
-  override fun getName(): String {
-    return "RNFileUploader"
+  private val workManager = WorkManager.getInstance(context)
+
+  init {
+    eventReporter = EventReporter(context)
   }
 
+
+  override fun getName(): String = "RNUploader"
 
   @ReactMethod
   fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
-    ioCoroutineScope.launch {
+    CoroutineScope(Dispatchers.IO).launch {
       try {
         chunkFile(this, parentFilePath, Chunk.fromReactMethodParams(chunks))
         promise.resolve(true)
@@ -47,12 +48,8 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
   @ReactMethod
   fun startUpload(rawOptions: ReadableMap, promise: Promise) {
     try {
-      val new = Upload(rawOptions)
-      maybeCancelUpload(new.id, true)
-      maybeStartUpload(new)
-
-      uploads[new.id] = new
-      promise.resolve(new.id.toString())
+      val id = startUpload(rawOptions)
+      promise.resolve(id)
     } catch (exc: Throwable) {
       if (exc !is InvalidUploadOptionException) {
         exc.printStackTrace()
@@ -65,30 +62,35 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
   /**
    * @return whether the upload was started
    */
-  private fun maybeStartUpload(upload: Upload) {
-    val notificationManager =
-      (reactContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-    initializeNotificationChannel(upload.notificationChannel, notificationManager)
+  private fun startUpload(options: ReadableMap): String {
+    val upload = Upload(options)
+    val data = workDataOf(
+      UploadWorker.Input.UploadId.name to upload.id,
+      UploadWorker.Input.Path.name to upload.path,
+      UploadWorker.Input.Url.name to upload.url,
+      UploadWorker.Input.Method.name to upload.method,
+      UploadWorker.Input.Headers.name to Gson().toJson(upload.headers),
+      UploadWorker.Input.MaxRetries.name to upload.maxRetries,
+      UploadWorker.Input.NotificationId.name to upload.notificationId,
+      UploadWorker.Input.NotificationChannel.name to upload.notificationChannel
+    )
 
-    val requestId = UUID.randomUUID().toString()
+    val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
+    if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
 
-    val request = if (upload.requestType == Upload.RequestType.RAW) {
-      UploadRequestBinary(reactContext, upload.url, upload.wifiOnly).apply {
-        setFileToUpload(upload.path)
-      }
-    }
+    val request = OneTimeWorkRequestBuilder<UploadWorker>()
+      .addTag(WORKER_TAG)
+      .setInputData(data)
+      .setConstraints(constraints.build())
+      .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 2L, TimeUnit.SECONDS)
+      .build()
 
-    Log.i(TAG, "starting request ID $requestId for ${upload.id}")
+    workManager
+      // cancel workers with duplicate ID
+      .beginUniqueWork(upload.id, ExistingWorkPolicy.REPLACE, request)
+      .enqueue()
 
-    request.apply {
-      setMethod(upload.method)
-      setMaxRetries(upload.maxRetries)
-      setUploadID(requestId)
-      upload.headers.forEach { (key, value) -> addHeader(key, value) }
-      startUpload()
-    }
-
-    upload.requestId = UploadServiceId(requestId)
+    return upload.id
   }
 
 
@@ -100,24 +102,12 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
   @ReactMethod
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
-      maybeCancelUpload(RNUploadId(uploadId), false)
+      workManager.cancelUniqueWork(uploadId)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
       Log.e(TAG, exc.message, exc)
       promise.reject(exc)
-    }
-  }
-
-  private fun maybeCancelUpload(id: RNUploadId, silent: Boolean) {
-    uploads[id]?.let { upload ->
-      upload.requestId?.let {
-        if (silent) upload.requestId = null
-        UploadService.stopUpload(it.value)
-        return
-      }
-
-      if (!silent) uploadEventListener.reportCancelled(upload.id)
     }
   }
 
@@ -128,9 +118,9 @@ class UploaderModule(val reactContext: ReactApplicationContext) :
   @ReactMethod
   fun stopAllUploads(promise: Promise) {
     try {
-      UploadService.stopAllUploads()
+      workManager.cancelAllWorkByTag(WORKER_TAG)
       promise.resolve(true)
-    } catch (exc: java.lang.Exception) {
+    } catch (exc: Throwable) {
       exc.printStackTrace()
       Log.e(TAG, exc.message, exc)
       promise.reject(exc)

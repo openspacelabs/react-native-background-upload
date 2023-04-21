@@ -1,6 +1,6 @@
 buildscript {
     ext {
-        kotlinVersion = '1.6.21'
+        kotlinVersion = '1.7.20'
         buildToolsVersion = '29.0.2'
         compileSdkVersion = 31 // this helps us use the latest Worker version
         targetSdkVersion = 29
@@ -67,7 +67,11 @@ dependencies {
 
     implementation "org.jetbrains.kotlin:$_kotlinStdlib:$_kotlinVersion"
 
-    implementation "com.squareup.okhttp3:okhttp:4.10.0"
+    def ktor_version = "2.3.0"
+    implementation "io.ktor:ktor-client-core:$ktor_version"
+    implementation "io.ktor:ktor-client-cio:$ktor_version"
+
+    implementation 'com.google.code.gson:gson:2.8.9'
 
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4'
 

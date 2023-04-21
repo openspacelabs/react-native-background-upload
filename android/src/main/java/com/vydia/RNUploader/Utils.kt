@@ -1,8 +1,5 @@
 package com.vydia.RNUploader
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.os.Build
 import com.facebook.react.bridge.ReadableArray
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,16 +45,4 @@ suspend fun chunkFile(
       output.put(input)
     }
   }.awaitAll()
-}
-
-fun initializeNotificationChannel(notificationChannel: String, manager: NotificationManager) {
-  if (Build.VERSION.SDK_INT < 26) return
-
-  val channel = NotificationChannel(
-    notificationChannel,
-    "Background Upload Channel",
-    NotificationManager.IMPORTANCE_LOW
-  )
-
-  manager.createNotificationChannel(channel)
 }

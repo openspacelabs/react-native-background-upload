@@ -5,7 +5,6 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
-import androidx.work.workDataOf
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.vydia.RNUploader.UploaderModule.Companion.eventReporter
@@ -15,6 +14,7 @@ import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.util.cio.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -26,8 +26,7 @@ private val TypeOfHeaders = object : TypeToken<Collection<Headers>>() {}.type
 private val client = HttpClient(CIO)
 
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-  enum class Input { UploadId, Path, Url, Method, Headers, NotificationId, NotificationChannelId }
-  enum class Output { Error }
+  enum class Input { UploadId, Path, Url, Method, Headers, MaxRetries, NotificationId, NotificationChannel }
 
   // inputs
   private val input = inputData
@@ -36,20 +35,23 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
   private val url = input.getString(Input.Url.name) ?: throw Throwable("URL is null")
   private val method = input.getString(Input.Method.name) ?: throw Throwable("Method is null")
   private val headers = input.getString(Input.Headers.name) ?: "{}"
+  private val maxRetries = input.getInt(Input.MaxRetries.name, 0)
 
 
   // Notification inputs
   private val notificationId =
     input.getString(Input.NotificationId.name) ?: throw Throwable("Notification ID is null")
-  private val channelId = input.getString(Input.NotificationChannelId.name)
+  private val channel = input.getString(Input.NotificationChannel.name)
     ?: throw Throwable("Notification Channel ID is null")
 
 
+  private var retries = 0
+
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-    setForeground(this@UploadWorker.getForegroundInfo())
+    setForeground(getForegroundInfo())
 
     try {
-      val httpMethod = HttpMethod.parse(this@UploadWorker.method)
+      val httpMethod = HttpMethod.parse(method)
       val body = File(filePath).readChannel()
       val headersMap = Gson().fromJson<Headers>(headers, TypeOfHeaders)
 
@@ -58,20 +60,40 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         setBody(body)
         headersMap.forEach { (key, value) -> headers.append(key, value) }
         onUpload { bytesSentTotal, contentLength ->
+          // progress
           eventReporter?.progress(uploadId, bytesSentTotal, contentLength)
         }
       }
 
+      // success
       eventReporter?.success(uploadId, response)
-      return@withContext Result.success()
+      Result.success()
     } catch (error: Throwable) {
-      val failure = workDataOf(Output.Error.name to error.message)
-      return@withContext Result.failure(failure)
+
+      if (error is CancellationException) {
+        // cancelled by user or when there's a new worker with the same ID
+        if (isStopped) {
+          eventReporter?.cancelled(uploadId)
+          return@withContext Result.failure()
+        }
+        // cancelled automatically, probably due to constraints not met
+        else throw error
+      }
+
+      // keep retrying
+      if (retries < maxRetries) {
+        retries++
+        return@withContext Result.retry()
+      }
+
+      // no more retrying
+      eventReporter?.error(uploadId, error)
+      Result.failure()
     }
   }
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val notification = NotificationCompat.Builder(applicationContext, channelId).build()
+    val notification = NotificationCompat.Builder(applicationContext, channel).build()
     return ForegroundInfo(notificationId.hashCode(), notification)
   }
 
