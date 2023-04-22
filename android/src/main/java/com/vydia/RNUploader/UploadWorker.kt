@@ -1,5 +1,6 @@
 package com.vydia.RNUploader
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -25,8 +26,11 @@ private interface Headers : Map<String, String>
 private val TypeOfHeaders = object : TypeToken<Collection<Headers>>() {}.type
 private val client = HttpClient(CIO)
 
-class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+class UploadWorker(private val context: Context, params: WorkerParameters) :
+  CoroutineWorker(context, params) {
+
   enum class Input { UploadId, Path, Url, Method, Headers, MaxRetries, NotificationId, NotificationChannel }
+  enum class State { Retries }
 
   // inputs
   private val input = inputData
@@ -45,8 +49,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     ?: throw Throwable("Notification Channel ID is null")
 
 
-  private var retries = 0
+  private val retries = state(context, uploadId).getInt(State.Retries.name, 0)
 
+
+  @SuppressLint("ApplySharedPref")
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     setForeground(getForegroundInfo())
 
@@ -67,12 +73,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
       // success
       eventReporter?.success(uploadId, response)
+      clearState(context, uploadId)
       Result.success()
     } catch (error: Throwable) {
 
       if (error is CancellationException) {
         // cancelled by user or when there's a new worker with the same ID
         if (isStopped) {
+          clearState(context, uploadId)
           eventReporter?.cancelled(uploadId)
           return@withContext Result.failure()
         }
@@ -82,12 +90,13 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
       // keep retrying
       if (retries < maxRetries) {
-        retries++
+        state(context, uploadId).edit().putInt(State.Retries.name, retries + 1).commit()
         return@withContext Result.retry()
       }
 
       // no more retrying
       eventReporter?.error(uploadId, error)
+      clearState(context, uploadId)
       Result.failure()
     }
   }
@@ -96,5 +105,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     val notification = NotificationCompat.Builder(applicationContext, channel).build()
     return ForegroundInfo(notificationId.hashCode(), notification)
   }
+}
 
+private fun stateId(uploadId: String) = "RNUpload-worker-$uploadId"
+
+private fun state(context: Context, uploadId: String) =
+  context.getSharedPreferences(stateId(uploadId), Context.MODE_PRIVATE)
+
+private fun clearState(context: Context, uploadId: String) {
+  val state = state(context, uploadId)
+  state.edit().clear().apply()
 }

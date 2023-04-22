@@ -17,6 +17,7 @@ class UploaderModule(context: ReactApplicationContext) :
     const val TAG = "UploaderModule"
     const val WORKER_TAG = "RNUploader"
     var eventReporter: EventReporter? = null
+      private set
   }
 
   private val workManager = WorkManager.getInstance(context)
