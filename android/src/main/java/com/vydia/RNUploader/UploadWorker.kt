@@ -82,8 +82,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       if (error is CancellationException) {
         // cancelled by user or when there's a new worker with the same ID
         if (isStopped) {
-          clearState(context, uploadId)
           eventReporter?.cancelled(uploadId)
+          clearState(context, uploadId)
           return@withContext Result.failure()
         }
         // cancelled automatically, probably due to constraints not met
