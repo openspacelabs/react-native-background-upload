@@ -1,6 +1,6 @@
 buildscript {
     ext {
-        kotlinVersion = '1.7.20'
+        kotlinVersion = '1.8.0'
         buildToolsVersion = '29.0.2'
         compileSdkVersion = 31 // this helps us use the latest Worker version
         targetSdkVersion = 29
