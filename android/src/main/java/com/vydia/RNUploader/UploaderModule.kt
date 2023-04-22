@@ -35,8 +35,8 @@ class UploaderModule(context: ReactApplicationContext) :
       try {
         chunkFile(this, parentFilePath, Chunk.fromReactMethodParams(chunks))
         promise.resolve(true)
-      } catch (e: Exception) {
-        promise.reject("chunkFileError", e)
+      } catch (e: Throwable) {
+        promise.reject(e)
       }
     }
   }
