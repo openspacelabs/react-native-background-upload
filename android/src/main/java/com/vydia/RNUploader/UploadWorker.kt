@@ -61,6 +61,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       val body = File(filePath).readChannel()
       val headersMap = Gson().fromJson<Headers>(headers, TypeOfHeaders)
 
+      // Use ktor instead of okhttp. Ktor request is coroutine friendly and
+      // will get cancelled when the coroutine gets cancelled
       val response = client.request(url) {
         method = httpMethod
         setBody(body)
