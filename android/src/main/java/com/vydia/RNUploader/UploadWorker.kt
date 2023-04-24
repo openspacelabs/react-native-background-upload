@@ -24,7 +24,8 @@ import java.io.File
 
 private interface Headers : Map<String, String>
 
-private const val MAX_CONCURRENCY = 1 // only 1 worker is allowed to do its work at a time
+// All workers will start `doWork` immediately but only 1 runs at a time.
+private const val MAX_CONCURRENCY = 1
 private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val TypeOfHeaders = object : TypeToken<Collection<Headers>>() {}.type
 private val client = HttpClient(CIO)
@@ -46,8 +47,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
 
   // Notification inputs
-  private val notificationId =
-    input.getString(Input.NotificationId.name) ?: throw Throwable("Notification ID is null")
+  private val notificationId = input.getString(Input.NotificationId.name)
+    ?: throw Throwable("Notification ID is null")
   private val channel = input.getString(Input.NotificationChannel.name)
     ?: throw Throwable("Notification Channel ID is null")
 
@@ -117,10 +118,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 }
 
-private fun stateId(uploadId: String) = "RNUpload-worker-$uploadId"
 
 private fun state(context: Context, uploadId: String) =
-  context.getSharedPreferences(stateId(uploadId), Context.MODE_PRIVATE)
+  context.getSharedPreferences("RNUpload-worker-$uploadId", Context.MODE_PRIVATE)
 
 private fun clearState(context: Context, uploadId: String) {
   val state = state(context, uploadId)
