@@ -17,12 +17,15 @@ import io.ktor.http.*
 import io.ktor.util.cio.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
 
 
 private interface Headers : Map<String, String>
 
+private const val MAX_CONCURRENCY = 1 // only 1 worker is allowed to do its work at a time
+private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val TypeOfHeaders = object : TypeToken<Collection<Headers>>() {}.type
 private val client = HttpClient(CIO)
 
@@ -54,6 +57,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   @SuppressLint("ApplySharedPref")
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    // wait until its turn to execute
+    semaphore.acquire()
     setForeground(getForegroundInfo())
 
     try {
@@ -100,6 +105,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       eventReporter?.error(uploadId, error)
       clearState(context, uploadId)
       Result.failure()
+    } finally {
+      // stop waiting
+      semaphore.release()
     }
   }
 
