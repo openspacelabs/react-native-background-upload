@@ -46,8 +46,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
 
   // Notification inputs
-  private val notificationId =
-    input.getString(Input.NotificationId.name) ?: throw Throwable("Notification ID is null")
+  private val notificationId = input.getString(Input.NotificationId.name)
+    ?: throw Throwable("Notification ID is null")
   private val channel = input.getString(Input.NotificationChannel.name)
     ?: throw Throwable("Notification Channel ID is null")
 
