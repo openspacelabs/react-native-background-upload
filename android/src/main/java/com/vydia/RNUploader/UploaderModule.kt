@@ -75,6 +75,8 @@ class UploaderModule(context: ReactApplicationContext) :
       UploadWorker.Input.NotificationId.name to upload.notificationId,
       UploadWorker.Input.NotificationChannel.name to upload.notificationChannel
     )
+    // TODO set up notification ID in JS and start testing
+    // TODO examine event best practice
 
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
     if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
