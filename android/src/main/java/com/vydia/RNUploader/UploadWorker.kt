@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import androidx.work.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.vydia.RNUploader.UploaderModule.Companion.MAX_CONCURRENCY
 import com.vydia.RNUploader.UploaderModule.Companion.eventReporter
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
@@ -21,14 +22,13 @@ import java.io.File
 
 
 // All workers will start `doWork` immediately but only 1 runs at a time.
-private const val MAX_CONCURRENCY = 1
 private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val client = HttpClient(CIO)
 
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
-  enum class Input { UploadId, Path, Url, Method, Headers, MaxRetries, NotificationId, NotificationChannel }
+  enum class Input { UploadId, Path, Url, Method, Headers, MaxRetries, NotificationId }
   enum class State { Retries }
   private class ParsedInput(input: Data) {
     // http request inputs

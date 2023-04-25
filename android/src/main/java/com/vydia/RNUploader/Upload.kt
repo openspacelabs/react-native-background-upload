@@ -16,8 +16,6 @@ class Upload(options: ReadableMap) {
     if (options.hasKey("wifiOnly")) options.getBoolean("wifiOnly")
     else false
 
-  val notificationChannel = options.getString("notificationChannel")
-    ?: throw InvalidUploadOptionException("Missing 'notificationChannel'")
   val notificationId = options.getString("notificationId")
     ?: throw InvalidUploadOptionException("Missing 'notificationId'")
 

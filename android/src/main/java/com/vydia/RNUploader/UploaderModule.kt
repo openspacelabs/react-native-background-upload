@@ -76,7 +76,6 @@ class UploaderModule(context: ReactApplicationContext) :
       UploadWorker.Input.Headers.name to Gson().toJson(upload.headers),
       UploadWorker.Input.MaxRetries.name to upload.maxRetries,
       UploadWorker.Input.NotificationId.name to upload.notificationId,
-      UploadWorker.Input.NotificationChannel.name to upload.notificationChannel
     )
     // TODO examine event best practice
 
