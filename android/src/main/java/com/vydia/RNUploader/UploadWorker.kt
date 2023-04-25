@@ -1,11 +1,9 @@
 package com.vydia.RNUploader
 
-import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.Context
-import androidx.core.app.NotificationCompat
-import androidx.work.CoroutineWorker
-import androidx.work.ForegroundInfo
-import androidx.work.WorkerParameters
+import android.content.SharedPreferences
+import androidx.work.*
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.vydia.RNUploader.UploaderModule.Companion.eventReporter
@@ -22,12 +20,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 
-private interface Headers : Map<String, String>
-
 // All workers will start `doWork` immediately but only 1 runs at a time.
 private const val MAX_CONCURRENCY = 1
 private val semaphore = Semaphore(MAX_CONCURRENCY)
-private val TypeOfHeaders = object : TypeToken<Collection<Headers>>() {}.type
 private val client = HttpClient(CIO)
 
 class UploadWorker(private val context: Context, params: WorkerParameters) :
@@ -35,61 +30,68 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   enum class Input { UploadId, Path, Url, Method, Headers, MaxRetries, NotificationId, NotificationChannel }
   enum class State { Retries }
+  private class ParsedInput(input: Data) {
+    // http request inputs
+    val uploadId = input.getString(Input.UploadId.name) ?: throw Throwable("Id is null")
+    val filePath = input.getString(Input.Path.name) ?: throw Throwable("Path is null")
+    val url = input.getString(Input.Url.name) ?: throw Throwable("URL is null")
+    val method = input.getString(Input.Method.name) ?: throw Throwable("Method is null")
+    val headers = input.getString(Input.Headers.name) ?: "{}"
+    val maxRetries = input.getInt(Input.MaxRetries.name, 0)
 
-  // inputs
-  private val input = inputData
-  private val uploadId = input.getString(Input.UploadId.name) ?: throw Throwable("Id is null")
-  private val filePath = input.getString(Input.Path.name) ?: throw Throwable("Path is null")
-  private val url = input.getString(Input.Url.name) ?: throw Throwable("URL is null")
-  private val method = input.getString(Input.Method.name) ?: throw Throwable("Method is null")
-  private val headers = input.getString(Input.Headers.name) ?: "{}"
-  private val maxRetries = input.getInt(Input.MaxRetries.name, 0)
+    // notification inputs
+    val notificationId = input.getString(Input.NotificationId.name)
+      ?: throw Throwable("Notification ID is null")
+
+    // derivatives
+    val httpMethod = HttpMethod.parse(method)
+    val body = File(filePath).readChannel()
+    private val headersType = object : TypeToken<Map<String, String>>() {}.type
+    val headersMap: Map<String, String> = Gson().fromJson(headers, headersType)
+  }
 
 
-  // Notification inputs
-  private val notificationId = input.getString(Input.NotificationId.name)
-    ?: throw Throwable("Notification ID is null")
-  private val channel = input.getString(Input.NotificationChannel.name)
-    ?: throw Throwable("Notification Channel ID is null")
+  private lateinit var input: ParsedInput
+  private var retries: Int = 0
 
-
-  private val retries = state(context, uploadId).getInt(State.Retries.name, 0)
-
-
-  @SuppressLint("ApplySharedPref")
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    try {
+      input = ParsedInput(inputData)
+      retries = state(context, input.uploadId).getInt(State.Retries.name, 0)
+      setForeground(getForegroundInfo())
+    } catch (error: Throwable) {
+      return@withContext Result.failure(workDataOf("error" to error.message))
+    }
+
+
     // wait until its turn to execute
     semaphore.acquire()
-    setForeground(getForegroundInfo())
+
 
     try {
-      val httpMethod = HttpMethod.parse(method)
-      val body = File(filePath).readChannel()
-      val headersMap = Gson().fromJson<Headers>(headers, TypeOfHeaders)
-
       // Use ktor instead of okhttp. Ktor request is coroutine friendly and
       // will get cancelled when the coroutine gets cancelled
-      val response = client.request(url) {
-        method = httpMethod
-        setBody(body)
-        headersMap.forEach { (key, value) -> headers.append(key, value) }
+      val response = client.request(input.url) {
+        method = input.httpMethod
+        setBody(input.body)
+        input.headersMap.forEach { (key, value) -> headers.append(key, value) }
         onUpload { bytesSentTotal, contentLength ->
           // progress
-          eventReporter?.progress(uploadId, bytesSentTotal, contentLength)
+          eventReporter?.progress(input.uploadId, bytesSentTotal, contentLength)
         }
       }
 
       // success
-      eventReporter?.success(uploadId, response)
-      clearState(context, uploadId)
-      Result.success()
+      eventReporter?.success(input.uploadId, response)
+      clearState(context, input.uploadId)
+      return@withContext Result.success()
     } catch (error: Throwable) {
 
       if (error is CancellationException) {
         // cancelled by user or when there's a new worker with the same ID
         if (isStopped) {
-          eventReporter?.cancelled(uploadId)
-          clearState(context, uploadId)
+          eventReporter?.cancelled(input.uploadId)
+          clearState(context, input.uploadId)
           return@withContext Result.failure()
         }
         // cancelled automatically, probably due to constraints not met
@@ -97,15 +99,15 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       }
 
       // keep retrying
-      if (retries < maxRetries) {
-        state(context, uploadId).edit().putInt(State.Retries.name, retries + 1).commit()
+      if (retries < input.maxRetries) {
+        state(context, input.uploadId).edit().putInt(State.Retries.name, retries + 1).commit()
         return@withContext Result.retry()
       }
 
       // no more retrying
-      eventReporter?.error(uploadId, error)
-      clearState(context, uploadId)
-      Result.failure()
+      eventReporter?.error(input.uploadId, error)
+      clearState(context, input.uploadId)
+      return@withContext Result.failure()
     } finally {
       // stop waiting
       semaphore.release()
@@ -113,14 +115,20 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val notification = NotificationCompat.Builder(applicationContext, channel).build()
-    return ForegroundInfo(notificationId.hashCode(), notification)
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val id = input.notificationId.hashCode()
+    val statusBarNotification = manager.activeNotifications.find { it.id == id }
+      ?: throw Throwable("No notification found for ${input.notificationId}")
+    return ForegroundInfo(id, statusBarNotification.notification)
   }
 }
 
 
-private fun state(context: Context, uploadId: String) =
-  context.getSharedPreferences("RNUpload-worker-$uploadId", Context.MODE_PRIVATE)
+private fun state(context: Context, uploadId: String): SharedPreferences {
+  // getSharedPreferences just doesn't like "/"
+  val parsedUploadId = uploadId.replace("/", "|")
+  return context.getSharedPreferences("RNFileUpload-worker-$parsedUploadId", Context.MODE_PRIVATE)
+}
 
 private fun clearState(context: Context, uploadId: String) {
   val state = state(context, uploadId)

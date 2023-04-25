@@ -14,8 +14,11 @@ class UploaderModule(context: ReactApplicationContext) :
   ReactContextBaseJavaModule(context) {
 
   companion object {
-    const val TAG = "UploaderModule"
-    const val WORKER_TAG = "RNUploader"
+    const val TAG = "RNFileUploader.UploaderModule"
+    const val WORKER_TAG = "RNFileUploader"
+
+    // All workers will start `doWork` immediately but only 1 runs at a time.
+    const val MAX_CONCURRENCY = 1
     var eventReporter: EventReporter? = null
       private set
   }
@@ -27,7 +30,7 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
 
-  override fun getName(): String = "RNUploader"
+  override fun getName(): String = "RNFileUploader"
 
   @ReactMethod
   fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
@@ -75,7 +78,6 @@ class UploaderModule(context: ReactApplicationContext) :
       UploadWorker.Input.NotificationId.name to upload.notificationId,
       UploadWorker.Input.NotificationChannel.name to upload.notificationChannel
     )
-    // TODO set up notification ID in JS and start testing
     // TODO examine event best practice
 
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
