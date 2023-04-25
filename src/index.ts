@@ -36,6 +36,8 @@ It is recommended to add listeners in the .then of this promise.
 */
 export const startUpload = ({
   path,
+  android,
+  ios,
   ...options
 }: UploadOptions): Promise<UploadId> => {
   if (!path.startsWith(fileURIPrefix)) {
@@ -46,7 +48,7 @@ export const startUpload = ({
     path = path.replace(fileURIPrefix, '');
   }
 
-  return NativeModule.startUpload({ ...options, path });
+  return NativeModule.startUpload({ ...options, ...android, ...ios, path });
 };
 
 /**

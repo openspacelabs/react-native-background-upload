@@ -1,5 +1,5 @@
 import { AddListener, UploadId, UploadOptions } from './types';
-export declare const startUpload: ({ path, ...options }: UploadOptions) => Promise<UploadId>;
+export declare const startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<UploadId>;
 /**
  * Cancels active upload by string ID of the upload.
  *
@@ -33,7 +33,7 @@ export declare const chunkFile: (parentFilePath: string, chunks: {
     path: string;
 }[]) => Promise<void>;
 declare const _default: {
-    startUpload: ({ path, ...options }: UploadOptions) => Promise<string>;
+    startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<string>;
     cancelUpload: (cancelUploadId: string) => Promise<boolean>;
     addListener: AddListener;
     chunkFile: (parentFilePath: string, chunks: {
