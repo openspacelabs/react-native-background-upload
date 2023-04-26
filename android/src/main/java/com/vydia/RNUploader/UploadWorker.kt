@@ -8,6 +8,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.gson.Gson
 import com.vydia.RNUploader.UploaderModule.Companion.MAX_CONCURRENCY
+import com.vydia.RNUploader.UploaderModule.Companion.REQUEST_TIMEOUT_MILLIS
 import com.vydia.RNUploader.UploaderModule.Companion.eventReporter
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
@@ -25,7 +26,11 @@ import java.io.File
 
 // All workers will start `doWork` immediately but only 1 runs at a time.
 private val semaphore = Semaphore(MAX_CONCURRENCY)
-private val client = HttpClient(CIO)
+private val client = HttpClient(CIO) {
+  install(HttpTimeout) {
+    requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
+  }
+}
 
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {

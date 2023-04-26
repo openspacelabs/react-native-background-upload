@@ -7,6 +7,7 @@ import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit.HOURS
 
 
 class UploaderModule(context: ReactApplicationContext) :
@@ -18,6 +19,9 @@ class UploaderModule(context: ReactApplicationContext) :
 
     // All workers will start `doWork` immediately but only 1 runs at a time.
     const val MAX_CONCURRENCY = 1
+
+    // Plenty of time for a single request to complete
+    val REQUEST_TIMEOUT_MILLIS = HOURS.toMillis(24L)
     var eventReporter: EventReporter? = null
       private set
   }
@@ -68,7 +72,6 @@ class UploaderModule(context: ReactApplicationContext) :
   private fun startUpload(options: ReadableMap): String {
     val upload = Upload.fromOptions(options)
     val data = Gson().toJson(upload)
-    // TODO migrate changes from main project
     // TODO fix worker not waking up app in background using BroadcastReceiver
     // TODO cancellation on delete doesn't work
     // TODO test when notification not allowed
