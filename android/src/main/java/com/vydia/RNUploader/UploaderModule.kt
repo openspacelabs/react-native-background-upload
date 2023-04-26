@@ -7,7 +7,6 @@ import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit
 
 
 class UploaderModule(context: ReactApplicationContext) :
@@ -67,26 +66,24 @@ class UploaderModule(context: ReactApplicationContext) :
    * @return whether the upload was started
    */
   private fun startUpload(options: ReadableMap): String {
-    val upload = Upload(options)
-    val data = workDataOf(
-      UploadWorker.Input.UploadId.name to upload.id,
-      UploadWorker.Input.Path.name to upload.path,
-      UploadWorker.Input.Url.name to upload.url,
-      UploadWorker.Input.Method.name to upload.method,
-      UploadWorker.Input.Headers.name to Gson().toJson(upload.headers),
-      UploadWorker.Input.MaxRetries.name to upload.maxRetries,
-      UploadWorker.Input.NotificationId.name to upload.notificationId,
-    )
-    // TODO examine event best practice
+    val upload = Upload.fromOptions(options)
+    val data = Gson().toJson(upload)
+    // TODO migrate changes from main project
+    // TODO fix worker not waking up app in background using BroadcastReceiver
+    // TODO cancellation on delete doesn't work
+    // TODO test when notification not allowed
+    // TODO test network handling
+    // TODO workers get cancelled after app update
+    // TODO: Invalid Content-Range header", "httpCode": 400,?
+    // TODO: resume doesn't work
 
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
     if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
 
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
       .addTag(WORKER_TAG)
-      .setInputData(data)
+      .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
       .setConstraints(constraints.build())
-      .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 2L, TimeUnit.SECONDS)
       .build()
 
     workManager
