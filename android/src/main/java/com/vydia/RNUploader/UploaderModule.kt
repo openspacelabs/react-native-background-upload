@@ -7,29 +7,23 @@ import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit.HOURS
 
 
 class UploaderModule(context: ReactApplicationContext) :
   ReactContextBaseJavaModule(context) {
 
+
   companion object {
     const val TAG = "RNFileUploader.UploaderModule"
     const val WORKER_TAG = "RNFileUploader"
-
-    // All workers will start `doWork` immediately but only 1 runs at a time.
-    const val MAX_CONCURRENCY = 1
-
-    // Plenty of time for a single request to complete
-    val REQUEST_TIMEOUT_MILLIS = HOURS.toMillis(24L)
-    var eventReporter: EventReporter? = null
+    var reactContext: ReactApplicationContext? = null
       private set
   }
 
   private val workManager = WorkManager.getInstance(context)
 
   init {
-    eventReporter = EventReporter(context)
+    reactContext = context
   }
 
 

@@ -3,15 +3,11 @@ package com.vydia.RNUploader
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.gson.Gson
-import com.vydia.RNUploader.UploaderModule.Companion.MAX_CONCURRENCY
-import com.vydia.RNUploader.UploaderModule.Companion.REQUEST_TIMEOUT_MILLIS
-import com.vydia.RNUploader.UploaderModule.Companion.eventReporter
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
@@ -23,9 +19,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
-
+import java.util.concurrent.TimeUnit
 
 // All workers will start `doWork` immediately but only 1 runs at a time.
+const val MAX_CONCURRENCY = 1
+const val PROGRESS_INTERVAL = 500
+
+// Plenty of time for a single request to complete
+val REQUEST_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(24L)
+
 private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val client = HttpClient(CIO) {
   install(HttpTimeout) {
@@ -37,10 +39,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
   enum class Input { Params }
-  enum class State { Retries }
 
   private lateinit var upload: Upload
-  private lateinit var sharedProgress: SharedProgress
+  private lateinit var progress: UploadProgress
+  private var lastProgressReport = 0L
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
 
@@ -50,24 +52,24 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     try {
       val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
       upload = Gson().fromJson(paramsJson, Upload::class.java)
-      retries = state(context, upload.id).getInt(State.Retries.name, 0)
       httpMethod = HttpMethod.parse(upload.method)
-      sharedProgress = SharedProgress(context)
+      retries = UploadRetry.get(context, upload.id)
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
       handleCancellation(error)
-
-      eventReporter?.error(upload.id, error)
-      clearState(context, upload.id)
+      EventReporter.error(upload.id, error)
       return@withContext Result.failure()
     }
 
 
     // complex work, errors thrown below here can trigger retry
     try {
-      // this can happen before the semaphore to save time
+      // these need to be before the semaphore
+      // to update the shared progress asap
       val file = File(upload.path)
       val size = file.length()
+      UploadProgress.start(context, upload.id, size)
+
 
       // wait until its turn to execute
       semaphore.acquire()
@@ -79,26 +81,33 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         setBody(file.readChannel())
         upload.headers.forEach { (key, value) -> headers.append(key, value) }
         onUpload { bytesSentTotal, _ ->
-          setForeground(getForegroundInfo())
-          eventReporter?.progress(upload.id, bytesSentTotal, size)
+          val now = System.currentTimeMillis()
+          if (now - lastProgressReport >= PROGRESS_INTERVAL) {
+            lastProgressReport = now
+            UploadProgress.update(context, upload.id, bytesSentTotal)
+            EventReporter.progress(upload.id, bytesSentTotal, size)
+            setForeground(getForegroundInfo())
+          }
         }
       }
 
-      eventReporter?.success(upload.id, response)
-      clearState(context, upload.id)
+      UploadProgress.maybeClear(context)
+      EventReporter.success(upload.id, response)
+      UploadRetry.clear(context, upload.id)
       return@withContext Result.success()
     } catch (error: Throwable) {
       handleCancellation(error)
 
       // keep retrying
       if (retries < upload.maxRetries) {
-        state(context, upload.id).edit().putInt(State.Retries.name, retries + 1).commit()
+        UploadRetry.set(context, upload.id, retries + 1)
         return@withContext Result.retry()
       }
 
       // no more retrying
-      eventReporter?.error(upload.id, error)
-      clearState(context, upload.id)
+      UploadRetry.clear(context, upload.id)
+      EventReporter.error(upload.id, error)
+      UploadProgress.maybeClear(context)
       return@withContext Result.failure()
     } finally {
       // stop waiting
@@ -110,8 +119,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // Cancelled by user or new worker with same ID
     // Worker won't rerun, perform teardown
     if (isStopped) {
-      eventReporter?.cancelled(upload.id)
-      clearState(context, upload.id)
+      EventReporter.cancelled(upload.id)
+      UploadRetry.clear(context, upload.id)
       throw error
     }
 
@@ -123,13 +132,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   override suspend fun getForegroundInfo(): ForegroundInfo {
     val channelId = "upload-progress"
     val id = upload.notificationId.hashCode()
-    val progress = sharedProgress.total()
+    val progress = UploadProgress.total(context)
     val notification = NotificationCompat.Builder(context, channelId)
       .setSmallIcon(android.R.drawable.stat_notify_chat)
       .setOngoing(true)
       .setAutoCancel(false)
       .setContentTitle("Uploading...")
-      .setContentText("?%")
+      .setContentText("$progress%")
       .setProgress(100, progress, false)
       .setContentIntent(openAppIntent(context))
       .build()
@@ -148,13 +157,4 @@ private fun openAppIntent(context: Context): PendingIntent? {
   }
 }
 
-private fun state(context: Context, uploadId: String): SharedPreferences {
-  // getSharedPreferences just doesn't like "/"
-  val parsedUploadId = uploadId.replace("/", "|")
-  return context.getSharedPreferences("RNFileUpload-worker-$parsedUploadId", Context.MODE_PRIVATE)
-}
 
-private fun clearState(context: Context, uploadId: String) {
-  val state = state(context, uploadId)
-  state.edit().clear().apply()
-}
