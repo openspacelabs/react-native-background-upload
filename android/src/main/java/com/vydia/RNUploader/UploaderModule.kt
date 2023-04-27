@@ -73,12 +73,12 @@ class UploaderModule(context: ReactApplicationContext) :
     val upload = Upload.fromOptions(options)
     val data = Gson().toJson(upload)
     // TODO fix worker not waking up app in background using BroadcastReceiver
-    // TODO cancellation on delete doesn't work
-    // TODO test when notification not allowed
+    // TODO fix when notification not allowed
     // TODO test network handling
     // TODO workers get cancelled after app update
-    // TODO: Invalid Content-Range header", "httpCode": 400,?
     // TODO: resume doesn't work
+    // TODO: Invalid Content-Range header", "httpCode": 400,?
+    // TODO cancellation on delete doesn't work
 
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
     if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)

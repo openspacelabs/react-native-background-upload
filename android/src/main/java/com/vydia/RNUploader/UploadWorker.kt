@@ -16,7 +16,6 @@ import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.util.cio.*
-import io.ktor.utils.io.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
@@ -41,26 +40,33 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private lateinit var upload: Upload
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+
+    // initialization, errors thrown here won't be retried
     val httpMethod: HttpMethod
-    val body: ByteReadChannel
     val retries: Int
     try {
       val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
       upload = Gson().fromJson(paramsJson, Upload::class.java)
       retries = state(context, upload.id).getInt(State.Retries.name, 0)
-      body = File(upload.path).readChannel()
       httpMethod = HttpMethod.parse(upload.method)
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
+      handleCancellation(error)
+
+      eventReporter?.error(upload.id, error)
+      clearState(context, upload.id)
       return@withContext Result.failure()
     }
 
 
-    // wait until its turn to execute
-    semaphore.acquire()
-
-
+    // complex work, errors thrown below here can trigger retry
     try {
+      // this can happen before the semaphore to save time
+      val body = File(upload.path).readChannel()
+
+      // wait until its turn to execute
+      semaphore.acquire()
+
       // Use ktor instead of okhttp. Ktor request is coroutine friendly and
       // will get cancelled when the coroutine gets cancelled
       val response = client.request(upload.url) {
@@ -73,22 +79,11 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         }
       }
 
-      // success
       eventReporter?.success(upload.id, response)
       clearState(context, upload.id)
       return@withContext Result.success()
     } catch (error: Throwable) {
-
-      if (error is CancellationException) {
-        // cancelled by user or when there's a new worker with the same ID
-        if (isStopped) {
-          eventReporter?.cancelled(upload.id)
-          clearState(context, upload.id)
-          return@withContext Result.failure()
-        }
-        // cancelled automatically, probably due to constraints not met
-        else throw error
-      }
+      handleCancellation(error)
 
       // keep retrying
       if (retries < upload.maxRetries) {
@@ -104,6 +99,20 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       // stop waiting
       semaphore.release()
     }
+  }
+
+  private fun handleCancellation(error: Throwable) {
+    // Cancelled by user or new worker with same ID
+    // Worker won't rerun, perform teardown
+    if (isStopped) {
+      eventReporter?.cancelled(upload.id)
+      clearState(context, upload.id)
+      throw error
+    }
+
+    // Auto-cancelled, likely due to unmet constraints
+    // Clearing state not needed, worker will restart
+    if (error is CancellationException) throw error
   }
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
