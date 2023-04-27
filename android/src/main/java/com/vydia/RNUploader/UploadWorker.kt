@@ -3,6 +3,7 @@ package com.vydia.RNUploader
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
@@ -135,13 +136,17 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val channelId = "upload-progress"
     val id = upload.notificationId.hashCode()
     val progress = UploadProgress.total(context)
+
+    val content = RemoteViews(context.packageName, R.layout.notification)
+    content.setTextViewText(R.id.notification_title, "Uploading...")
+    content.setTextViewText(R.id.notification_progress, "$progress%")
+    content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
+
     val notification = NotificationCompat.Builder(context, channelId)
       .setSmallIcon(android.R.drawable.stat_notify_chat)
       .setOngoing(true)
       .setAutoCancel(false)
-      .setContentTitle("Uploading...")
-      .setContentText("$progress%")
-      .setProgress(100, progress, false)
+      .setCustomContentView(content)
       .setContentIntent(openAppIntent(context))
       .build()
 
