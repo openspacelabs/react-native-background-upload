@@ -41,13 +41,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   enum class Input { Params }
 
   private lateinit var upload: Upload
-  private var lastProgressReport = 0L
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
 
     // initialization, errors thrown here won't be retried
     val httpMethod: HttpMethod
     val retries: Int
+    var lastProgressReport = 0L
     try {
       val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
       upload = Gson().fromJson(paramsJson, Upload::class.java)
@@ -90,7 +90,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       }
 
       UploadRetry.clear(context, upload.id)
-      UploadProgress.maybeClear(context)
+      UploadProgress.update(context, upload.id, size)
+      UploadProgress.scheduleClearing(context)
       EventReporter.success(upload.id, response)
       return@withContext Result.success()
     } catch (error: Throwable) {
@@ -105,6 +106,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       // no more retrying
       UploadRetry.clear(context, upload.id)
       UploadProgress.remove(context, upload.id)
+      UploadProgress.scheduleClearing(context)
       EventReporter.error(upload.id, error)
       return@withContext Result.failure()
     } finally {
@@ -119,7 +121,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     if (isStopped) {
       UploadRetry.clear(context, upload.id)
       UploadProgress.remove(context, upload.id)
-      UploadProgress.maybeClear(context)
+      UploadProgress.scheduleClearing(context)
       EventReporter.cancelled(upload.id)
       throw error
     }

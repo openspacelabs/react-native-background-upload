@@ -1,6 +1,10 @@
 package com.vydia.RNUploader
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import androidx.work.WorkManager
+import com.vydia.RNUploader.UploaderModule.Companion.WORKER_TAG
 
 class UploadProgress {
 
@@ -41,12 +45,25 @@ class UploadProgress {
       return (totalBytesUploaded * 100 / totalFileSize).toInt()
     }
 
+    private val handler = Handler(Looper.getMainLooper())
+
+    fun scheduleClearing(context: Context) =
+      // Try clearing in 2 seconds. This is the safest and simplest way.
+      handler.postDelayed({ maybeClear(context) }, 2000)
+
     fun maybeClear(context: Context) {
-      if (total(context) < 100) return
+      val workManager = WorkManager.getInstance(context)
+      val works = workManager.getWorkInfosByTag(WORKER_TAG).get()
+      if (works.any { !it.state.isFinished }) return
+
       val storage = storage(context)
       val editor = storage.edit()
       storage.all.keys.forEach { key -> editor.remove(key) }
-      editor.apply()
+      editor.commit()
+    }
+
+    fun cancelScheduledClearing() {
+      handler.removeCallbacksAndMessages(null)
     }
   }
 }

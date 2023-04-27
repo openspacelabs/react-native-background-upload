@@ -12,7 +12,6 @@ import kotlinx.coroutines.launch
 class UploaderModule(context: ReactApplicationContext) :
   ReactContextBaseJavaModule(context) {
 
-
   companion object {
     const val TAG = "RNFileUploader.UploaderModule"
     const val WORKER_TAG = "RNFileUploader"
@@ -24,6 +23,7 @@ class UploaderModule(context: ReactApplicationContext) :
 
   init {
     reactContext = context
+    UploadProgress.maybeClear(context)
   }
 
 
@@ -66,13 +66,8 @@ class UploaderModule(context: ReactApplicationContext) :
   private fun startUpload(options: ReadableMap): String {
     val upload = Upload.fromOptions(options)
     val data = Gson().toJson(upload)
-    // TODO fix worker not waking up app in background using BroadcastReceiver
-    // TODO fix when notification not allowed
-    // TODO test network handling
-    // TODO workers get cancelled after app update
-    // TODO: resume doesn't work
     // TODO: Invalid Content-Range header", "httpCode": 400,?
-    // TODO cancellation on delete doesn't work
+    // TODO still need GlobalReceiver to wake the app up at completion
 
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
     if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
@@ -88,6 +83,7 @@ class UploaderModule(context: ReactApplicationContext) :
       .beginUniqueWork(upload.id, ExistingWorkPolicy.REPLACE, request)
       .enqueue()
 
+    UploadProgress.cancelScheduledClearing()
     return upload.id
   }
 
