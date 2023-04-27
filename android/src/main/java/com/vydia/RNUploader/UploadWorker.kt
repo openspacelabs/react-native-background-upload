@@ -9,12 +9,10 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.gson.Gson
 import io.ktor.client.*
-import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.http.*
-import io.ktor.util.*
 import io.ktor.util.cio.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +56,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
       handleCancellation(error)
-      broadcast(context, ErrorEvent(upload.id, error))
+      EventReporter.error(upload.id, error)
       return@withContext Result.failure()
     }
 
@@ -85,8 +83,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
           if (now - lastProgressReport >= PROGRESS_INTERVAL) {
             lastProgressReport = now
             UploadProgress.update(context, upload.id, bytesSentTotal)
-            val progress = bytesSentTotal * 100 / size
-            broadcast(context, ProgressEvent(upload.id, progress))
+            EventReporter.progress(upload.id, bytesSentTotal, size)
             setForeground(getForegroundInfo())
           }
         }
@@ -95,14 +92,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       UploadRetry.clear(context, upload.id)
       UploadProgress.update(context, upload.id, size)
       UploadProgress.scheduleClearing(context)
-      broadcast(
-        context, CompletedEvent(
-          upload.id,
-          response.status.value,
-          response.body(),
-          response.headers.toMap()
-        )
-      )
+      EventReporter.success(upload.id, response)
       return@withContext Result.success()
     } catch (error: Throwable) {
       handleCancellation(error)
@@ -117,7 +107,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       UploadRetry.clear(context, upload.id)
       UploadProgress.remove(context, upload.id)
       UploadProgress.scheduleClearing(context)
-      broadcast(context, ErrorEvent(upload.id, error))
+      EventReporter.error(upload.id, error)
       return@withContext Result.failure()
     } finally {
       // stop waiting
@@ -132,7 +122,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       UploadRetry.clear(context, upload.id)
       UploadProgress.remove(context, upload.id)
       UploadProgress.scheduleClearing(context)
-      broadcast(context, CancelledEvent(upload.id))
+      EventReporter.cancelled(upload.id)
       throw error
     }
 

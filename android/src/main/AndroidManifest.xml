@@ -1,13 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.vydia.RNUploader">
 
-    <application>
-        <receiver
-            android:name=".EventsReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.vydia.RNUploader.ACTION_UPLOAD_STATUS" />
-            </intent-filter>
-        </receiver>
-    </application>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 </manifest>
