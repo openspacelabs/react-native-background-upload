@@ -1,8 +1,8 @@
 package com.vydia.RNUploader
 
-import android.app.NotificationManager
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
@@ -38,6 +38,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   enum class State { Retries }
 
   private lateinit var upload: Upload
+  private lateinit var sharedProgress: SharedProgress
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
 
@@ -49,6 +50,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       upload = Gson().fromJson(paramsJson, Upload::class.java)
       retries = state(context, upload.id).getInt(State.Retries.name, 0)
       httpMethod = HttpMethod.parse(upload.method)
+      sharedProgress = SharedProgress(context)
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
       handleCancellation(error)
@@ -75,6 +77,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         setBody(file.readChannel())
         upload.headers.forEach { (key, value) -> headers.append(key, value) }
         onUpload { bytesSentTotal, _ ->
+          setForeground(getForegroundInfo())
           eventReporter?.progress(upload.id, bytesSentTotal, size)
         }
       }
@@ -116,11 +119,19 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val channelId = "upload-progress"
     val id = upload.notificationId.hashCode()
-    val statusBarNotification = manager.activeNotifications.find { it.id == id }
-      ?: throw Throwable("No notification found for ${upload.notificationId}")
-    return ForegroundInfo(id, statusBarNotification.notification)
+    val progress = sharedProgress.total()
+    val notification = NotificationCompat.Builder(context, channelId)
+      .setSmallIcon(android.R.drawable.stat_notify_chat)
+      .setOngoing(true)
+      .setAutoCancel(false)
+      .setContentTitle("Uploading...")
+      .setContentText("?%")
+      .setProgress(100, progress, false)
+      .build()
+
+    return ForegroundInfo(id, notification)
   }
 }
 
