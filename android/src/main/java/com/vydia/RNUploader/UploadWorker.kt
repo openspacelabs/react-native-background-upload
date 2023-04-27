@@ -1,6 +1,8 @@
 package com.vydia.RNUploader
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -129,12 +131,22 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       .setContentTitle("Uploading...")
       .setContentText("?%")
       .setProgress(100, progress, false)
+      .setContentIntent(openAppIntent(context))
       .build()
 
     return ForegroundInfo(id, notification)
   }
 }
 
+private fun openAppIntent(context: Context): PendingIntent? {
+  val packageName = context.packageName
+  val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
+
+  return launchIntent?.let {
+    it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+    PendingIntent.getActivity(context, 0, it, PendingIntent.FLAG_IMMUTABLE)
+  }
+}
 
 private fun state(context: Context, uploadId: String): SharedPreferences {
   // getSharedPreferences just doesn't like "/"
