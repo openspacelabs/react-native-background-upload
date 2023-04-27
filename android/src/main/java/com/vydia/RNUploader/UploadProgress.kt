@@ -19,6 +19,12 @@ class UploadProgress {
         .putLong("$uploadId-uploaded", bytesUploaded)
         .commit()
 
+    fun remove(context: Context, uploadId: String) =
+      storage(context).edit()
+        .remove("$uploadId-uploaded")
+        .remove("$uploadId-size")
+        .commit()
+
     fun total(context: Context): Int {
       val storage = storage(context)
 

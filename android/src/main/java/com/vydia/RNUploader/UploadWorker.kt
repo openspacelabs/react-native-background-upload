@@ -41,7 +41,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   enum class Input { Params }
 
   private lateinit var upload: Upload
-  private lateinit var progress: UploadProgress
   private var lastProgressReport = 0L
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -70,7 +69,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       val size = file.length()
       UploadProgress.start(context, upload.id, size)
 
-
       // wait until its turn to execute
       semaphore.acquire()
 
@@ -91,9 +89,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         }
       }
 
+      UploadRetry.clear(context, upload.id)
       UploadProgress.maybeClear(context)
       EventReporter.success(upload.id, response)
-      UploadRetry.clear(context, upload.id)
       return@withContext Result.success()
     } catch (error: Throwable) {
       handleCancellation(error)
@@ -106,8 +104,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
       // no more retrying
       UploadRetry.clear(context, upload.id)
+      UploadProgress.remove(context, upload.id)
       EventReporter.error(upload.id, error)
-      UploadProgress.maybeClear(context)
       return@withContext Result.failure()
     } finally {
       // stop waiting
@@ -119,8 +117,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // Cancelled by user or new worker with same ID
     // Worker won't rerun, perform teardown
     if (isStopped) {
-      EventReporter.cancelled(upload.id)
       UploadRetry.clear(context, upload.id)
+      UploadProgress.remove(context, upload.id)
+      UploadProgress.maybeClear(context)
+      EventReporter.cancelled(upload.id)
       throw error
     }
 
