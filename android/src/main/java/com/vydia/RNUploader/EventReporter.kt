@@ -36,7 +36,7 @@ class EventReporter(private val reactContext: ReactApplicationContext) {
         putString("responseBody", response.bodyAsText())
         putMap("responseHeaders", Arguments.createMap().apply {
           response.headers.forEach { key, values ->
-            values.forEach { value -> putString(key, value) }
+            putString(key, values.joinToString(", "))
           }
         })
       })

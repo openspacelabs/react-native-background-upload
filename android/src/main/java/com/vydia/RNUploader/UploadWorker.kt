@@ -62,7 +62,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // complex work, errors thrown below here can trigger retry
     try {
       // this can happen before the semaphore to save time
-      val body = File(upload.path).readChannel()
+      val file = File(upload.path)
+      val size = file.length()
 
       // wait until its turn to execute
       semaphore.acquire()
@@ -71,11 +72,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       // will get cancelled when the coroutine gets cancelled
       val response = client.request(upload.url) {
         method = httpMethod
-        setBody(body)
+        setBody(file.readChannel())
         upload.headers.forEach { (key, value) -> headers.append(key, value) }
-        onUpload { bytesSentTotal, contentLength ->
-          // progress
-          eventReporter?.progress(upload.id, bytesSentTotal, contentLength)
+        onUpload { bytesSentTotal, _ ->
+          eventReporter?.progress(upload.id, bytesSentTotal, size)
         }
       }
 
