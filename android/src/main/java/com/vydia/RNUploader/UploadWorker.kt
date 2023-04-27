@@ -137,13 +137,14 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val id = upload.notificationId.hashCode()
     val progress = UploadProgress.total(context)
 
+    // TODO pass params to notification
     val content = RemoteViews(context.packageName, R.layout.notification)
     content.setTextViewText(R.id.notification_title, "Uploading...")
     content.setTextViewText(R.id.notification_progress, "$progress%")
+    content.setImageViewResource(R.id.notification_icon, android.R.drawable.stat_notify_chat)
     content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
 
     val notification = NotificationCompat.Builder(context, channelId)
-      .setSmallIcon(android.R.drawable.stat_notify_chat)
       .setOngoing(true)
       .setAutoCancel(false)
       .setCustomContentView(content)
