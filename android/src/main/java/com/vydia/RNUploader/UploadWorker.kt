@@ -20,12 +20,11 @@ import io.ktor.http.*
 import io.ktor.util.cio.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-// All workers will start `doWork` immediately but only 1 runs at a time.
+// All workers will start `doWork` immediately but only 1 request is active at a time.
 const val MAX_CONCURRENCY = 1
 
 // Throttling interval of progress reports
@@ -36,10 +35,12 @@ const val PROGRESS_INTERVAL = 500
 // Worst case is the time maxes out and the upload gets restarted.
 val REQUEST_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(24L)
 
-private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val client = HttpClient(CIO) {
   install(HttpTimeout) {
     requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
+  }
+  engine {
+    maxConnectionsCount = MAX_CONCURRENCY
   }
 }
 
@@ -75,15 +76,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // complex work, errors thrown below here can trigger retry
     try {
-      // these need to be before the semaphore
-      // to update the shared progress asap
       val file = File(upload.path)
       val size = file.length()
       val body = file.readChannel()
       handleProgress(0, size)
-
-      // wait until its turn to execute
-      semaphore.acquire()
 
       // Use ktor instead of okhttp. Ktor request is coroutine friendly and
       // will get cancelled when the coroutine gets cancelled
@@ -104,9 +100,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       return@withContext handleSuccess(response, size)
     } catch (error: Throwable) {
       return@withContext handleError(error, retry = true, retries)
-    } finally {
-      // stop waiting
-      semaphore.release()
     }
   }
 
