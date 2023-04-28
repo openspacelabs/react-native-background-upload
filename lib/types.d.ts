@@ -27,6 +27,8 @@ export declare type UploadOptions = {
 } & (RawUploadOptions | MultipartUploadOptions);
 declare type AndroidOnlyUploadOptions = {
     notificationId: string;
+    notificationTitle: string;
+    notificationChanel: string;
     maxRetries?: number;
 };
 declare type IOSOnlyUploadOptions = {

@@ -43,8 +43,10 @@ class EventReporter {
         putDouble("progress", (bytesSentTotal * 100 / contentLength).toDouble()) //0-100
       })
 
+    fun notification() = sendEvent("notification")
+
     /** Sends an event to the JS module */
-    private fun sendEvent(eventName: String, params: WritableMap?) {
+    private fun sendEvent(eventName: String, params: WritableMap = Arguments.createMap()) {
       val reactContext = UploaderModule.reactContext ?: return
 
       // Right after JS reloads, react instance might not be available yet

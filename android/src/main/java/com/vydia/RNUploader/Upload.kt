@@ -10,8 +10,10 @@ data class Upload(
   val method: String,
   val maxRetries: Int,
   val wifiOnly: Boolean,
+  val headers: Map<String, String>,
   val notificationId: String,
-  val headers: Map<String, String>
+  val notificationTitle: String,
+  val notificationChannel: String,
 ) {
   companion object {
     fun fromOptions(options: ReadableMap) = Upload(
@@ -21,8 +23,6 @@ data class Upload(
       method = options.getString("method") ?: "POST",
       maxRetries = if (options.hasKey("maxRetries")) options.getInt("maxRetries") else 5,
       wifiOnly = if (options.hasKey("wifiOnly")) options.getBoolean("wifiOnly") else false,
-      notificationId = options.getString("notificationId")
-        ?: throw InvalidUploadOptionException("Missing 'notificationId'"),
       headers = options.getMap("headers").let { headers ->
         if (headers == null) return@let mapOf()
         val map = mutableMapOf<String, String>()
@@ -30,7 +30,13 @@ data class Upload(
           map[entry.key] = entry.value.toString()
         }
         return@let map
-      }
+      },
+      notificationId = options.getString("notificationId")
+        ?: throw InvalidUploadOptionException("Missing 'notificationId'"),
+      notificationTitle = options.getString("notificationTitle")
+        ?: throw InvalidUploadOptionException("Missing 'notificationTitle'"),
+      notificationChannel = options.getString("notificationChannel")
+        ?: throw InvalidUploadOptionException("Missing 'notificationChannel'"),
     )
 
   }

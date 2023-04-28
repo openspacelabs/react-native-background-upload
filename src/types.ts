@@ -35,6 +35,8 @@ export type UploadOptions = {
 
 type AndroidOnlyUploadOptions = {
   notificationId: string;
+  notificationTitle: string;
+  notificationChanel: string;
   maxRetries?: number;
 };
 

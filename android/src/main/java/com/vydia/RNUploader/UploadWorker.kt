@@ -133,18 +133,18 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val channelId = "upload-progress"
     val id = upload.notificationId.hashCode()
+    val title = upload.notificationTitle
+    val channel = upload.notificationChannel
     val progress = UploadProgress.total(context)
 
-    // TODO pass params to notification
     val content = RemoteViews(context.packageName, R.layout.notification)
-    content.setTextViewText(R.id.notification_title, "Uploading...")
+    content.setTextViewText(R.id.notification_title, title)
     content.setTextViewText(R.id.notification_progress, "$progress%")
-    content.setImageViewResource(R.id.notification_icon, android.R.drawable.stat_notify_chat)
     content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
 
-    val notification = NotificationCompat.Builder(context, channelId)
+    val notification = NotificationCompat.Builder(context, channel)
+      .setSmallIcon(android.R.drawable.stat_sys_upload)
       .setOngoing(true)
       .setAutoCancel(false)
       .setCustomContentView(content)

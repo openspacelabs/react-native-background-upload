@@ -1,37 +1,4 @@
-import { AddListener, UploadId, UploadOptions } from './types';
-export declare const startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<UploadId>;
-/**
- * Cancels active upload by string ID of the upload.
- *
- * Upload ID is returned in a promise after a call to startUpload method,
- * use it to cancel started upload.
- * Event "cancelled" will be fired when upload is cancelled.
- * Returns a promise with boolean true if operation was successfully completed.
- * Will reject if there was an internal error or ID format is invalid.
- */
-export declare const cancelUpload: (cancelUploadId: string) => Promise<boolean>;
-/**
- * Listens for the given event on the given upload ID (resolved from startUpload).
- * If you don't supply a value for uploadId, the event will fire for all uploads.
- * Events (id is always the upload ID):
- * progress - { id: string, progress: int (0-100) }
- * error - { id: string, error: string }
- * cancelled - { id: string, error: string }
- * completed - { id: string }
- */
-export declare const addListener: AddListener;
-/**
- * Splits a parent file into {numChunks} chunks and place them into the specified directory.
- * Each chunk file will be named by its corresponding index (0, 1, 2,...).
- */
-export declare const chunkFile: (parentFilePath: string, chunks: {
-    /** Byte position of the chunk */
-    position: number;
-    /** Byte length of the chunk */
-    size: number;
-    /** Where the chunk will be exported to */
-    path: string;
-}[]) => Promise<void>;
+import { AddListener, UploadOptions } from './types';
 declare const _default: {
     startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<string>;
     cancelUpload: (cancelUploadId: string) => Promise<boolean>;
@@ -56,6 +23,13 @@ declare const _default: {
             bytesSent?: number;
             totalBytes?: number;
         }>;
+    };
+    android: {
+        /**
+         * When the upload progress notification is pressed, it will open the app and fire this event
+         * @param listener
+         */
+        addNotificationListener: (listener: () => void) => import("react-native").EmitterSubscription;
     };
 };
 export default _default;

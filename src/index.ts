@@ -5,7 +5,7 @@ import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
 import { AddListener, UploadId, UploadOptions } from 'types';
 
 const NativeModule =
-  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader; // iOS is VydiaRNFileUploader and Android is RNFileUploader
+  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader;
 const eventPrefix = 'RNFileUploader-';
 const fileURIPrefix = 'file://';
 
@@ -17,24 +17,23 @@ if (NativeModules.VydiaRNFileUploader) {
   NativeModule.addListener(eventPrefix + 'completed');
 }
 
-/*
-Starts uploading a file to an HTTP endpoint.
-Options object:
-{
-  url: string.  url to post to.
-  path: string.  path to the file on the device
-  headers: hash of name/value header pairs
-  method: HTTP method to use.  Default is "POST"
-  notification: hash for customizing tray notifiaction
-    enabled: boolean to enable/disabled notifications, true by default.
-}
-
-Returns a promise with the string ID of the upload.  Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
-
-It is recommended to add listeners in the .then of this promise.
-
+/**
+ * Starts uploading a file to an HTTP endpoint.
+ * Options object:
+  ```
+  {
+    url: string.  url to post to.
+    path: string.  path to the file on the device
+    headers: hash of name/value header pairs
+    method: HTTP method to use.  Default is "POST"
+    notification: hash for customizing tray notifiaction
+      enabled: boolean to enable/disabled notifications, true by default.
+  }
+  ```
+ * Returns a promise with the string ID of the upload.  Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
+ * It is recommended to add listeners in the .then of this promise.
 */
-export const startUpload = ({
+const startUpload = ({
   path,
   android,
   ios,
@@ -60,12 +59,8 @@ export const startUpload = ({
  * Returns a promise with boolean true if operation was successfully completed.
  * Will reject if there was an internal error or ID format is invalid.
  */
-export const cancelUpload = (cancelUploadId: string): Promise<boolean> => {
-  if (typeof cancelUploadId !== 'string') {
-    return Promise.reject(new Error('Upload ID must be a string'));
-  }
-  return NativeModule.cancelUpload(cancelUploadId);
-};
+const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
+  NativeModule.cancelUpload(cancelUploadId);
 
 /**
  * Listens for the given event on the given upload ID (resolved from startUpload).
@@ -76,19 +71,18 @@ export const cancelUpload = (cancelUploadId: string): Promise<boolean> => {
  * cancelled - { id: string, error: string }
  * completed - { id: string }
  */
-export const addListener: AddListener = (eventType, uploadId, listener) => {
-  return DeviceEventEmitter.addListener(eventPrefix + eventType, (data) => {
+const addListener: AddListener = (eventType, uploadId, listener) =>
+  DeviceEventEmitter.addListener(eventPrefix + eventType, (data) => {
     if (!uploadId || !data || !data.id || data.id === uploadId) {
       listener(data);
     }
   });
-};
 
 /**
  * Splits a parent file into {numChunks} chunks and place them into the specified directory.
  * Each chunk file will be named by its corresponding index (0, 1, 2,...).
  */
-export const chunkFile = async (
+const chunkFile = async (
   parentFilePath: string,
   chunks: {
     /** Byte position of the chunk */
@@ -118,10 +112,20 @@ const ios = {
   }> => (await NativeModule.getUploadStatus(jobId)) || { state: undefined },
 };
 
+const android = {
+  /**
+   * When the upload progress notification is pressed, it will open the app and fire this event
+   * @param listener
+   */
+  addNotificationListener: (listener: () => void) =>
+    DeviceEventEmitter.addListener(eventPrefix + 'notification', listener),
+};
+
 export default {
   startUpload,
   cancelUpload,
   addListener,
   chunkFile,
   ios,
+  android,
 };
