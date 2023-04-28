@@ -1,8 +1,10 @@
 package com.vydia.RNUploader
 
+import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -143,26 +145,26 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     content.setTextViewText(R.id.notification_progress, "$progress%")
     content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
 
-    val notification = NotificationCompat.Builder(context, channel)
-      .setSmallIcon(android.R.drawable.stat_sys_upload)
-      .setOngoing(true)
-      .setAutoCancel(false)
-      .setCustomContentView(content)
-      .setContentIntent(openAppIntent(context))
-      .build()
+    val notification = NotificationCompat.Builder(context, channel).run {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+        foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
+
+      setSmallIcon(android.R.drawable.stat_sys_upload)
+      setOngoing(true)
+      setAutoCancel(false)
+      setCustomContentView(content)
+      setContentIntent(openAppIntent(context))
+      build()
+    }
 
     return ForegroundInfo(id, notification)
   }
 }
 
 private fun openAppIntent(context: Context): PendingIntent? {
-  val packageName = context.packageName
-  val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
-
-  return launchIntent?.let {
-    it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-    PendingIntent.getActivity(context, 0, it, PendingIntent.FLAG_IMMUTABLE)
-  }
+  val intent = Intent(context, NotificationReceiver::class.java)
+  val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+  return PendingIntent.getBroadcast(context, "RNFileUpload-notification".hashCode(), intent, flags)
 }
 
 

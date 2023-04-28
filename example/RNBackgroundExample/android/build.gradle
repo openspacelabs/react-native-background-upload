@@ -4,7 +4,7 @@ buildscript {
     ext {
         buildToolsVersion = "29.0.2"
         minSdkVersion = 24
-        compileSdkVersion = 29
+        compileSdkVersion = 31
         targetSdkVersion = 29
         ext.kotlinVersion = '1.8.0' // Your app's version
         ext.detoxKotlinVersion = ext.kotlinVersion // Detox' version: should be 1.1.0 or higher!
