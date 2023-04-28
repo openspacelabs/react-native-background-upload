@@ -3,6 +3,9 @@ package com.vydia.RNUploader
 import com.facebook.react.bridge.ReadableMap
 import java.util.*
 
+// Data model of a single upload
+// Can be created from RN's ReadableMap
+// Can be used for JSON deserialization
 data class Upload(
   val id: String,
   val url: String,

@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+// Sends events to React Native
 class EventReporter {
   companion object {
     private const val TAG = "UploadReceiver"

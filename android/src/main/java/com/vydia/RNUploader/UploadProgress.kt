@@ -6,21 +6,17 @@ import android.os.Looper
 import androidx.work.WorkManager
 import com.vydia.RNUploader.UploaderModule.Companion.WORKER_TAG
 
+// Stores and aggregates total progress from all workers
 class UploadProgress {
 
   companion object {
     private fun storage(context: Context) =
       context.getSharedPreferences("RNFileUpload-Progress", Context.MODE_PRIVATE)
 
-    fun start(context: Context, uploadId: String, fileSize: Long) =
-      storage(context).edit()
-        .putLong("$uploadId-uploaded", 0)
-        .putLong("$uploadId-size", fileSize)
-        .commit()
-
-    fun update(context: Context, uploadId: String, bytesUploaded: Long) =
+    fun set(context: Context, uploadId: String, bytesUploaded: Long, fileSize: Long) =
       storage(context).edit()
         .putLong("$uploadId-uploaded", bytesUploaded)
+        .putLong("$uploadId-size", fileSize)
         .commit()
 
     fun remove(context: Context, uploadId: String) =
