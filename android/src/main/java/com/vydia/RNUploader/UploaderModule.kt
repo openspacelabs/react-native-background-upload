@@ -66,9 +66,6 @@ class UploaderModule(context: ReactApplicationContext) :
   private fun startUpload(options: ReadableMap): String {
     val upload = Upload.fromOptions(options)
     val data = Gson().toJson(upload)
-    // TODO: Invalid Content-Range header", "httpCode": 400,?
-    // TODO still need GlobalReceiver to wake the app up at completion
-
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
     if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
 
