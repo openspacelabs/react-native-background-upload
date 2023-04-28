@@ -1,17 +1,12 @@
-# react-native-background-upload [![npm version](https://badge.fury.io/js/react-native-background-upload.svg)](https://badge.fury.io/js/react-native-background-upload) ![GitHub Actions status](https://github.com/Vydia/react-native-background-upload/workflows/Test%20iOS%20Example%20App/badge.svg) ![GitHub Actions status](https://github.com/Vydia/react-native-background-upload/workflows/Test%20Android%20Example%20App/badge.svg) [![semantic-release](https://img.shields.io/badge/%20%20%F0%9F%93%A6%F0%9F%9A%80-semantic--release-e10079.svg)](https://github.com/semantic-release/semantic-release)
+# react-native-background-upload
 
-The only React Native http post file uploader with android and iOS background support. If you are uploading large files like videos, use this so your users can background your app during a long upload.
+OpenSpace home-grown background uploader for React Native. on iOS it uses URLSession, on Android it uses CoroutineWorker and Ktor.
 
-NOTE: Use major version 4 with RN 47.0 and greater. If you have RN less than 47, use 3.0. To view all available versions:
-`npm show react-native-background-upload versions`
+Documentation has been modified to reflect the changes made to this library.
 
 # Installation
 
 ## 1. Install package
-
-`npm install --save react-native-background-upload`
-
-or
 
 `yarn add react-native-background-upload`
 
@@ -24,63 +19,6 @@ Note: if you are installing on React Native < 0.47, use `react-native-background
 ##### iOS
 
 `cd ./ios && pod install && cd ../`
-
-##### Android
-
-###### ProGuard
-
-Add this to your ProGuard configuration:
-
-`-keep class net.gotev.uploadservice.** { *; }`
-
-### Automatic Native Library Linking (React Native < 0.60)
-
-`react-native link react-native-background-upload`
-
-### Or, Manually Link It
-
-#### iOS
-
-1. In the XCode's "Project navigator", right click on your project's Libraries folder ➜ `Add Files to <...>`
-2. Go to `node_modules` ➜ `react-native-background-upload` ➜ `ios` ➜ select `VydiaRNFileUploader.xcodeproj`
-3. Add `VydiaRNFileUploader.a` to `Build Phases -> Link Binary With Libraries`
-
-#### Android
-
-1. Add the following lines to `android/settings.gradle`:
-
-   ```gradle
-   include ':react-native-background-upload'
-   project(':react-native-background-upload').projectDir = new File(settingsDir, '../node_modules/react-native-background-upload/android')
-   ```
-
-2. Add the compile and resolutionStrategy line to the dependencies in `android/app/build.gradle`:
-
-   ```gradle
-   configurations.all { resolutionStrategy.force 'com.squareup.okhttp3:okhttp:3.4.1' } // required by react-native-background-upload until React Native supports okhttp >= okhttp 3.5
-
-   dependencies {
-       compile project(':react-native-background-upload')
-   }
-   ```
-
-3. Add the import and link the package in `MainApplication.java`:
-
-   ```java
-   import com.vydia.RNUploader.UploaderReactPackage;  <-- add this import
-
-   public class MainApplication extends Application implements ReactApplication {
-       @Override
-       protected List<ReactPackage> getPackages() {
-           return Arrays.<ReactPackage>asList(
-               new MainReactPackage(),
-               new UploaderReactPackage() // <-- add this line
-           );
-       }
-   }
-   ```
-
-4. Ensure Android SDK versions. Open your app's `android/app/build.gradle` file. Ensure `compileSdkVersion` and `targetSdkVersion` are 25. Otherwise you'll get compilation errors.
 
 ## 3. Expo
 
@@ -96,41 +34,43 @@ const options = {
   path: 'file://path/to/file/on/device',
   method: 'POST',
   type: 'raw',
-  maxRetries: 2, // set retry count (Android only). Default 2
   headers: {
     'content-type': 'application/octet-stream', // Customize content-type
     'my-custom-header': 's3headervalueorwhateveryouneed',
   },
-  // Below are options only supported on Android
-  notification: {
-    enabled: true,
+  android: {
+    notificationChannel: 'my-channel-id',
+    notificationId: 'my-progress-notification',
+    notificationTitle: 'Uploading...',
   },
   useUtf8Charset: true,
 };
 
+Upload.addListener('progress', uploadId, (data) => {
+  console.log(`Progress: ${data.progress}%`);
+});
+Upload.addListener('error', uploadId, (data) => {
+  console.log(`Error: ${data.error}%`);
+});
+Upload.addListener('cancelled', uploadId, (data) => {
+  console.log(`Cancelled!`);
+});
+Upload.addListener('completed', uploadId, (data) => {
+  // data includes responseCode: number and responseBody: Object
+  console.log('Completed!');
+});
+Upload.android.addNotificationListener(() => {
+  console.log('Progress notification pressed!');
+});
+
 Upload.startUpload(options)
-  .then((uploadId) => {
-    console.log('Upload started');
-    Upload.addListener('progress', uploadId, (data) => {
-      console.log(`Progress: ${data.progress}%`);
-    });
-    Upload.addListener('error', uploadId, (data) => {
-      console.log(`Error: ${data.error}%`);
-    });
-    Upload.addListener('cancelled', uploadId, (data) => {
-      console.log(`Cancelled!`);
-    });
-    Upload.addListener('completed', uploadId, (data) => {
-      // data includes responseCode: number and responseBody: Object
-      console.log('Completed!');
-    });
-  })
-  .catch((err) => {
-    console.log('Upload error!', err);
-  });
+  .then((uploadId) => console.log('Upload started', uploadId))
+  .catch((err) => console.log('Upload error!', err));
 ```
 
 ## Multipart Uploads
+
+**🚧 COMING SOON**
 
 Just set the `type` option to `multipart` and set the `field` option. Example:
 
@@ -178,20 +118,13 @@ _Note: You must provide valid URIs. react-native-background-upload does not esca
 
 ### Notification Object (Android Only)
 
-| Name                  | Type    | Required | Description                                                                                                                                                                                        | Example                                                          |
-| --------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `enabled`             | boolean | Optional | Enable or diasable notifications. Works only on Android version < 8.0 Oreo. On Android versions >= 8.0 Oreo is required by Google's policy to display a notification when a background service run | `{ enabled: true }`                                              |
-| `autoClear`           | boolean | Optional | Autoclear notification on complete                                                                                                                                                                 | `{ autoclear: true }`                                            |
-| `notificationChannel` | string  | Optional | Sets android notificaion channel                                                                                                                                                                   | `{ notificationChannel: "My-Upload-Service" }`                   |
-| `enableRingTone`      | boolean | Optional | Sets whether or not to enable the notification sound when the upload gets completed with success or error                                                                                          | `{ enableRingTone: true }`                                       |
-| `onProgressTitle`     | string  | Optional | Sets notification progress title                                                                                                                                                                   | `{ onProgressTitle: "Uploading" }`                               |
-| `onProgressMessage`   | string  | Optional | Sets notification progress message                                                                                                                                                                 | `{ onProgressMessage: "Uploading new video" }`                   |
-| `onCompleteTitle`     | string  | Optional | Sets notification complete title                                                                                                                                                                   | `{ onCompleteTitle: "Upload finished" }`                         |
-| `onCompleteMessage`   | string  | Optional | Sets notification complete message                                                                                                                                                                 | `{ onCompleteMessage: "Your video has been uploaded" }`          |
-| `onErrorTitle`        | string  | Optional | Sets notification error title                                                                                                                                                                      | `{ onErrorTitle: "Upload error" }`                               |
-| `onErrorMessage`      | string  | Optional | Sets notification error message                                                                                                                                                                    | `{ onErrorMessage: "An error occured while uploading a video" }` |
-| `onCancelledTitle`    | string  | Optional | Sets notification cancelled title                                                                                                                                                                  | `{ onCancelledTitle: "Upload cancelled" }`                       |
-| `onCancelledMessage`  | string  | Optional | Sets notification cancelled message                                                                                                                                                                | `{ onCancelledMessage: "Video upload was cancelled" }`           |
+Android forces us to display a progress notification to show overall upload progress.
+
+| Name                  | Type   | Required | Description                       | Example                     |
+| --------------------- | ------ | -------- | --------------------------------- | --------------------------- |
+| `notificationChannel` | string | Optional | Sets android notification channel | `background-upload-channel` |
+| `notificationId`      | string | Optional | A custom ID for the notification  | `upload-progress`           |
+| `notificationTitle`   | string | Optional | Sets a title for the notification | `Uploading...`              |
 
 ### cancelUpload(uploadId)
 
@@ -212,6 +145,11 @@ Adds an event listener, possibly confined to a single upload.
 `listener` Function to call when the event occurs.
 
 Returns an [EventSubscription](https://github.com/facebook/react-native/blob/master/Libraries/vendor/emitter/EmitterSubscription.js). To remove the listener, call `remove()` on the `EventSubscription`.
+
+### android.addNotificationListener(listener)
+
+When the upload progress notification is pressed, it will open the app and fire this event.
+There's no event data for this.
 
 ## Events
 
@@ -252,44 +190,7 @@ Event Data
 | ---- | ------ | -------- | --------------------- |
 | `id` | string | Required | The ID of the upload. |
 
-# Customizing Android Build Properties
-
-You may want to customize the `compileSdk, buildToolsVersion, and targetSdkVersion` versions used by this package. For that, add this to `android/build.gradle`:
-
-```
-ext {
-    targetSdkVersion = 23
-    compileSdkVersion = 23
-    buildToolsVersion = '23.0.2'
-}
-```
-
-Add it above `allProjects` and you're good. Your `android/build.gradle` might then resemble:
-
-```
-buildscript {
-    repositories {
-        jcenter()
-    }
-}
-
-ext {
-    targetSdkVersion = 27
-    compileSdkVersion = 27
-    buildToolsVersion = '23.0.2'
-}
-
-allprojects {
-
-```
-
 # FAQs
-
-Is there an example/sandbox app to test out this package?
-
-> Yes, there is a simple react native app that comes with an [express](https://github.com/expressjs/express) server where you can see react-native-background-upload in action and try things out in an isolated local environment.
-
-[RNBackgroundExample](https://github.com/Vydia/react-native-background-upload/blob/master/example/RNBackgroundExample)
 
 Does it support iOS camera roll assets?
 
@@ -309,48 +210,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 # Common Issues
 
-## BREAKING CHANGE IN 3.0
-
-This is for 3.0 only. This does NOT apply to 4.0, as recent React Native versions have upgraded the `okhttp` dependencies. Anyway...
-
-In 3.0, you need to add
-
-```gradle
-    configurations.all { resolutionStrategy.force 'com.squareup.okhttp3:okhttp:3.4.1' }
-```
-
-to your app's app's `android/app/build.gradle` file.
-
-Just add it above (not within) `dependencies` and you'll be fine.
-
-## BREAKING CHANGE IN 2.0
-
-Two big things happened in version 2.0. First, the Android package name had to be changed, as it conflicted with our own internal app. My bad. Second, we updated the android upload service dependency to the latest, but that requires the app have a compileSdkVersion and targetSdkVersion or 25.
-
-To upgrade:
-In `MainApplication.java`:
-
-Change
-
-    ```java
-    import com.vydia.UploaderReactPackage;
-    ```
-
-to
-
-    ```java
-    import com.vydia.RNUploader.UploaderReactPackage;
-    ```
-
-Then open your app's `android/app/build.gradle` file.
-Ensure `compileSdkVersion` and `targetSdkVersion` are 25.
-
-Done!
-
 ## Gratitude
 
-Thanks to:
-
-- [android-upload-service](https://github.com/gotev/android-upload-service) It made Android dead simple to support.
-
-- [MIME type from path on iOS](http://stackoverflow.com/questions/2439020/wheres-the-iphone-mime-type-database) Thanks for the answer!
+Many thanks to the [Original Library](https://github.com/Vydia/react-native-background-upload) for the boilerplate and inspiration

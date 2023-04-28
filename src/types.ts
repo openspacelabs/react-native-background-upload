@@ -29,14 +29,17 @@ export type UploadOptions = {
   };
   // Whether the upload should wait for wifi before starting
   wifiOnly?: boolean;
-  android?: AndroidOnlyUploadOptions;
+  android: AndroidOnlyUploadOptions;
   ios?: IOSOnlyUploadOptions;
-} & (RawUploadOptions | MultipartUploadOptions);
+} & RawUploadOptions;
 
 type AndroidOnlyUploadOptions = {
   notificationId: string;
   notificationTitle: string;
   notificationChanel: string;
+  // Does not retry based on http code.
+  // Only retry IO and other unknown issues.
+  // Network failure does not count towards retries
   maxRetries?: number;
 };
 
@@ -52,13 +55,14 @@ type RawUploadOptions = {
   type: 'raw';
 };
 
-type MultipartUploadOptions = {
-  type: 'multipart';
-  field: string;
-  parameters?: {
-    [index: string]: string;
-  };
-};
+// TODO support this to replace netq
+// type MultipartUploadOptions = {
+//   type: 'multipart';
+//   field: string;
+//   parameters?: {
+//     [index: string]: string;
+//   };
+// };
 
 export interface AddListener {
   (

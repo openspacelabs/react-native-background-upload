@@ -22,9 +22,9 @@ export declare type UploadOptions = {
         [index: string]: string;
     };
     wifiOnly?: boolean;
-    android?: AndroidOnlyUploadOptions;
+    android: AndroidOnlyUploadOptions;
     ios?: IOSOnlyUploadOptions;
-} & (RawUploadOptions | MultipartUploadOptions);
+} & RawUploadOptions;
 declare type AndroidOnlyUploadOptions = {
     notificationId: string;
     notificationTitle: string;
@@ -40,13 +40,6 @@ declare type IOSOnlyUploadOptions = {
 };
 declare type RawUploadOptions = {
     type: 'raw';
-};
-declare type MultipartUploadOptions = {
-    type: 'multipart';
-    field: string;
-    parameters?: {
-        [index: string]: string;
-    };
 };
 export interface AddListener {
     (event: 'progress', uploadId: UploadId | null, callback: (data: ProgressData) => void): EventSubscription;
