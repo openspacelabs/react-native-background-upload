@@ -43,11 +43,13 @@ class UploadProgress {
 
     private val handler = Handler(Looper.getMainLooper())
 
+    // Attempt to clear in 2 seconds. This straightforward approach
+    // enables the final worker to reset the overall progress.
+    // Clearing progress ensures the notification starts at 0% next time.
     fun scheduleClearing(context: Context) =
-      // Try clearing in 2 seconds. This is the safest and simplest way.
-      handler.postDelayed({ maybeClear(context) }, 2000)
+      handler.postDelayed({ clearIfNeeded(context) }, 2000)
 
-    fun maybeClear(context: Context) {
+    fun clearIfNeeded(context: Context) {
       val workManager = WorkManager.getInstance(context)
       val works = workManager.getWorkInfosByTag(WORKER_TAG).get()
       if (works.any { !it.state.isFinished }) return
@@ -56,10 +58,6 @@ class UploadProgress {
       val editor = storage.edit()
       storage.all.keys.forEach { key -> editor.remove(key) }
       editor.commit()
-    }
-
-    fun cancelScheduledClearing() {
-      handler.removeCallbacksAndMessages(null)
     }
   }
 }

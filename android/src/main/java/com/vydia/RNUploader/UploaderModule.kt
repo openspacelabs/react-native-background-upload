@@ -23,7 +23,9 @@ class UploaderModule(context: ReactApplicationContext) :
 
   init {
     reactContext = context
-    UploadProgress.maybeClear(context)
+    // workers may be killed abruptly for whatever reasons,
+    // so they might not have had a chance to clear the progress data.
+    UploadProgress.clearIfNeeded(context)
   }
 
 
@@ -80,7 +82,6 @@ class UploaderModule(context: ReactApplicationContext) :
       .beginUniqueWork(upload.id, ExistingWorkPolicy.REPLACE, request)
       .enqueue()
 
-    UploadProgress.cancelScheduledClearing()
     return upload.id
   }
 
