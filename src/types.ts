@@ -36,7 +36,7 @@ export type UploadOptions = {
 type AndroidOnlyUploadOptions = {
   notificationId: string;
   notificationTitle: string;
-  notificationChanel: string;
+  notificationChannel: string;
   // Does not retry based on http code.
   // Only retry IO and other unknown issues.
   // Network failure does not count towards retries
