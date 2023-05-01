@@ -20,6 +20,7 @@ import io.ktor.http.*
 import io.ktor.util.cio.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -35,12 +36,12 @@ const val PROGRESS_INTERVAL = 500
 // Worst case is the time maxes out and the upload gets restarted.
 val REQUEST_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(24L)
 
+// Control max concurrent requests using semaphore to instead of using
+// `maxConnectionsCount` in HttpClient as the latter introduces a delay between requests
+val semaphore = Semaphore(MAX_CONCURRENCY)
 private val client = HttpClient(CIO) {
   install(HttpTimeout) {
     requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
-  }
-  engine {
-    maxConnectionsCount = MAX_CONCURRENCY
   }
 }
 
@@ -62,6 +63,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val httpMethod: HttpMethod
     val retries: Int
     var lastProgressReport = 0L
+    var semaphoreAcquired = false
     try {
       httpMethod = HttpMethod.parse(upload.method)
       retries = UploadRetry.get(context, upload.id)
@@ -79,7 +81,12 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       val file = File(upload.path)
       val size = file.length()
       val body = file.readChannel()
+      // register the progress of this worker asap so the notification
+      // displays the correct total progress
       handleProgress(0, size)
+
+      semaphore.acquire()
+      semaphoreAcquired = true
 
       // Use ktor instead of okhttp. Ktor request is coroutine friendly and
       // will get cancelled when the coroutine gets cancelled
@@ -100,6 +107,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       return@withContext handleSuccess(response, size)
     } catch (error: Throwable) {
       return@withContext handleError(error, retry = true, retries)
+    } finally {
+      if (semaphoreAcquired) semaphore.release()
     }
   }
 
@@ -163,8 +172,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
 
     val notification = NotificationCompat.Builder(context, channel).run {
-      // Starting Android 12, the notification shows up, confusingly, with a delay of 10s,
-      // This fixes that
+      // Starting Android 12, the notification shows up with a confusing delay of 10s.
+      // This fixes that delay.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
         foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
 
