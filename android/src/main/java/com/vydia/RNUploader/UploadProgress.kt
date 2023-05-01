@@ -25,7 +25,7 @@ class UploadProgress {
         .remove("$uploadId-size")
         .commit()
 
-    fun total(context: Context): Int {
+    fun total(context: Context): Double {
       val storage = storage(context)
 
       val totalBytesUploaded = storage.all.keys
@@ -36,9 +36,8 @@ class UploadProgress {
         .filter { it.endsWith("-size") }
         .sumOf { storage.getLong(it, 0L) }
 
-
-      if (totalFileSize == 0L) return 0
-      return (totalBytesUploaded * 100 / totalFileSize).toInt()
+      if (totalFileSize == 0L) return 0.0
+      return (totalBytesUploaded.toDouble() * 100 / totalFileSize)
     }
 
     private val handler = Handler(Looper.getMainLooper())

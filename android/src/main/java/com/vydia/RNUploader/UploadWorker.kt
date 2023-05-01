@@ -81,8 +81,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       val file = File(upload.path)
       val size = file.length()
       val body = file.readChannel()
-      // register the progress of this worker asap so the notification
-      // displays the correct total progress
       handleProgress(0, size)
 
       semaphore.acquire()
@@ -162,14 +160,15 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val title = upload.notificationTitle
     val channel = upload.notificationChannel
     val progress = UploadProgress.total(context)
+    val progress2Decimals = "%.2f".format(progress)
 
     // Custom layout for progress notification.
     // The default hides the % text. This one shows it on the right,
     // like most examples in various docs.
     val content = RemoteViews(context.packageName, R.layout.notification)
     content.setTextViewText(R.id.notification_title, title)
-    content.setTextViewText(R.id.notification_progress, "$progress%")
-    content.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
+    content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
+    content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
 
     val notification = NotificationCompat.Builder(context, channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
