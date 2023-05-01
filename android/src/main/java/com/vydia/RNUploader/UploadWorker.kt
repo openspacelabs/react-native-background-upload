@@ -67,9 +67,12 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     try {
       httpMethod = HttpMethod.parse(upload.method)
       retries = UploadRetry.get(context, upload.id)
-      // Recommended for long-running workers.
+      // `setForeground` is recommended for long-running workers.
       // Foreground mode helps prioritize the worker, reducing the risk
       // of it being killed during low memory or Doze/App Standby situations.
+      // ⚠️ This throws error if called in the background,
+      // but if the worker already calls this at foreground,
+      // then subsequent retries will not break it
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
       return@withContext handleError(error, retry = false)
