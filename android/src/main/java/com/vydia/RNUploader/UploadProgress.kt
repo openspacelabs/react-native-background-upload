@@ -54,9 +54,7 @@ class UploadProgress {
       if (works.any { !it.state.isFinished }) return
 
       val storage = storage(context)
-      val editor = storage.edit()
-      storage.all.keys.forEach { key -> editor.remove(key) }
-      editor.commit()
+      storage.edit().clear().commit()
     }
   }
 }

@@ -41,7 +41,7 @@ class EventReporter {
     fun progress(uploadId: String, bytesSentTotal: Long, contentLength: Long) =
       sendEvent("progress", Arguments.createMap().apply {
         putString("id", uploadId)
-        putDouble("progress", (bytesSentTotal * 100 / contentLength).toDouble()) //0-100
+        putDouble("progress", (bytesSentTotal.toDouble() * 100 / contentLength)) //0-100
       })
 
     fun notification() = sendEvent("notification")
