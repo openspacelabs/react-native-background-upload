@@ -86,7 +86,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
 
     // Complex work, errors thrown below here trigger retry.
-    // We don't let WorkManager manage retries as it's very buggy.
+    // We don't let WorkManager manage retries and network constraints as it's very buggy.
     // i.e. we'd occasionally get BackgroundServiceStartNotAllowedException,
     // or ForegroundServiceStartNotAllowedException, or "isStopped" gets set to "true"
     // for no reason

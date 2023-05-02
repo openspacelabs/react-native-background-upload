@@ -1,7 +1,10 @@
 package com.vydia.RNUploader
 
 import android.util.Log
-import androidx.work.*
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.facebook.react.bridge.*
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
@@ -68,13 +71,10 @@ class UploaderModule(context: ReactApplicationContext) :
   private fun startUpload(options: ReadableMap): String {
     val upload = Upload.fromOptions(options)
     val data = Gson().toJson(upload)
-    val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED)
-    if (upload.wifiOnly) constraints.setRequiredNetworkType(NetworkType.UNMETERED)
 
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
       .addTag(WORKER_TAG)
       .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
-      .setConstraints(constraints.build())
       .build()
 
     workManager
