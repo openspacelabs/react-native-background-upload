@@ -4,6 +4,9 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
+import android.net.NetworkCapabilities.TRANSPORT_WIFI
 import android.os.Build
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
@@ -18,8 +21,8 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.util.cio.*
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -30,6 +33,9 @@ const val MAX_CONCURRENCY = 1
 
 // Throttling interval of progress reports
 const val PROGRESS_INTERVAL = 500
+
+// Retry delay
+val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
 
 // Max total time for a single request to complete
 // This is 24hrs so plenty of time for large uploads
@@ -49,8 +55,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
   enum class Input { Params }
+  private enum class Connectivity { NoWifi, NoInternet, Ok }
 
   private lateinit var upload: Upload
+  private var retries = 0
+  private var firstRun = true
+  private var connectivity = Connectivity.Ok
+  private var semaphoreAcquired = false
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     // Retrieve the upload. If it fails, even error reporting won't work.
@@ -61,59 +72,76 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // initialization, errors thrown here won't be retried
     val httpMethod: HttpMethod
-    val retries: Int
-    var lastProgressReport = 0L
-    var semaphoreAcquired = false
     try {
       httpMethod = HttpMethod.parse(upload.method)
-      retries = UploadRetry.get(context, upload.id)
       // `setForeground` is recommended for long-running workers.
       // Foreground mode helps prioritize the worker, reducing the risk
       // of it being killed during low memory or Doze/App Standby situations.
-      // ⚠️ This throws error if called in the background,
-      // but if the worker already calls this at foreground,
-      // then subsequent retries will not break it
+      // ⚠️ This should be called in the foreground
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
-      return@withContext handleError(error, retry = false)
+      handleError(error, retry = false)
+      return@withContext Result.failure()
     }
 
 
-    // complex work, errors thrown below here can trigger retry
-    try {
-      val file = File(upload.path)
-      val size = file.length()
-      val body = file.readChannel()
+    // Complex work, errors thrown below here trigger retry.
+    // We don't let WorkManager manage retries as it's very buggy.
+    // i.e. we'd occasionally get BackgroundServiceStartNotAllowedException,
+    // or ForegroundServiceStartNotAllowedException, or "isStopped" gets set to "true"
+    // for no reason
+    while (true) {
+      try {
+        // Delay if it's an actual retry, not the first run.
+        // Should be within the try block to account for worker cancellation,
+        // which resumes immediately and throws CancellationException.
+        if (!firstRun) delay(RETRY_DELAY)
+        firstRun = false
 
-      // this should happen before the semaphore queueing
-      // to register with the total progress asap
-      handleProgress(0, size)
+        val file = File(upload.path)
+        val size = file.length()
 
-      semaphore.acquire()
-      semaphoreAcquired = true
+        // Register progress asap so the total progress is accurate
+        // This needs to happen before the semaphore wait
+        handleProgress(0, size)
 
-      // Use ktor instead of okhttp. Ktor request is coroutine friendly and
-      // will get cancelled when the coroutine gets cancelled
-      val response = client.request(upload.url) {
-        method = httpMethod
-        setBody(body)
-        upload.headers.forEach { (key, value) -> headers.append(key, value) }
-        onUpload { bytesSentTotal, _ ->
-          // throttle progress report
-          val now = System.currentTimeMillis()
-          if (now - lastProgressReport >= PROGRESS_INTERVAL) {
-            lastProgressReport = now
-            handleProgress(bytesSentTotal, size)
+        // Don't bother to run on an invalid network
+        if (!validateConnection(context, upload.wifiOnly)) continue
+
+        // wait for its turn to run
+        semaphore.acquire()
+        semaphoreAcquired = true
+
+        // Use ktor instead of okhttp. Ktor request is coroutine friendly and
+        // will get cancelled when the coroutine gets cancelled
+        var lastProgressReport = 0L
+        val body = file.readChannel()
+        val response = client.request(upload.url) {
+          method = httpMethod
+          setBody(body)
+          upload.headers.forEach { (key, value) -> headers.append(key, value) }
+          onUpload { bytesSentTotal, _ ->
+            // throttle progress report
+            val now = System.currentTimeMillis()
+            if (now - lastProgressReport >= PROGRESS_INTERVAL) {
+              lastProgressReport = now
+              handleProgress(bytesSentTotal, size)
+            }
           }
         }
-      }
 
-      return@withContext handleSuccess(response, size)
-    } catch (error: Throwable) {
-      return@withContext handleError(error, retry = true, retries)
-    } finally {
-      if (semaphoreAcquired) semaphore.release()
+        return@withContext handleSuccess(response, size)
+      } catch (error: Throwable) {
+        handleError(error, retry = true)
+      } finally {
+        // yield to the next worker
+        if (semaphoreAcquired) semaphore.release()
+        semaphoreAcquired = false
+      }
     }
+
+    // This should never happen. Only here to satisfy the type check
+    return@withContext Result.failure()
   }
 
   private suspend fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
@@ -123,53 +151,74 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private fun handleSuccess(response: HttpResponse, fileSize: Long): Result {
-    UploadRetry.clear(context, upload.id)
     UploadProgress.set(context, upload.id, fileSize, fileSize)
     UploadProgress.scheduleClearing(context)
     EventReporter.success(upload.id, response)
     return Result.success()
   }
 
-  private fun handleError(error: Throwable, retry: Boolean, retries: Int = 0): Result {
+  // Rethrows to teardown the worker or suppresses error for retrying
+  // Alerts status
+  private suspend fun handleError(error: Throwable, retry: Boolean) {
     // Cancelled by user or new worker with same ID
     // Worker won't rerun, perform teardown
     if (isStopped) {
-      UploadRetry.clear(context, upload.id)
       UploadProgress.remove(context, upload.id)
       UploadProgress.scheduleClearing(context)
       EventReporter.cancelled(upload.id)
       throw error
     }
 
-    // Auto-cancelled, likely due to unmet constraints
-    // Clearing state not needed, worker will restart
-    if (error is CancellationException) throw error
+    if (retry) {
+      // Error thrown due to unmet network constraints. Clearing state not needed.
+      // Retrying for free
+      if (!validateConnection(context, upload.wifiOnly)) return
 
-    // retry if possible
-    if (retry && retries < upload.maxRetries) {
-      UploadRetry.set(context, upload.id, retries + 1)
-      return Result.retry()
+      // Retrying while counting toward maxRetries
+      retries++
+      if (retries <= upload.maxRetries) return
     }
 
+
     // no more retrying
-    UploadRetry.clear(context, upload.id)
     UploadProgress.remove(context, upload.id)
     UploadProgress.scheduleClearing(context)
     EventReporter.error(upload.id, error)
-    return Result.failure()
+    throw error
+  }
+
+  // Checks connection and alerts connection issues
+  private suspend fun validateConnection(context: Context, wifiOnly: Boolean): Boolean {
+    val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = manager.activeNetwork
+    val capabilities = manager.getNetworkCapabilities(network)
+
+    this.connectivity =
+      if (capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) != true)
+        Connectivity.NoInternet
+      else if (wifiOnly && !capabilities.hasTransport(TRANSPORT_WIFI))
+        Connectivity.NoWifi
+      else
+        Connectivity.Ok
+
+
+    // alert connectivity mode
+    setForeground(getForegroundInfo())
+    return this.connectivity == Connectivity.Ok
   }
 
   // builds the notification required to enable Foreground mode
   override suspend fun getForegroundInfo(): ForegroundInfo {
     // All workers share the same notification that shows the total progress
     val id = upload.notificationId.hashCode()
-    val title = upload.notificationTitle
     val channel = upload.notificationChannel
     val progress = UploadProgress.total(context)
-
-    // Since the progress bar only accepts integer,
-    // use 2 decimals for the % text so users don't think it's stuck for large uploads or slow internet
     val progress2Decimals = "%.2f".format(progress)
+    val title = when (connectivity) {
+      Connectivity.NoWifi -> upload.notificationTitleNoWifi
+      Connectivity.NoInternet -> upload.notificationTitleNoInternet
+      Connectivity.Ok -> upload.notificationTitle
+    }
 
     // Custom layout for progress notification.
     // The default hides the % text. This one shows it on the right,
@@ -182,8 +231,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val notification = NotificationCompat.Builder(context, channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
       // This fixes that delay.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-        foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) foregroundServiceBehavior =
+        Notification.FOREGROUND_SERVICE_IMMEDIATE
 
       // Required by android. Here we use the system's default upload icon
       setSmallIcon(android.R.drawable.stat_sys_upload)

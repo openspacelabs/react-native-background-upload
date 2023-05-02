@@ -16,6 +16,8 @@ data class Upload(
   val headers: Map<String, String>,
   val notificationId: String,
   val notificationTitle: String,
+  val notificationTitleNoInternet: String,
+  val notificationTitleNoWifi: String,
   val notificationChannel: String,
 ) {
   companion object {
@@ -38,10 +40,13 @@ data class Upload(
         ?: throw InvalidUploadOptionException("Missing 'notificationId'"),
       notificationTitle = options.getString("notificationTitle")
         ?: throw InvalidUploadOptionException("Missing 'notificationTitle'"),
+      notificationTitleNoInternet = options.getString("notificationTitleNoInternet")
+        ?: throw InvalidUploadOptionException("Missing 'notificationTitleNoInternet'"),
+      notificationTitleNoWifi = options.getString("notificationTitleNoWifi")
+        ?: throw InvalidUploadOptionException("Missing 'notificationTitleNoWifi'"),
       notificationChannel = options.getString("notificationChannel")
         ?: throw InvalidUploadOptionException("Missing 'notificationChannel'"),
     )
-
   }
 }
 
