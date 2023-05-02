@@ -84,6 +84,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       val file = File(upload.path)
       val size = file.length()
       val body = file.readChannel()
+
+      // this should happen before the semaphore queueing
+      // to register with the total progress asap
       handleProgress(0, size)
 
       semaphore.acquire()
