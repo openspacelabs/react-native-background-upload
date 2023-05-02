@@ -42,6 +42,8 @@ const options = {
     notificationChannel: 'my-channel-id',
     notificationId: 'my-progress-notification',
     notificationTitle: 'Uploading...',
+    notificationTitleNoWifi: 'Waiting for Wifi...',
+    notificationTitleNoInternet: 'Waiting for Internet...',
   },
   useUtf8Charset: true,
 };
@@ -120,11 +122,13 @@ _Note: You must provide valid URIs. react-native-background-upload does not esca
 
 Android forces us to display a progress notification to show overall upload progress.
 
-| Name                  | Type   | Required | Description                       | Example                     |
-| --------------------- | ------ | -------- | --------------------------------- | --------------------------- |
-| `notificationChannel` | string | Optional | Sets android notification channel | `background-upload-channel` |
-| `notificationId`      | string | Optional | A custom ID for the notification  | `upload-progress`           |
-| `notificationTitle`   | string | Optional | Sets a title for the notification | `Uploading...`              |
+| Name                          | Type   | Required | Description                                                      | Example                     |
+| ----------------------------- | ------ | -------- | ---------------------------------------------------------------- | --------------------------- |
+| `notificationChannel`         | string | Optional | Sets android notification channel                                | `background-upload-channel` |
+| `notificationId`              | string | Optional | A custom ID for the notification                                 | `upload-progress`           |
+| `notificationTitle`           | string | Optional | Sets the default title for the notification                      | `Uploading...`              |
+| `notificationTitleNoWifi`     | string | Optional | Sets notification title for uploads awaiting wifi                | `Waiting for Wifi...`       |
+| `notificationTitleNoInternet` | string | Optional | Sets notification title for uploads awaiting internet connection | `Waiting for Internet...`   |
 
 ### cancelUpload(uploadId)
 

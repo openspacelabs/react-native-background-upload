@@ -28,6 +28,8 @@ export declare type UploadOptions = {
 declare type AndroidOnlyUploadOptions = {
     notificationId: string;
     notificationTitle: string;
+    notificationTitleNoWifi: string;
+    notificationTitleNoInternet: string;
     notificationChannel: string;
     maxRetries?: number;
 };
