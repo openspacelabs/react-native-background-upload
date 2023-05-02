@@ -163,6 +163,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val title = upload.notificationTitle
     val channel = upload.notificationChannel
     val progress = UploadProgress.total(context)
+
+    // Since the progress bar only accepts integer,
+    // use 2 decimals for the % text so users don't think it's stuck for large uploads or slow internet
     val progress2Decimals = "%.2f".format(progress)
 
     // Custom layout for progress notification.
