@@ -19,7 +19,6 @@ import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
-import io.ktor.http.*
 import io.ktor.util.cio.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -59,21 +58,17 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   private lateinit var upload: Upload
   private var retries = 0
-  private var firstRun = true
   private var connectivity = Connectivity.Ok
-  private var semaphoreAcquired = false
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-    // Retrieve the upload. If it fails, even error reporting won't work.
-    // In the future, pass the upload ID separately to reduce burden.
-    // Currently however, the likelihood of failure is super low.
+    // Retrieve the upload. If this throws errors, error reporting won't work.
+    // However, the only way it has errors is the implementation is incorrect,
+    // which can be caught in development
     val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
     upload = Gson().fromJson(paramsJson, Upload::class.java)
 
     // initialization, errors thrown here won't be retried
-    val httpMethod: HttpMethod
     try {
-      httpMethod = HttpMethod.parse(upload.method)
       // `setForeground` is recommended for long-running workers.
       // Foreground mode helps prioritize the worker, reducing the risk
       // of it being killed during low memory or Doze/App Standby situations.
@@ -90,58 +85,65 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // i.e. we'd occasionally get BackgroundServiceStartNotAllowedException,
     // or ForegroundServiceStartNotAllowedException, or "isStopped" gets set to "true"
     // for no reason
+    var isRetried = false
     while (true) {
       try {
-        // Delay if it's an actual retry, not the first run.
+        // Delay if it's an actual retry.
         // Should be within the try block to account for worker cancellation,
         // which resumes immediately and throws CancellationException.
-        if (!firstRun) delay(RETRY_DELAY)
-        firstRun = false
+        if (isRetried) delay(RETRY_DELAY)
+        isRetried = true
 
-        val file = File(upload.path)
-        val size = file.length()
-
-        // Register progress asap so the total progress is accurate
-        // This needs to happen before the semaphore wait
-        handleProgress(0, size)
-
-        // Don't bother to run on an invalid network
-        if (!validateConnection(context, upload.wifiOnly)) continue
-
-        // wait for its turn to run
-        semaphore.acquire()
-        semaphoreAcquired = true
-
-        // Use ktor instead of okhttp. Ktor request is coroutine friendly and
-        // will get cancelled when the coroutine gets cancelled
-        var lastProgressReport = 0L
-        val body = file.readChannel()
-        val response = client.request(upload.url) {
-          method = httpMethod
-          setBody(body)
-          upload.headers.forEach { (key, value) -> headers.append(key, value) }
-          onUpload { bytesSentTotal, _ ->
-            // throttle progress report
-            val now = System.currentTimeMillis()
-            if (now - lastProgressReport >= PROGRESS_INTERVAL) {
-              lastProgressReport = now
-              handleProgress(bytesSentTotal, size)
-            }
-          }
-        }
-
+        val (response, size) = upload() ?: continue
         return@withContext handleSuccess(response, size)
       } catch (error: Throwable) {
         handleError(error, retry = true)
-      } finally {
-        // yield to the next worker
-        if (semaphoreAcquired) semaphore.release()
-        semaphoreAcquired = false
       }
     }
 
     // This should never happen. Only here to satisfy the type check
     return@withContext Result.failure()
+  }
+
+  private suspend fun upload(): Pair<HttpResponse, Long>? {
+    val file = File(upload.path)
+    val size = file.length()
+
+    // Register progress asap so the total progress is accurate
+    // This needs to happen before the semaphore wait
+    handleProgress(0, size)
+
+    // Don't bother to run on an invalid network
+    if (!validateConnection(context, upload.wifiOnly)) return null
+
+    // wait for its turn to run
+    semaphore.acquire()
+
+    try {
+      // Use ktor instead of okhttp. Ktor request is coroutine friendly and
+      // will get cancelled when the coroutine gets cancelled
+      var lastProgressReport = 0L
+      val body = file.readChannel()
+      val response = client.request(upload.url) {
+        method = upload.method
+        setBody(body)
+        upload.headers.forEach { (key, value) -> headers.append(key, value) }
+        onUpload { bytesSentTotal, _ ->
+          // throttle progress report
+          val now = System.currentTimeMillis()
+          if (now - lastProgressReport >= PROGRESS_INTERVAL) {
+            lastProgressReport = now
+            handleProgress(bytesSentTotal, size)
+          }
+        }
+      }
+
+      return response to size
+    }
+    // don't catch, propagate error up
+    finally {
+      semaphore.release()
+    }
   }
 
   private suspend fun handleProgress(bytesSentTotal: Long, fileSize: Long) {

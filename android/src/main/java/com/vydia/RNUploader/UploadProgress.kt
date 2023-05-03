@@ -13,18 +13,21 @@ class UploadProgress {
     private fun storage(context: Context) =
       context.getSharedPreferences("RNFileUpload-Progress", Context.MODE_PRIVATE)
 
+    @Synchronized
     fun set(context: Context, uploadId: String, bytesUploaded: Long, fileSize: Long) =
       storage(context).edit()
         .putLong("$uploadId-uploaded", bytesUploaded)
         .putLong("$uploadId-size", fileSize)
-        .commit()
+        .apply()
 
+    @Synchronized
     fun remove(context: Context, uploadId: String) =
       storage(context).edit()
         .remove("$uploadId-uploaded")
         .remove("$uploadId-size")
-        .commit()
+        .apply()
 
+    @Synchronized
     fun total(context: Context): Double {
       val storage = storage(context)
 
@@ -48,13 +51,14 @@ class UploadProgress {
     fun scheduleClearing(context: Context) =
       handler.postDelayed({ clearIfNeeded(context) }, 2000)
 
+    @Synchronized
     fun clearIfNeeded(context: Context) {
       val workManager = WorkManager.getInstance(context)
       val works = workManager.getWorkInfosByTag(WORKER_TAG).get()
       if (works.any { !it.state.isFinished }) return
 
       val storage = storage(context)
-      storage.edit().clear().commit()
+      storage.edit().clear().apply()
     }
   }
 }
