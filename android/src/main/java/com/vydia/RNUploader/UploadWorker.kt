@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit
 const val MAX_CONCURRENCY = 1
 
 // Throttling interval of progress reports
-const val PROGRESS_INTERVAL = 500
+const val PROGRESS_INTERVAL = 500 // milliseconds
 
 // Retry delay
 val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
@@ -76,8 +76,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       // ⚠️ This should be called in the foreground
       setForeground(getForegroundInfo())
     } catch (error: Throwable) {
-      handleError(error, retry = false)
-      return@withContext Result.failure()
+      if (!checkAndHandleCancellation()) handleError(error)
+      throw error
     }
 
 
@@ -96,9 +96,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         isRetried = true
 
         val (response, size) = upload() ?: continue
-        return@withContext handleSuccess(response, size)
+        handleSuccess(response, size)
+        return@withContext Result.success()
       } catch (error: Throwable) {
-        handleError(error, retry = true)
+        if (checkAndHandleCancellation()) throw error
+        if (checkRetry()) continue
+        handleError(error)
+        throw error
       }
     }
 
@@ -153,41 +157,40 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     setForeground(getForegroundInfo())
   }
 
-  private fun handleSuccess(response: HttpResponse, fileSize: Long): Result {
+  private fun handleSuccess(response: HttpResponse, fileSize: Long) {
     UploadProgress.set(context, upload.id, fileSize, fileSize)
     UploadProgress.scheduleClearing(context)
     EventReporter.success(upload.id, response)
-    return Result.success()
   }
 
-  // Rethrows to teardown the worker or suppresses error for retrying
-  // Alerts status
-  private suspend fun handleError(error: Throwable, retry: Boolean) {
-    // Cancelled by user or new worker with same ID
-    // Worker won't rerun, perform teardown
-    if (isStopped) {
-      UploadProgress.remove(context, upload.id)
-      UploadProgress.scheduleClearing(context)
-      EventReporter.cancelled(upload.id)
-      throw error
-    }
-
-    if (retry) {
-      // Error thrown due to unmet network constraints. Clearing state not needed.
-      // Retrying for free
-      if (!validateAndUpdateConnectionStatus()) return
-
-      // Retrying while counting toward maxRetries
-      retries++
-      if (retries <= upload.maxRetries) return
-    }
-
-
+  private fun handleError(error: Throwable) {
     // no more retrying
     UploadProgress.remove(context, upload.id)
     UploadProgress.scheduleClearing(context)
     EventReporter.error(upload.id, error)
-    throw error
+  }
+
+  // Check if cancelled by user or new worker with same ID
+  // Worker won't rerun, perform teardown
+  private fun checkAndHandleCancellation(): Boolean {
+    if (!isStopped) return false
+
+    UploadProgress.remove(context, upload.id)
+    UploadProgress.scheduleClearing(context)
+    EventReporter.cancelled(upload.id)
+    return true
+  }
+
+  private suspend fun checkRetry(): Boolean {
+    // Error thrown due to unmet network constraints. Clearing state not needed.
+    // Retrying for free
+    if (!validateAndUpdateConnectionStatus()) return true
+
+    // Retrying while counting toward maxRetries
+    retries++
+    if (retries <= upload.maxRetries) return true
+
+    return false
   }
 
   // Checks connection and alerts connection issues
