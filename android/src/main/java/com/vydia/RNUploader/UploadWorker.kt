@@ -187,8 +187,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     if (!validateAndReportConnectivity()) return true
 
     // Retrying while counting toward maxRetries
-    retries++
-    if (retries <= upload.maxRetries) return true
+    if (++retries <= upload.maxRetries) return true
 
     return false
   }
