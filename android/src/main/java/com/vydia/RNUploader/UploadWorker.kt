@@ -164,7 +164,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private fun handleError(error: Throwable) {
-    // no more retrying
     UploadProgress.remove(context, upload.id)
     UploadProgress.scheduleClearing(context)
     EventReporter.error(upload.id, error)
