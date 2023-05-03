@@ -119,7 +119,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     handleProgress(0, size)
 
     // Don't bother to run on an invalid network
-    if (!validateAndUpdateConnectionStatus()) return null
+    if (!validateAndReportConnectivity()) return null
 
     // wait for its turn to run
     semaphore.acquire()
@@ -184,7 +184,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private suspend fun checkRetry(): Boolean {
     // Error thrown due to unmet network constraints. Clearing state not needed.
     // Retrying for free
-    if (!validateAndUpdateConnectionStatus()) return true
+    if (!validateAndReportConnectivity()) return true
 
     // Retrying while counting toward maxRetries
     retries++
@@ -194,8 +194,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   // Checks connection and alerts connection issues
-  private suspend fun validateAndUpdateConnectionStatus(): Boolean {
-    this.connectivity = validateConnection(context, upload.wifiOnly)
+  private suspend fun validateAndReportConnectivity(): Boolean {
+    this.connectivity = validateConnectivity(context, upload.wifiOnly)
     // alert connectivity mode
     setForeground(getForegroundInfo())
     return this.connectivity == Connectivity.Ok
@@ -247,7 +247,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
 // This is outside and synchronized to ensure consistent status across workers
 @Synchronized
-private fun validateConnection(context: Context, wifiOnly: Boolean): Connectivity {
+private fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
   val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
   val network = manager.activeNetwork
   val capabilities = manager.getNetworkCapabilities(network)
