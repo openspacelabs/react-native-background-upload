@@ -95,8 +95,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         if (isRetried) delay(RETRY_DELAY)
         isRetried = true
 
-        val (response, size) = upload() ?: continue
-        handleSuccess(response, size)
+        val response = upload() ?: continue
+        handleSuccess(response)
         return@withContext Result.success()
       } catch (error: Throwable) {
         if (checkAndHandleCancellation()) throw error
@@ -110,7 +110,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return@withContext Result.failure()
   }
 
-  private suspend fun upload(): Pair<HttpResponse, Long>? {
+  private suspend fun upload(): HttpResponse? {
     val file = File(upload.path)
     val size = file.length()
 
@@ -143,7 +143,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         }
       }
 
-      return response to size
+      handleProgress(size, size)
+      return response
     }
     // don't catch, propagate error up
     finally {
@@ -157,8 +158,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     setForeground(getForegroundInfo())
   }
 
-  private fun handleSuccess(response: HttpResponse, fileSize: Long) {
-    UploadProgress.set(context, upload.id, fileSize, fileSize)
+  private fun handleSuccess(response: HttpResponse) {
     UploadProgress.scheduleClearing(context)
     EventReporter.success(upload.id, response)
   }

@@ -45,8 +45,8 @@ class UploadProgress {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    // Attempt to clear in 2 seconds. This straightforward approach
-    // enables the final worker to reset the overall progress.
+    // Attempt to clear in 2 seconds. This is the simplest way to let the
+    // last worker reset the overall progress.
     // Clearing progress ensures the notification starts at 0% next time.
     fun scheduleClearing(context: Context) =
       handler.postDelayed({ clearIfNeeded(context) }, 2000)
