@@ -181,8 +181,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private suspend fun checkRetry(): Boolean {
-    // Error thrown due to unmet network constraints. Clearing state not needed.
-    // Retrying for free
+    // Clearing state not needed. Retrying for free.
+    // Error was thrown due to unmet network preferences.
+    // Also happens every time you switch from one network to any other,
+    // so no need to implement restarting when switching networks.
     if (!validateAndReportConnectivity()) return true
 
     // Retrying while counting toward maxRetries
