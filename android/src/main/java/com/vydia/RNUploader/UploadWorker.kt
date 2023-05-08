@@ -262,10 +262,18 @@ private fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectiv
   val network = manager.activeNetwork
   val capabilities = manager.getNetworkCapabilities(network)
 
-  return if (capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) != true) Connectivity.NoInternet
-  else if (wifiOnly && !capabilities.hasTransport(TRANSPORT_WIFI)) Connectivity.NoWifi
-  else Connectivity.Ok
+  val hasInternet = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true
+
+  // not wifiOnly, return early
+  if (!wifiOnly) return if (hasInternet) Connectivity.Ok else Connectivity.NoInternet
+
+  // handle wifiOnly
+  return if (hasInternet && capabilities?.hasTransport(TRANSPORT_WIFI) == true)
+    Connectivity.Ok
+  else
+    Connectivity.NoWifi // don't return NoInternet here, more direct to request to join wifi
 }
+
 
 private fun openAppIntent(context: Context): PendingIntent? {
   val intent = Intent(context, NotificationReceiver::class.java)
