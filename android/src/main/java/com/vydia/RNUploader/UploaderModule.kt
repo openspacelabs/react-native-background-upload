@@ -57,7 +57,7 @@ class UploaderModule(context: ReactApplicationContext) :
       val id = startUpload(rawOptions)
       promise.resolve(id)
     } catch (exc: Throwable) {
-      if (exc !is InvalidUploadOptionException) {
+      if (exc !is Upload.MissingOptionException) {
         exc.printStackTrace()
         Log.e(TAG, exc.message, exc)
       }

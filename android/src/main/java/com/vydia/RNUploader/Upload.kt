@@ -21,11 +21,14 @@ data class Upload(
   val notificationTitleNoWifi: String,
   val notificationChannel: String,
 ) {
+  class MissingOptionException(optionName: String) :
+    IllegalArgumentException("Missing '$optionName'")
+
   companion object {
     fun fromOptions(options: ReadableMap) = Upload(
       id = options.getString("customUploadId") ?: UUID.randomUUID().toString(),
-      url = options.getString("url") ?: throw InvalidUploadOptionException("Missing 'url'"),
-      path = options.getString("path") ?: throw InvalidUploadOptionException("Missing 'path'"),
+      url = options.getString("url") ?: throw MissingOptionException("url"),
+      path = options.getString("path") ?: throw MissingOptionException("path"),
       method = (options.getString("method") ?: "POST").let { HttpMethod.parse(it) },
       maxRetries = if (options.hasKey("maxRetries")) options.getInt("maxRetries") else 5,
       wifiOnly = if (options.hasKey("wifiOnly")) options.getBoolean("wifiOnly") else false,
@@ -38,18 +41,18 @@ data class Upload(
         return@let map
       },
       notificationId = options.getString("notificationId")
-        ?: throw InvalidUploadOptionException("Missing 'notificationId'"),
+        ?: throw MissingOptionException("notificationId"),
       notificationTitle = options.getString("notificationTitle")
-        ?: throw InvalidUploadOptionException("Missing 'notificationTitle'"),
+        ?: throw MissingOptionException("notificationTitle"),
       notificationTitleNoInternet = options.getString("notificationTitleNoInternet")
-        ?: throw InvalidUploadOptionException("Missing 'notificationTitleNoInternet'"),
+        ?: throw MissingOptionException("notificationTitleNoInternet"),
       notificationTitleNoWifi = options.getString("notificationTitleNoWifi")
-        ?: throw InvalidUploadOptionException("Missing 'notificationTitleNoWifi'"),
+        ?: throw MissingOptionException("notificationTitleNoWifi"),
       notificationChannel = options.getString("notificationChannel")
-        ?: throw InvalidUploadOptionException("Missing 'notificationChannel'"),
+        ?: throw MissingOptionException("notificationChannel"),
     )
   }
 }
 
 
-class InvalidUploadOptionException(message: String) : IllegalArgumentException(message)
+
