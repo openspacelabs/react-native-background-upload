@@ -236,8 +236,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     val notification = NotificationCompat.Builder(context, channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
       // This fixes that delay.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) foregroundServiceBehavior =
-        Notification.FOREGROUND_SERVICE_IMMEDIATE
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+        foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
 
       // Required by android. Here we use the system's default upload icon
       setSmallIcon(android.R.drawable.stat_sys_upload)
