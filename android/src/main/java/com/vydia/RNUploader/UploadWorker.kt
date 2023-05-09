@@ -123,6 +123,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private suspend fun upload(): HttpResponse? {
     val file = File(upload.path)
     val size = file.length()
+    if (size == 0L) throw Throwable("Invalid file size")
 
     // Register progress asap so the total progress is accurate
     // This needs to happen before the semaphore wait
