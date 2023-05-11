@@ -1,15 +1,12 @@
 package com.vydia.RNUploader
 
 import com.facebook.react.bridge.ReadableArray
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.*
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
 
 
-class Chunk(val position: Long, val size: Long, val path: String) {
+data class Chunk(val position: Long, val size: Long, val path: String) {
   companion object {
     fun fromReactMethodParams(paramChunks: ReadableArray): List<Chunk> {
       val chunks = mutableListOf<Chunk>()
@@ -34,8 +31,8 @@ suspend fun chunkFile(
   scope: CoroutineScope,
   parentFilePath: String,
   chunks: List<Chunk>
-) {
-  val parentFile = scope.async(Dispatchers.IO) { RandomAccessFile(parentFilePath, "r") }.await()
+) = withContext(Dispatchers.IO) {
+  val parentFile = RandomAccessFile(parentFilePath, "r")
 
   chunks.map {
     scope.async(Dispatchers.IO) {

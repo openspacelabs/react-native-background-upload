@@ -14,41 +14,28 @@ import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.gson.Gson
-import io.ktor.client.*
-import io.ktor.client.engine.cio.*
-import io.ktor.client.plugins.*
-import io.ktor.client.request.*
-import io.ktor.client.statement.*
-import io.ktor.util.cio.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Response
 import java.io.File
 import java.util.concurrent.TimeUnit
 
 // All workers will start `doWork` immediately but only 1 request is active at a time.
-const val MAX_CONCURRENCY = 1
-
-// Throttling interval of progress reports
-const val PROGRESS_INTERVAL = 500 // milliseconds
+private const val MAX_CONCURRENCY = 1
 
 // Retry delay
-val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
-
-// Max total time for a single request to complete
-// This is 24hrs so plenty of time for large uploads
-// Worst case is the time maxes out and the upload gets restarted.
-val REQUEST_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(24L)
+private val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
 
 // Control max concurrent requests using semaphore to instead of using
 // `maxConnectionsCount` in HttpClient as the latter introduces a delay between requests
-val semaphore = Semaphore(MAX_CONCURRENCY)
-private val client = HttpClient(CIO) {
-  install(HttpTimeout) {
-    requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
-  }
-}
+private val semaphore = Semaphore(MAX_CONCURRENCY)
+
+// Use Okhttp as it provides the most standard behaviors even though it's not coroutine friendly
+private val client = OkHttpClient()
 
 private enum class Connectivity { NoWifi, NoInternet, Ok }
 
@@ -89,20 +76,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     var isRetried = false
     while (true) {
       try {
-        // - Delay if it's an actual retry.
-        if (isRetried) {
-          // - "delay" should be within the "try" block to account for worker cancellation,
-          // which cancels the delay immediately and throws CancellationException.
-          // - Linear backoff instead of exponential
-          // One reason for this is we retry on invalid connections. Exponential will
-          // take too long. If the server flakes and returns 500s, we don't retry but consider
-          // the request successful, which is consistent with iOS behavior.
-          // User gets notifications for these issues and can manually retry.
-          // Since this is currently rare, it's likely ok. If server errors
-          // turn out to be too frequent, we can consider adding exponential backoff for
-          // 500s and IO errors.
-          delay(RETRY_DELAY)
-        }
+        // Delay if it's an actual retry.
+        // Should be within the try block to account for worker cancellation,
+        // which resumes immediately and throws CancellationException.
+        if (isRetried) delay(RETRY_DELAY)
         isRetried = true
 
         val response = upload() ?: continue
@@ -120,42 +97,27 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return@withContext Result.failure()
   }
 
-  private suspend fun upload(): HttpResponse? {
+  private suspend fun upload(): Response? = withContext(Dispatchers.IO) {
     val file = File(upload.path)
     val size = file.length()
-    if (size == 0L) throw Throwable("Invalid file size")
 
     // Register progress asap so the total progress is accurate
     // This needs to happen before the semaphore wait
     handleProgress(0, size)
 
     // Don't bother to run on an invalid network
-    if (!validateAndReportConnectivity()) return null
+    if (!validateAndReportConnectivity()) return@withContext null
 
     // wait for its turn to run
     semaphore.acquire()
 
     try {
-      // Use ktor instead of okhttp. Ktor request is coroutine friendly and
-      // will get cancelled when the coroutine gets cancelled
-      var lastProgressReport = 0L
-      val body = file.readChannel()
-      val response = client.request(upload.url) {
-        method = upload.method
-        setBody(body)
-        upload.headers.forEach { (key, value) -> headers.append(key, value) }
-        onUpload { bytesSentTotal, _ ->
-          // throttle progress report
-          val now = System.currentTimeMillis()
-          if (now - lastProgressReport >= PROGRESS_INTERVAL) {
-            lastProgressReport = now
-            handleProgress(bytesSentTotal, size)
-          }
-        }
+      val response = okhttpUpload(client, upload, file) { progress ->
+        launch { handleProgress(progress, size) }
       }
 
       handleProgress(size, size)
-      return response
+      return@withContext response
     }
     // don't catch, propagate error up
     finally {
@@ -169,7 +131,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     setForeground(getForegroundInfo())
   }
 
-  private fun handleSuccess(response: HttpResponse) {
+  private fun handleSuccess(response: Response) {
     UploadProgress.scheduleClearing(context)
     EventReporter.success(upload.id, response)
   }
@@ -281,5 +243,3 @@ private fun openAppIntent(context: Context): PendingIntent? {
   val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
   return PendingIntent.getBroadcast(context, "RNFileUpload-notification".hashCode(), intent, flags)
 }
-
-

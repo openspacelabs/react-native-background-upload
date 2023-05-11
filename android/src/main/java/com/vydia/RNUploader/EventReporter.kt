@@ -4,10 +4,10 @@ import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
-import io.ktor.client.statement.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import okhttp3.Response
 
 // Sends events to React Native
 class EventReporter {
@@ -24,15 +24,17 @@ class EventReporter {
         putString("error", exception.message ?: "Unknown exception")
       })
 
-    fun success(uploadId: String, response: HttpResponse) =
+    fun success(uploadId: String, response: Response) =
       CoroutineScope(Dispatchers.IO).launch {
         sendEvent("completed", Arguments.createMap().apply {
           putString("id", uploadId)
-          putInt("responseCode", response.status.value)
-          putString("responseBody", response.bodyAsText())
+          putInt("responseCode", response.code)
+          putString("responseBody", response.body?.string().let {
+            if (it.isNullOrBlank()) response.message else it
+          })
           putMap("responseHeaders", Arguments.createMap().apply {
-            response.headers.forEach { key, values ->
-              putString(key, values.joinToString(", "))
+            response.headers.names().forEach { name ->
+              putString(name, response.headers.values(name).joinToString(", "))
             }
           })
         })

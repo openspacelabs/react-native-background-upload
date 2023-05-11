@@ -1,7 +1,6 @@
 package com.vydia.RNUploader
 
 import com.facebook.react.bridge.ReadableMap
-import io.ktor.http.*
 import java.util.*
 
 // Data model of a single upload
@@ -11,7 +10,7 @@ data class Upload(
   val id: String,
   val url: String,
   val path: String,
-  val method: HttpMethod,
+  val method: String,
   val maxRetries: Int,
   val wifiOnly: Boolean,
   val headers: Map<String, String>,
@@ -29,7 +28,7 @@ data class Upload(
       id = o.getString("customUploadId") ?: UUID.randomUUID().toString(),
       url = o.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
       path = o.getString(Upload::path.name) ?: throw MissingOptionException(Upload::path.name),
-      method = (o.getString(Upload::method.name) ?: "POST").let { HttpMethod.parse(it) },
+      method = o.getString(Upload::method.name) ?: "POST",
       maxRetries = if (o.hasKey(Upload::maxRetries.name)) o.getInt(Upload::maxRetries.name) else 5,
       wifiOnly = if (o.hasKey(Upload::wifiOnly.name)) o.getBoolean(Upload::wifiOnly.name) else false,
       headers = o.getMap(Upload::headers.name).let { headers ->
