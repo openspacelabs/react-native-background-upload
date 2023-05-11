@@ -38,7 +38,7 @@ class UploaderModule(context: ReactApplicationContext) :
   fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
     CoroutineScope(Dispatchers.IO).launch {
       try {
-        chunkFile(this, parentFilePath, Chunk.fromReactMethodParams(chunks))
+        chunkFile(parentFilePath, Chunk.fromReactMethodParams(chunks))
         promise.resolve(true)
       } catch (e: Throwable) {
         promise.reject(e)

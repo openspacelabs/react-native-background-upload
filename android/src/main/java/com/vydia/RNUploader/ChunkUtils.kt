@@ -1,9 +1,12 @@
 package com.vydia.RNUploader
 
 import com.facebook.react.bridge.ReadableArray
-import kotlinx.coroutines.*
-import java.io.RandomAccessFile
-import java.nio.channels.FileChannel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import java.io.FileInputStream
+import java.io.FileOutputStream
 
 
 data class Chunk(val position: Long, val size: Long, val path: String) {
@@ -27,19 +30,29 @@ data class Chunk(val position: Long, val size: Long, val path: String) {
   }
 }
 
-suspend fun chunkFile(
-  scope: CoroutineScope,
-  parentFilePath: String,
-  chunks: List<Chunk>
-) = withContext(Dispatchers.IO) {
-  val parentFile = RandomAccessFile(parentFilePath, "r")
+private const val BUFFER_SIZE = 128 * 1024 // 128 KB
 
-  chunks.map {
-    scope.async(Dispatchers.IO) {
-      val outputFile = RandomAccessFile(it.path, "rw")
-      val input = parentFile.channel.map(FileChannel.MapMode.READ_ONLY, it.position, it.size)
-      val output = outputFile.channel.map(FileChannel.MapMode.READ_WRITE, 0, it.size)
-      output.put(input)
+suspend fun chunkFile(parentFilePath: String, chunks: List<Chunk>) = coroutineScope {
+  chunks.map { chunk ->
+    async(Dispatchers.IO) {
+      val input = FileInputStream(parentFilePath)
+      val output = FileOutputStream(chunk.path)
+      try {
+        val buffer = ByteArray(BUFFER_SIZE)
+        input.skip(chunk.position)
+
+        var remainingBytes = chunk.size
+        while (remainingBytes > 0) {
+          val bytesRead = input.read(buffer, 0, minOf(BUFFER_SIZE.toLong(), remainingBytes).toInt())
+          if (bytesRead == -1) break
+          output.write(buffer, 0, bytesRead)
+          remainingBytes -= bytesRead
+        }
+      } finally {
+        input.close()
+        output.close()
+      }
     }
   }.awaitAll()
 }
+
