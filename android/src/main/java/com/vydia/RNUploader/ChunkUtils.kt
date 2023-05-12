@@ -35,22 +35,20 @@ private const val BUFFER_SIZE = 128 * 1024 // 128 KB
 suspend fun chunkFile(parentFilePath: String, chunks: List<Chunk>) = coroutineScope {
   chunks.map { chunk ->
     async(Dispatchers.IO) {
-      val input = FileInputStream(parentFilePath)
-      val output = FileOutputStream(chunk.path)
-      try {
-        val buffer = ByteArray(BUFFER_SIZE)
-        input.skip(chunk.position)
+      FileInputStream(parentFilePath).use { input ->
+        FileOutputStream(chunk.path).use { output ->
+          val buffer = ByteArray(BUFFER_SIZE)
+          input.skip(chunk.position)
 
-        var remainingBytes = chunk.size
-        while (remainingBytes > 0) {
-          val bytesRead = input.read(buffer, 0, minOf(BUFFER_SIZE.toLong(), remainingBytes).toInt())
-          if (bytesRead == -1) break
-          output.write(buffer, 0, bytesRead)
-          remainingBytes -= bytesRead
+          var remainingBytes = chunk.size
+          while (remainingBytes > 0) {
+            val bytesToRead = minOf(BUFFER_SIZE.toLong(), remainingBytes).toInt()
+            val bytesRead = input.read(buffer, 0, bytesToRead)
+            if (bytesRead == -1) break
+            output.write(buffer, 0, bytesRead)
+            remainingBytes -= bytesRead
+          }
         }
-      } finally {
-        input.close()
-        output.close()
       }
     }
   }.awaitAll()
