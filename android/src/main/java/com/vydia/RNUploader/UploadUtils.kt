@@ -3,7 +3,6 @@ package com.vydia.RNUploader
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
 import okhttp3.Headers.Companion.toHeaders
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
 import okio.Buffer
 import okio.BufferedSink
@@ -25,7 +24,7 @@ suspend fun okhttpUpload(
   onProgress: (Long) -> Unit
 ) =
   suspendCancellableCoroutine<Response> { continuation ->
-    val requestBody = file.asRequestBody(("application/octet-stream").toMediaType())
+    val requestBody = file.asRequestBody()
     var lastProgressReport = 0L
     fun throttled(): Boolean {
       val now = System.currentTimeMillis()
