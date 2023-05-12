@@ -11,7 +11,7 @@ import java.io.FileOutputStream
 
 data class Chunk(val position: Long, val size: Long, val path: String) {
   companion object {
-    fun fromReactMethodParams(paramChunks: ReadableArray): List<Chunk> {
+    fun fromReadableArray(paramChunks: ReadableArray): List<Chunk> {
       val chunks = mutableListOf<Chunk>()
       for (i in 0 until paramChunks.size()) {
         val paramChunk = paramChunks.getMap(i)

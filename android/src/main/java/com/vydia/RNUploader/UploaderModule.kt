@@ -38,7 +38,7 @@ class UploaderModule(context: ReactApplicationContext) :
   fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
     CoroutineScope(Dispatchers.IO).launch {
       try {
-        chunkFile(parentFilePath, Chunk.fromReactMethodParams(chunks))
+        chunkFile(parentFilePath, Chunk.fromReadableArray(chunks))
         promise.resolve(true)
       } catch (e: Throwable) {
         promise.reject(e)
@@ -69,7 +69,7 @@ class UploaderModule(context: ReactApplicationContext) :
    * @return whether the upload was started
    */
   private fun startUpload(options: ReadableMap): String {
-    val upload = Upload.fromOptions(options)
+    val upload = Upload.fromReadableMap(options)
     val data = Gson().toJson(upload)
 
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
