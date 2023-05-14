@@ -76,10 +76,19 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     var isRetried = false
     while (true) {
       try {
-        // Delay if it's an actual retry.
-        // Should be within the try block to account for worker cancellation,
-        // which resumes immediately and throws CancellationException.
-        if (isRetried) delay(RETRY_DELAY)
+        // - Delay if it's an actual retry.
+        if (isRetried) {
+          // - "delay" should be within the "try" block to account for worker cancellation,
+          // which cancels the delay immediately and throws CancellationException.
+          // - Linear backoff instead of exponential
+          // One reason for this is we retry on invalid connections. Exponential will
+          // take too long. If the server flakes and returns 500s, we don't retry but consider
+          // the request successful. This is consistent with iOS behavior.
+          // User gets notifications for these server issues and can manually retry.
+          // Since 500s are currently rare, it's likely ok. If they're too frequent,
+          // we can consider adding exponential backoff for them.
+          delay(RETRY_DELAY)
+        }
         isRetried = true
 
         val response = upload() ?: continue
