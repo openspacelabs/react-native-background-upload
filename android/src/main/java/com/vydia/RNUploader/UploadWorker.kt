@@ -30,12 +30,21 @@ private const val MAX_CONCURRENCY = 1
 // Retry delay
 private val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
 
+// Max total time for a single request to complete
+// This is 24hrs so plenty of time for large uploads
+// Worst case is the time maxes out and the upload gets restarted.
+// Not using unlimited time to prevent unexpected behaviors.
+private const val REQUEST_TIMEOUT = 24L
+private val REQUEST_TIMEOUT_UNIT = TimeUnit.HOURS
+
 // Control max concurrent requests using semaphore to instead of using
 // `maxConnectionsCount` in HttpClient as the latter introduces a delay between requests
 private val semaphore = Semaphore(MAX_CONCURRENCY)
 
 // Use Okhttp as it provides the most standard behaviors even though it's not coroutine friendly
-private val client = OkHttpClient()
+private val client = OkHttpClient.Builder()
+  .callTimeout(REQUEST_TIMEOUT, REQUEST_TIMEOUT_UNIT)
+  .build()
 
 private enum class Connectivity { NoWifi, NoInternet, Ok }
 
