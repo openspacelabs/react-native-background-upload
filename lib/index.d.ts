@@ -3,14 +3,6 @@ declare const _default: {
     startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<string>;
     cancelUpload: (cancelUploadId: string) => Promise<boolean>;
     addListener: AddListener;
-    chunkFile: (parentFilePath: string, chunks: {
-        /** Byte position of the chunk */
-        position: number;
-        /** Byte length of the chunk */
-        size: number;
-        /** Where the chunk will be exported to */
-        path: string;
-    }[]) => Promise<void>;
     ios: {
         /**
          * Directly check the state of a single upload task without using event listeners.

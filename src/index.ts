@@ -78,24 +78,6 @@ const addListener: AddListener = (eventType, uploadId, listener) =>
     }
   });
 
-/**
- * Splits a parent file into {numChunks} chunks and place them into the specified directory.
- * Each chunk file will be named by its corresponding index (0, 1, 2,...).
- */
-const chunkFile = async (
-  parentFilePath: string,
-  chunks: {
-    /** Byte position of the chunk */
-    position: number;
-    /** Byte length of the chunk */
-    size: number;
-    /** Where the chunk will be exported to */
-    path: string;
-  }[],
-) => {
-  await NativeModule.chunkFile(parentFilePath, chunks);
-};
-
 const ios = {
   /**
    * Directly check the state of a single upload task without using event listeners.
@@ -125,7 +107,6 @@ export default {
   startUpload,
   cancelUpload,
   addListener,
-  chunkFile,
   ios,
   android,
 };

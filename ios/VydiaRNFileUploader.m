@@ -265,54 +265,6 @@ RCT_EXPORT_METHOD(getUploadStatus: (NSString *)uploadId resolve:(RCTPromiseResol
     resolve(NULL);
 }
 
-/*
- * Light-speed file chunking method
- * Can chunk a 2GB file in under 3s
- */
-RCT_EXPORT_METHOD(chunkFile: (NSString *)parentFilePath
-                  chunks: (NSArray<NSDictionary *> *)chunks
-                  resolve: (RCTPromiseResolveBlock)resolve
-                  reject: (RCTPromiseRejectBlock)reject
-                  ) {
-    __block NSError *error;
-
-    // Create a readonly mem map reference to the file.
-    // This does not load the whole file into memory,
-    // but converts the file into a memory region.
-    NSData *parentFile = [NSData dataWithContentsOfFile:parentFilePath options:NSDataReadingMappedAlways error:&error];
-    if(error) {
-        reject(@"ChunkFile", @"Failed to get parent file", error);
-        return;
-    };
-
-    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    dispatch_group_t group = dispatch_group_create();
-
-
-    for(int i = 0; i < chunks.count; i++) {
-        NSDictionary * chunk = chunks[i];
-        double rangeStart = [[chunk objectForKey:@"position"] doubleValue];
-        double rangeLength = [[chunk objectForKey:@"size"] doubleValue];
-        NSString * chunkPath = [chunk objectForKey:@"path"];
-
-
-        dispatch_group_async(group, queue, ^{
-            // This also doesn't load the file content into memory
-            NSData *chunk = [parentFile subdataWithRange:NSMakeRange(rangeStart, rangeLength)];
-            [chunk writeToFile:chunkPath options:0 error:&error];
-        });
-    }
-
-    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-
-    if(error) {
-        reject(@"ChunkFile", @"Failed to chunk file", error);
-        return;
-    };
-
-    resolve([NSNumber numberWithBool:YES]);
-}
-
 
 - (NSData *)createBodyWithBoundary:(NSString *)boundary
                               path:(NSString *)path

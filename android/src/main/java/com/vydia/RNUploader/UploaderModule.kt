@@ -34,19 +34,6 @@ class UploaderModule(context: ReactApplicationContext) :
 
   override fun getName(): String = "RNFileUploader"
 
-  @ReactMethod
-  fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
-    CoroutineScope(Dispatchers.IO).launch {
-      try {
-        chunkFile(parentFilePath, Chunk.fromReadableArray(chunks))
-        promise.resolve(true)
-      } catch (e: Throwable) {
-        promise.reject(e)
-      }
-    }
-  }
-
-
   /*
    * Starts a file upload.
    * Returns a promise with the string ID of the upload.
