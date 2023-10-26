@@ -78,8 +78,11 @@ class UploaderModule(context: ReactApplicationContext) :
       .build()
 
     workManager
-      // cancel workers with duplicate ID
-      .beginUniqueWork(upload.id, ExistingWorkPolicy.REPLACE, request)
+      // Using KEEP policy to prevent it from cancelling the work if it's already running.
+      // Otherwise, it will emit "cancelled" and then go on to emit "progress" events,
+      // which is confusing and quite difficult to manage. "cancelled" should be reserved for
+      // when the user explicitly cancels the upload.
+      .beginUniqueWork(upload.id, ExistingWorkPolicy.KEEP, request)
       .enqueue()
 
     return upload.id
