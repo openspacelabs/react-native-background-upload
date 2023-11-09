@@ -105,11 +105,14 @@ const ios = {
    */
   getUploadStatus: async (
     jobId: string,
-  ): Promise<{
-    state: 'running' | 'suspended' | 'canceling' | undefined;
-    bytesSent?: number;
-    totalBytes?: number;
-  }> => (await NativeModule.getUploadStatus(jobId)) || { state: undefined },
+  ): Promise<
+    | {
+        state: 'running' | 'suspended' | 'canceling';
+        bytesSent: number;
+        totalBytes: number;
+      }
+    | undefined
+  > => await NativeModule.getUploadStatus(jobId),
 };
 
 const android = {

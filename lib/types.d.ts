@@ -12,8 +12,8 @@ export interface CompletedData extends EventData {
     responseCode: number;
     responseBody: string;
 }
-export declare type UploadId = string;
-export declare type UploadOptions = {
+export type UploadId = string;
+export type UploadOptions = {
     url: string;
     path: string;
     method: 'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE';
@@ -25,7 +25,7 @@ export declare type UploadOptions = {
     android: AndroidOnlyUploadOptions;
     ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
-declare type AndroidOnlyUploadOptions = {
+type AndroidOnlyUploadOptions = {
     notificationId: string;
     notificationTitle: string;
     notificationTitleNoWifi: string;
@@ -33,14 +33,14 @@ declare type AndroidOnlyUploadOptions = {
     notificationChannel: string;
     maxRetries?: number;
 };
-declare type IOSOnlyUploadOptions = {
+type IOSOnlyUploadOptions = {
     /**
      * AppGroup defined in XCode for extensions. Necessary when trying to upload things via this library
      * in the context of ShareExtension.
      */
     appGroup?: string;
 };
-declare type RawUploadOptions = {
+type RawUploadOptions = {
     type: 'raw';
 };
 export interface AddListener {

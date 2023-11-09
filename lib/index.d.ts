@@ -20,9 +20,9 @@ declare const _default: {
          */
         getUploadStatus: (jobId: string) => Promise<{
             state: "running" | "suspended" | "canceling";
-            bytesSent?: number;
-            totalBytes?: number;
-        }>;
+            bytesSent: number;
+            totalBytes: number;
+        } | undefined>;
     };
     android: {
         /**
