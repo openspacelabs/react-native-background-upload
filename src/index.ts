@@ -112,7 +112,7 @@ const ios = {
         totalBytes: number;
       }
     | undefined
-  > => await NativeModule.getUploadStatus(jobId),
+  > => await NativeModule.getUploadStatus?.(jobId),
 };
 
 const android = {
