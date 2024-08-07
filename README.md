@@ -96,7 +96,7 @@ All top-level methods are available as named exports or methods on the default e
 
 The primary method you will use, this starts the upload process.
 
-Returns a promise with the string ID of the upload. Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
+Returns a promise with the string ID of the upload. Will reject if the file doesn't exist or unknown native problems. 
 
 `options` is an object with following values:
 
