@@ -4,7 +4,7 @@
     "deploy": "sh deploy.sh"
   },
   "engines": {
-    "node": "16"
+    "node": "20"
   },
   "dependencies": {
     "@types/express": "^4.17.13",
@@ -16,8 +16,6 @@
     "typescript": "^4.5.4"
   },
   "devDependencies": {
-    "heroku": "^7.60.2",
-    "netlify-cli": "^10.3.3",
     "ts-node-dev": "^2.0.0",
     "tsc-watch": "^5.0.3"
   },
