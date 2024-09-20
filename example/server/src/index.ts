@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import path from 'path';
 import { inspect } from 'util';
 const md5File = require('md5-file');
-import formidable from 'formidable';
+import { formidable } from 'formidable';
 import { PassThrough } from 'stream';
 
 const router = express.Router();
@@ -45,7 +45,11 @@ router.post('/multipart-upload', async (req, res) => {
   } catch (err) {
     console.error(err);
     let httpCode =
-      err instanceof formidable.errors.FormidableError && err.httpCode;
+      !!err &&
+      typeof err === 'object' &&
+      'httpCode' in err &&
+      Number(err.httpCode);
+
     httpCode ||= 500;
     res.writeHead(httpCode, { 'Content-Type': 'text/plain' });
     res.end(String(err));
