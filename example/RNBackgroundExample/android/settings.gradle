@@ -1,8 +1,0 @@
-rootProject.name = 'RNBackgroundExample'
-apply from: file("../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesSettingsGradle(settings)
-include ':app'
-
-// Override auto-linking so we could link directly to the local module,
-// which helps with not having to copy changes over while developing
-include ':react-native-background-upload'
-project(':react-native-background-upload').projectDir = new File(settingsDir, '../../../android')

@@ -1,6 +1,6 @@
 module.exports = {
   root: true,
-  extends: '@react-native-community',
+  extends: '@react-native',
   plugins: ['unused-imports'],
   rules: {
     'unused-imports/no-unused-imports': 'error',
