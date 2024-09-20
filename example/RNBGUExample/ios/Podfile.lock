@@ -1239,6 +1239,27 @@ PODS:
     - Yoga
   - react-native-background-upload (7.5.1):
     - React
+  - react-native-image-picker (7.1.2):
+    - DoubleConversion
+    - glog
+    - hermes-engine
+    - RCT-Folly (= 2024.01.01.00)
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - Yoga
   - React-nativeconfig (0.75.3)
   - React-NativeModulesApple (0.75.3):
     - glog
@@ -1499,6 +1520,8 @@ PODS:
     - React-logger (= 0.75.3)
     - React-perflogger (= 0.75.3)
     - React-utils (= 0.75.3)
+  - RNFS (2.20.0):
+    - React-Core
   - SocketRocket (0.7.0)
   - Yoga (0.0.0)
 
@@ -1541,6 +1564,7 @@ DEPENDENCIES:
   - React-Mapbuffer (from `../node_modules/react-native/ReactCommon`)
   - React-microtasksnativemodule (from `../node_modules/react-native/ReactCommon/react/nativemodule/microtasks`)
   - react-native-background-upload (from `../../..`)
+  - react-native-image-picker (from `../node_modules/react-native-image-picker`)
   - React-nativeconfig (from `../node_modules/react-native/ReactCommon`)
   - React-NativeModulesApple (from `../node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios`)
   - React-perflogger (from `../node_modules/react-native/ReactCommon/reactperflogger`)
@@ -1567,6 +1591,7 @@ DEPENDENCIES:
   - React-utils (from `../node_modules/react-native/ReactCommon/react/utils`)
   - ReactCodegen (from `build/generated/ios`)
   - ReactCommon/turbomodule/core (from `../node_modules/react-native/ReactCommon`)
+  - RNFS (from `../node_modules/react-native-fs`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -1647,6 +1672,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native/ReactCommon/react/nativemodule/microtasks"
   react-native-background-upload:
     :path: "../../.."
+  react-native-image-picker:
+    :path: "../node_modules/react-native-image-picker"
   React-nativeconfig:
     :path: "../node_modules/react-native/ReactCommon"
   React-NativeModulesApple:
@@ -1699,6 +1726,8 @@ EXTERNAL SOURCES:
     :path: build/generated/ios
   ReactCommon:
     :path: "../node_modules/react-native/ReactCommon"
+  RNFS:
+    :path: "../node_modules/react-native-fs"
   Yoga:
     :path: "../node_modules/react-native/ReactCommon/yoga"
 
@@ -1739,6 +1768,7 @@ SPEC CHECKSUMS:
   React-Mapbuffer: 714f2fae68edcabfc332b754e9fbaa8cfc68fdd4
   React-microtasksnativemodule: 4943ad8f99be8ccf5a63329fa7d269816609df9e
   react-native-background-upload: c7b424cb756a538ada057c392be47bca79486106
+  react-native-image-picker: 2fbbafdae7a7c6db9d25df2f2b1db4442d2ca2ad
   React-nativeconfig: 4a9543185905fe41014c06776bf126083795aed9
   React-NativeModulesApple: 0506da59fc40d2e1e6e12a233db5e81c46face27
   React-perflogger: 3bbb82f18e9ac29a1a6931568e99d6305ef4403b
@@ -1765,6 +1795,7 @@ SPEC CHECKSUMS:
   React-utils: f2afa6acd905ca2ce7bb8ffb4a22f7f8a12534e8
   ReactCodegen: ff95a93d5ab5d9b2551571886271478eaa168565
   ReactCommon: 289214026502e6a93484f4a46bcc0efa4f3f2864
+  RNFS: 4ac0f0ea233904cb798630b3c077808c06931688
   SocketRocket: abac6f5de4d4d62d24e11868d7a2f427e0ef940d
   Yoga: 4ef80d96a5534f0e01b3055f17d1e19a9fc61b63
 

@@ -2,7 +2,9 @@
  * Handles HTTP background file uploads from an iOS or Android device.
  */
 import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
-import { AddListener, UploadId, UploadOptions } from 'types';
+import { AddListener, UploadId, UploadOptions } from './types';
+
+export * from './types';
 
 const NativeModule =
   NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader;

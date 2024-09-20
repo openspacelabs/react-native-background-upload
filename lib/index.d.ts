@@ -1,4 +1,5 @@
 import { AddListener, UploadOptions } from './types';
+export * from './types';
 declare const _default: {
     startUpload: ({ path, android, ios, ...options }: UploadOptions) => Promise<string>;
     cancelUpload: (cancelUploadId: string) => Promise<boolean>;

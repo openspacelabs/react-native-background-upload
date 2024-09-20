@@ -4,5 +4,6 @@
     "paths": {
       "react-native-background-upload": ["../../src"]
     }
-  }
+  },
+  "include": ["../../src"]
 }
