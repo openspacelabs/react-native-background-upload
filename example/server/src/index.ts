@@ -28,18 +28,19 @@ router.post('/multipart-upload', async (req, res) => {
 
   // When the entire body has been received, log it
   rawBodyStream.on('end', () => {
+    body = body.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
     console.log('Request Body with \\r and \\n visualized:');
-    console.log(body.replace(/\r/g, '\\r').replace(/\n/g, '\\n'));
+    console.log(middleTruncate(body, 2000));
   });
 
   try {
     // @ts-expect-error make compatible with form.parse
     formStream.headers = req.headers;
+    console.log('---headers', req.headers);
     // @ts-expect-error
     const [fields, files] = await formidable({}).parse(formStream);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const parsed = JSON.stringify({ fields, files }, null, 2);
-    console.log('---headers', req.headers);
     console.log('---parsed', parsed);
     res.end(parsed, 'utf8');
   } catch (err) {
@@ -108,3 +109,18 @@ app.use(router);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Running at http://localhost:${port}`));
+
+function middleTruncate(str: string, charsToShow: number) {
+  const len = str.length;
+  if (charsToShow % 2) charsToShow += 1;
+
+  // If the string is too short to truncate, return the original string
+  if (len <= charsToShow) return str;
+
+  // Extract the first N and last N characters
+  const start = str.substring(0, charsToShow / 2);
+  const end = str.substring(len - charsToShow / 2);
+
+  // Concatenate the start, '...' for the truncated part, and the end
+  return start + '...........' + end;
+}
