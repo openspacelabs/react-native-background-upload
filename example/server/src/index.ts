@@ -38,7 +38,10 @@ router.post('/multipart-upload', async (req, res) => {
     // @ts-expect-error
     const [fields, files] = await formidable({}).parse(formStream);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ fields, files }, null, 2));
+    const parsed = JSON.stringify({ fields, files }, null, 2);
+    console.log('---headers', req.headers);
+    console.log('---parsed', parsed);
+    res.end(parsed, 'utf8');
   } catch (err) {
     console.error(err);
     let httpCode =
