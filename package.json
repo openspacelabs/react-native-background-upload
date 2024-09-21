@@ -2,16 +2,16 @@
   "name": "react-native-background-upload",
   "version": "7.5.1",
   "description": "Cross platform http post file uploader with android and iOS background support",
-  "main": "lib/index.js",
+  "main": "src/index",
   "typings": "lib/index.d.ts",
   "react-native": "src/index",
   "source": "src/index",
   "scripts": {
     "build": "tsc && tsc-alias",
-    "lint": "yarn lint:ci --fix",
-    "lint:ci": "eslint --ext js,jsx,ts,tsx src example --quiet",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "release": "semantic-release"
+    "lint": "yarn lint-root --fix && yarn lint-example --fix",
+    "lint:ci": "yarn lint-root && yarn lint-example",
+    "lint-root": "eslint --ext js,jsx,ts,tsx src --quiet",
+    "lint-example": "yarn --cwd example/RNBGUExample lint"
   },
   "repository": {
     "type": "git",
@@ -36,25 +36,28 @@
   },
   "homepage": "https://github.com/Vydia/react-native-background-upload#readme",
   "devDependencies": {
-    "@babel/core": "^7.18.2",
-    "@babel/eslint-parser": "^7.18.2",
-    "@babel/eslint-plugin": "^7.17.7",
-    "@react-native-community/eslint-config": "^3.0.2",
-    "@semantic-release/commit-analyzer": "^6.3.3",
-    "@semantic-release/git": "^7.0.18",
-    "@semantic-release/github": "^5.5.5",
-    "@semantic-release/npm": "^5.3.4",
-    "@semantic-release/release-notes-generator": "^7.3.5",
-    "@types/react-native": "^0.64.0",
-    "eslint": "^8.17.0",
-    "eslint-plugin-unused-imports": "^2.0.0",
+    "@babel/core": "^7.20.0",
+    "@babel/preset-env": "^7.20.0",
+    "@babel/runtime": "^7.20.0",
+    "@react-native/babel-preset": "0.75.3",
+    "@react-native/eslint-config": "0.75.3",
+    "@react-native/metro-config": "0.75.3",
+    "@react-native/typescript-config": "0.75.3",
+    "@types/react": "^18.2.6",
+    "@types/react-test-renderer": "^18.0.0",
+    "babel-jest": "^29.6.3",
+    "eslint": "^8.19.0",
+    "eslint-plugin-unused-imports": "^4.1.4",
     "husky": "^4.2.3",
+    "jest": "^29.6.3",
     "lint-staged": "^10.0.8",
-    "metro-react-native-babel-preset": "^0.71.0",
-    "prettier": "^2.6.2",
+    "prettier": "2.8.8",
+    "react": "18.3.1",
+    "react-native": "0.75.3",
+    "react-test-renderer": "18.3.1",
     "semantic-release": "^15.13.31",
     "tsc-alias": "^1.6.8",
-    "typescript": "^4.7.3"
+    "typescript": "5.0.4"
   },
   "release": {
     "plugins": [
@@ -80,5 +83,6 @@
       ],
       "@semantic-release/release-notes-generator"
     ]
-  }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

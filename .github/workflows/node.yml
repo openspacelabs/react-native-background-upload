@@ -14,10 +14,12 @@ jobs:
     - name: setup node
       uses: actions/setup-node@v1
       with:
-        node-version: 12
+        node-version: 20
 
     - name: install node_modules
-      run: yarn install --frozen-lockfile
+      run: | 
+        yarn install --frozen-lockfile
+        yarn --cwd example/RNBGUExample install --frozen-lockfile 
 
     - name: node lint
       run:

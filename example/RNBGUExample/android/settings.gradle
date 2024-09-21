@@ -1,0 +1,11 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'RNBGUExample'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')
+
+// Override auto-linking so we could link directly to the local module,
+// which helps with not having to copy changes over while developing
+include ':react-native-background-upload'
+project(':react-native-background-upload').projectDir = new File(settingsDir, '../../../android')
