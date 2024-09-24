@@ -1237,7 +1237,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - Yoga
-  - react-native-background-upload (7.5.1):
+  - react-native-background-upload (7.5.2):
     - React
   - react-native-image-picker (7.1.2):
     - DoubleConversion
@@ -1767,7 +1767,7 @@ SPEC CHECKSUMS:
   React-logger: 4072f39df335ca443932e0ccece41fbeb5ca8404
   React-Mapbuffer: 714f2fae68edcabfc332b754e9fbaa8cfc68fdd4
   React-microtasksnativemodule: 4943ad8f99be8ccf5a63329fa7d269816609df9e
-  react-native-background-upload: c7b424cb756a538ada057c392be47bca79486106
+  react-native-background-upload: 00d51f342953fae50cd7705c4a5663710981c17a
   react-native-image-picker: 2fbbafdae7a7c6db9d25df2f2b1db4442d2ca2ad
   React-nativeconfig: 4a9543185905fe41014c06776bf126083795aed9
   React-NativeModulesApple: 0506da59fc40d2e1e6e12a233db5e81c46face27
@@ -1797,7 +1797,7 @@ SPEC CHECKSUMS:
   ReactCommon: 289214026502e6a93484f4a46bcc0efa4f3f2864
   RNFS: 4ac0f0ea233904cb798630b3c077808c06931688
   SocketRocket: abac6f5de4d4d62d24e11868d7a2f427e0ef940d
-  Yoga: 4ef80d96a5534f0e01b3055f17d1e19a9fc61b63
+  Yoga: 1354c027ab07c7736f99a3bef16172d6f1b12b47
 
 PODFILE CHECKSUM: 3299daa809621aaa179de3cd96e9009dc46fda43
 
