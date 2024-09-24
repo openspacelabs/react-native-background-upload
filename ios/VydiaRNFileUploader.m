@@ -14,8 +14,7 @@ RCT_EXPORT_MODULE();
 
 @synthesize bridge = _bridge;
 static int uploadId = 0;
-
-
+static RCTEventEmitter* staticEventEmitter = nil;
 static NSString *BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload";
 static NSString *WIFI_ONLY_BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload_WifiOnly";
 
@@ -29,7 +28,9 @@ NSMutableDictionary *_responsesData = nil;
 
 -(id) init {
     self = [super init];
+    if(!self) return self;
 
+    staticEventEmitter = self;
     _responsesData = [NSMutableDictionary dictionary];
 
     // Initializes as early as possible to receive delegate events
@@ -37,6 +38,17 @@ NSMutableDictionary *_responsesData = nil;
     [self urlSession];
     [self wifiOnlyUrlSession];
     return self;
+}
+
+// This method prevents crashing in development after a JS reload.
+// The reason for that is self is being sent to the operating system as delegate.
+// After a JS reload, the old self still sticks around accepting events and
+// sending the events through an old instance of the RN app. This crashes the app.
+// That's why we need to use a static variable to reference the latest instance of self, 
+// which references the latest instance of the RN app.
+- (void)_sendEventWithName:(NSString *)eventName body:(id)body {
+  if (!staticEventEmitter) return;
+  [staticEventEmitter sendEventWithName:eventName body:body];
 }
 
 - (NSArray<NSString *> *)supportedEvents {
@@ -422,14 +434,14 @@ didCompleteWithError:(NSError *)error {
     }
 
     if (error == nil) {
-        [self sendEventWithName:@"RNFileUploader-completed" body:data];
+        [self _sendEventWithName:@"RNFileUploader-completed" body:data];
     }
     else {
         [data setObject:error.localizedDescription forKey:@"error"];
         if (error.code == NSURLErrorCancelled) {
-            [self sendEventWithName:@"RNFileUploader-cancelled" body:data];
+            [self _sendEventWithName:@"RNFileUploader-cancelled" body:data];
         } else {
-            [self sendEventWithName:@"RNFileUploader-error" body:data];
+            [self _sendEventWithName:@"RNFileUploader-error" body:data];
         }
     }
 }
@@ -450,7 +462,7 @@ totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
         @"progress": [NSNumber numberWithFloat:progress]
     };
 
-    [self sendEventWithName:@"RNFileUploader-progress" body:data];
+    [self _sendEventWithName:@"RNFileUploader-progress" body:data];
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
