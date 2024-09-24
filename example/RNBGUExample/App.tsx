@@ -24,6 +24,9 @@ import {Colors} from 'react-native/Libraries/NewAppScreen';
 import Upload, {UploadOptions} from 'react-native-background-upload';
 
 import {launchImageLibrary} from 'react-native-image-picker';
+import {createFormDataFile} from './utils/formdata';
+
+const host = `http://${Platform.OS === 'ios' ? 'localhost' : '10.0.2.2'}:3000`;
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
@@ -42,65 +45,59 @@ const App = () => {
     });
   }, []);
 
-  const onPressUpload = (url: string) => {
-    launchImageLibrary(
-      {
-        mediaType: 'photo',
+  const upload = (
+    url: string,
+    path: string,
+    headers?: UploadOptions['headers'],
+  ) => {
+    const uploadOpts: UploadOptions = {
+      android: {
+        notificationId: 'RNBGUExample',
+        notificationTitle: 'RNBGUExample',
+        notificationTitleNoWifi: 'No wifi',
+        notificationTitleNoInternet: 'No internet',
+        notificationChannel: 'RNBGUExample',
       },
-      response => {
-        console.log('ImagePicker response: ', response);
-        const {didCancel, errorMessage, assets} = response;
-        if (didCancel) {
-          return;
-        }
-        if (errorMessage) {
-          console.warn('ImagePicker error:', errorMessage);
-          return;
-        }
+      type: 'raw',
+      url,
+      path,
+      method: 'POST',
+      headers,
+    };
 
-        const asset = assets?.[0];
-        const path =
-          Platform.OS === 'android' ? asset?.originalPath : asset?.uri;
-        if (!path) {
-          return Alert.alert('Invalid path');
-        }
-        if (!asset?.type) {
-          return Alert.alert('Invalid file type');
-        }
+    Upload.startUpload(uploadOpts)
+      .then(uploadId => {
+        console.log(
+          `Upload started with options: ${JSON.stringify(uploadOpts)}`,
+        );
+        setUploadId(uploadId);
+        setProgress(0);
+      })
+      .catch(function (err) {
+        setUploadId(undefined);
+        setProgress(undefined);
+        console.log('Upload error!', err);
+      });
+  };
 
-        // Video is stored locally on the device
-        const uploadOpts: UploadOptions = {
-          android: {
-            notificationId: 'RNBGUExample',
-            notificationTitle: 'RNBGUExample',
-            notificationTitleNoWifi: 'No wifi',
-            notificationTitleNoInternet: 'No internet',
-            notificationChannel: 'RNBGUExample',
-          },
-          type: 'raw',
-          url,
-          path,
-          method: 'POST',
-          headers: {
-            'Content-Type': asset.type || '',
-          },
-        };
+  const getAsset = async () => {
+    const response = await launchImageLibrary({mediaType: 'photo'});
+    console.log('ImagePicker response: ', response);
+    const {didCancel, errorMessage, assets} = response;
+    if (didCancel) return;
 
-        Upload.startUpload(uploadOpts)
-          .then(uploadId => {
-            console.log(
-              `Upload started with options: ${JSON.stringify(uploadOpts)}`,
-            );
-            setUploadId(uploadId);
-            setProgress(0);
-          })
-          .catch(function (err) {
-            setUploadId(undefined);
-            setProgress(undefined);
-            console.log('Upload error!', err);
-          });
-      },
-    );
+    if (errorMessage) {
+      console.warn('ImagePicker error:', errorMessage);
+      return;
+    }
+
+    const asset = assets?.[0];
+    const type = asset?.type;
+    const path = asset?.uri;
+    if (!path) return Alert.alert('Invalid file path');
+    if (!type) return Alert.alert('Invalid file type');
+
+    return {path, type} as const;
   };
 
   return (
@@ -114,13 +111,30 @@ const App = () => {
             <View style={styles.sectionContainer}>
               <Button
                 title="Tap To Upload Multipart"
-                onPress={() =>
-                  onPressUpload(
-                    `http://${
-                      Platform.OS === 'ios' ? 'localhost' : '10.0.2.2'
-                    }:3000/multipart-upload`,
-                  )
-                }
+                onPress={async () => {
+                  const asset = await getAsset();
+                  if (!asset) return;
+
+                  const {path, contentType} = await createFormDataFile(
+                    'formdata_' + new Date().toString(),
+                    [
+                      {
+                        name: 'data',
+                        string: JSON.stringify({key: 'value'}),
+                        contentType: 'application/json',
+                      },
+                      {
+                        name: 'file',
+                        path: asset.path,
+                        contentType: asset.type,
+                      },
+                    ],
+                  );
+
+                  upload(`${host}/multipart-upload`, path, {
+                    'Content-Type': contentType,
+                  });
+                }}
               />
 
               <View style={{height: 32}} />
