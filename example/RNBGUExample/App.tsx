@@ -24,9 +24,6 @@ import {Colors} from 'react-native/Libraries/NewAppScreen';
 import Upload, {UploadOptions} from 'react-native-background-upload';
 
 import {launchImageLibrary} from 'react-native-image-picker';
-import {createFormDataFile} from './utils/formdata';
-
-const host = `http://${Platform.OS === 'ios' ? 'localhost' : '10.0.2.2'}:3000`;
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
@@ -45,11 +42,26 @@ const App = () => {
     });
   }, []);
 
-  const upload = (
-    url: string,
-    path: string,
-    headers?: UploadOptions['headers'],
-  ) => {
+  const onPressUpload = async () => {
+    const url = 'https://httpbin.org/put/404';
+
+    const response = await launchImageLibrary({mediaType: 'photo'});
+
+    console.log('ImagePicker response: ', response);
+    const {didCancel, errorMessage, assets} = response;
+    if (didCancel) return;
+
+    if (errorMessage) {
+      console.warn('ImagePicker error:', errorMessage);
+      return;
+    }
+
+    const asset = assets?.[0];
+    const path = Platform.OS === 'android' ? asset?.originalPath : asset?.uri;
+    if (!path) return Alert.alert('Invalid path');
+    if (!asset?.type) return Alert.alert('Invalid file type');
+
+    // Video is stored locally on the device
     const uploadOpts: UploadOptions = {
       android: {
         notificationId: 'RNBGUExample',
@@ -62,7 +74,9 @@ const App = () => {
       url,
       path,
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': asset.type || '',
+      },
     };
 
     Upload.startUpload(uploadOpts)
@@ -80,26 +94,6 @@ const App = () => {
       });
   };
 
-  const getAsset = async () => {
-    const response = await launchImageLibrary({mediaType: 'photo'});
-    console.log('ImagePicker response: ', response);
-    const {didCancel, errorMessage, assets} = response;
-    if (didCancel) return;
-
-    if (errorMessage) {
-      console.warn('ImagePicker error:', errorMessage);
-      return;
-    }
-
-    const asset = assets?.[0];
-    const type = asset?.type;
-    const path = asset?.uri;
-    if (!path) return Alert.alert('Invalid file path');
-    if (!type) return Alert.alert('Invalid file type');
-
-    return {path, type} as const;
-  };
-
   return (
     <>
       <StatusBar barStyle="dark-content" />
@@ -109,33 +103,7 @@ const App = () => {
           style={styles.scrollView}>
           <View style={styles.body}>
             <View style={styles.sectionContainer}>
-              <Button
-                title="Tap To Upload Multipart"
-                onPress={async () => {
-                  const asset = await getAsset();
-                  if (!asset) return;
-
-                  const {path, contentType} = await createFormDataFile(
-                    'formdata_' + new Date().toString(),
-                    [
-                      {
-                        name: 'data',
-                        string: JSON.stringify({key: 'value'}),
-                        contentType: 'application/json',
-                      },
-                      {
-                        name: 'file',
-                        path: asset.path,
-                        contentType: asset.type,
-                      },
-                    ],
-                  );
-
-                  upload(`${host}/multipart-upload`, path, {
-                    'Content-Type': contentType,
-                  });
-                }}
-              />
+              <Button title="Upload" onPress={onPressUpload} />
 
               <View style={{height: 32}} />
               <Text style={{textAlign: 'center'}}>
@@ -147,7 +115,7 @@ const App = () => {
               <View />
               <Button
                 testID="cancel_button"
-                title="Tap to Cancel Upload"
+                title="Cancel Upload"
                 onPress={() => {
                   if (!uploadId) {
                     console.log('Nothing to cancel!');
