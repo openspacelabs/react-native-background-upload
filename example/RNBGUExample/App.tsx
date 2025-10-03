@@ -70,8 +70,6 @@ const App = () => {
     await notifee.createChannel({
       id: channelId,
       name: channelId,
-      visibility: AndroidVisibility.PRIVATE,
-      // LOW so it doesn't vibrate every time a new chunk upload starts
       importance: AndroidImportance.LOW,
     });
 
