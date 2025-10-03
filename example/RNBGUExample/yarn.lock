@@ -1477,6 +1477,11 @@
     "@nodelib/fs.scandir" "2.1.5"
     fastq "^1.6.0"
 
+"@notifee/react-native@^9.1.8":
+  version "9.1.8"
+  resolved "https://registry.yarnpkg.com/@notifee/react-native/-/react-native-9.1.8.tgz#3d55cb3fbcc21f9e35931e366afdf64b294da891"
+  integrity sha512-Az/dueoPerJsbbjRxu8a558wKY+gONUrfoy3Hs++5OqbeMsR0dYe6P+4oN6twrLFyzAhEA1tEoZRvQTFDRmvQg==
+
 "@react-native-community/cli-clean@14.1.0":
   version "14.1.0"
   resolved "https://registry.yarnpkg.com/@react-native-community/cli-clean/-/cli-clean-14.1.0.tgz#fee1a178fa58c84dfe18e23ee79fd3110d974971"
@@ -5342,6 +5347,11 @@ normalize-path@^3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/normalize-path/-/normalize-path-3.0.0.tgz#0dcd69ff23a1c9b11fd0978316644a0388216a65"
   integrity sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==
+
+notifee@^0.0.1:
+  version "0.0.1"
+  resolved "https://registry.yarnpkg.com/notifee/-/notifee-0.0.1.tgz#0b06f1fc2dc03d2573a167148df0dd39faeb9ae8"
+  integrity sha512-R5DEyfQnhBR717u66Zut+Jx5MAOS4iLNSVEdsbiVcSzPH9S1gjxHEUJNnLnUmRTbvz8L8sUzhgkNMrtgm55UHg==
 
 npm-run-path@^4.0.1:
   version "4.0.1"

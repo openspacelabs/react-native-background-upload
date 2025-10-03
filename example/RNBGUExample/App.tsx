@@ -15,19 +15,28 @@ import {
   Text,
   StatusBar,
   Button,
-  Platform,
-  Alert,
 } from 'react-native';
-
+import notifee, {
+  AndroidImportance,
+  AndroidVisibility,
+} from '@notifee/react-native';
 import {Colors} from 'react-native/Libraries/NewAppScreen';
 
 import Upload, {UploadOptions} from 'react-native-background-upload';
 
-import {launchImageLibrary} from 'react-native-image-picker';
+import * as RNFS from 'react-native-fs';
+
+const TEST_FILE = `${RNFS.DocumentDirectoryPath}/1MB.bin`;
+const TEST_FILE_URL =
+  'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
+const UPLOAD_URL = 'https://httpbin.org/put/404';
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
   const [progress, setProgress] = useState<number>();
+  const [testFileDownload, setTestFileDownload] = useState<
+    'downloading' | 'downloaded'
+  >();
 
   useEffect(() => {
     Upload.addListener('progress', null, data => {
@@ -42,41 +51,43 @@ const App = () => {
     });
   }, []);
 
+  useEffect(() => {
+    RNFS.exists('file://' + TEST_FILE)
+      .then(exists => {
+        if (exists) return;
+
+        setTestFileDownload('downloading');
+        return RNFS.downloadFile({fromUrl: TEST_FILE_URL, toFile: TEST_FILE})
+          .promise;
+      })
+      .then(() => setTestFileDownload('downloaded'));
+  }, []);
+
   const onPressUpload = async () => {
-    const url = 'https://httpbin.org/put/404';
+    await notifee.requestPermission({alert: true, sound: true});
 
-    const response = await launchImageLibrary({mediaType: 'photo'});
+    const channelId = 'RNBGUExample';
+    await notifee.createChannel({
+      id: channelId,
+      name: channelId,
+      visibility: AndroidVisibility.PRIVATE,
+      // LOW so it doesn't vibrate every time a new chunk upload starts
+      importance: AndroidImportance.LOW,
+    });
 
-    console.log('ImagePicker response: ', response);
-    const {didCancel, errorMessage, assets} = response;
-    if (didCancel) return;
-
-    if (errorMessage) {
-      console.warn('ImagePicker error:', errorMessage);
-      return;
-    }
-
-    const asset = assets?.[0];
-    const path = Platform.OS === 'android' ? asset?.originalPath : asset?.uri;
-    if (!path) return Alert.alert('Invalid path');
-    if (!asset?.type) return Alert.alert('Invalid file type');
-
-    // Video is stored locally on the device
     const uploadOpts: UploadOptions = {
       android: {
-        notificationId: 'RNBGUExample',
-        notificationTitle: 'RNBGUExample',
+        notificationId: channelId,
+        notificationTitle: channelId,
         notificationTitleNoWifi: 'No wifi',
         notificationTitleNoInternet: 'No internet',
-        notificationChannel: 'RNBGUExample',
+        notificationChannel: channelId,
       },
       type: 'raw',
-      url,
-      path,
+      url: UPLOAD_URL,
+      path: TEST_FILE,
       method: 'POST',
-      headers: {
-        'Content-Type': asset.type || '',
-      },
+      headers: {},
     };
 
     Upload.startUpload(uploadOpts)
@@ -98,40 +109,49 @@ const App = () => {
     <>
       <StatusBar barStyle="dark-content" />
       <SafeAreaView testID="main_screen">
-        <ScrollView
-          contentInsetAdjustmentBehavior="automatic"
-          style={styles.scrollView}>
-          <View style={styles.body}>
-            <View style={styles.sectionContainer}>
-              <Button title="Upload" onPress={onPressUpload} />
+        <View style={{padding: 20}}>
+          {testFileDownload === 'downloading' && (
+            <Text style={{textAlign: 'center'}}>Downloading test file...</Text>
+          )}
+        </View>
+        {testFileDownload === 'downloaded' && (
+          <ScrollView
+            contentInsetAdjustmentBehavior="automatic"
+            style={styles.scrollView}>
+            <View style={styles.body}>
+              <View style={styles.sectionContainer}>
+                <Button title="Upload" onPress={onPressUpload} />
 
-              <View style={{height: 32}} />
-              <Text style={{textAlign: 'center'}}>
-                {`Current Upload ID: ${uploadId === null ? 'none' : uploadId}`}
-              </Text>
-              <Text style={{textAlign: 'center'}}>
-                {`Progress: ${progress === null ? 'none' : `${progress}%`}`}
-              </Text>
-              <View />
-              <Button
-                testID="cancel_button"
-                title="Cancel Upload"
-                onPress={() => {
-                  if (!uploadId) {
-                    console.log('Nothing to cancel!');
-                    return;
-                  }
+                <View style={{height: 32}} />
+                <Text style={{textAlign: 'center'}}>
+                  {`Current Upload ID: ${
+                    uploadId === null ? 'none' : uploadId
+                  }`}
+                </Text>
+                <Text style={{textAlign: 'center'}}>
+                  {`Progress: ${progress === null ? 'none' : `${progress}%`}`}
+                </Text>
+                <View />
+                <Button
+                  testID="cancel_button"
+                  title="Cancel Upload"
+                  onPress={() => {
+                    if (!uploadId) {
+                      console.log('Nothing to cancel!');
+                      return;
+                    }
 
-                  Upload.cancelUpload(uploadId).then(() => {
-                    console.log(`Upload ${uploadId} canceled`);
-                    setUploadId(undefined);
-                    setProgress(undefined);
-                  });
-                }}
-              />
+                    Upload.cancelUpload(uploadId).then(() => {
+                      console.log(`Upload ${uploadId} canceled`);
+                      setUploadId(undefined);
+                      setProgress(undefined);
+                    });
+                  }}
+                />
+              </View>
             </View>
-          </View>
-        </ScrollView>
+          </ScrollView>
+        )}
       </SafeAreaView>
     </>
   );
