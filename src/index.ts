@@ -2,7 +2,12 @@
  * Handles HTTP background file uploads from an iOS or Android device.
  */
 import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
-import { AddListener, UploadId, UploadOptions } from './types';
+import {
+  AddListener,
+  AndroidInitializationOptions,
+  UploadId,
+  UploadOptions,
+} from './types';
 
 export * from './types';
 
@@ -18,6 +23,18 @@ if (NativeModules.VydiaRNFileUploader) {
   NativeModule.addListener(eventPrefix + 'cancelled');
   NativeModule.addListener(eventPrefix + 'completed');
 }
+
+let initializedPromise: Promise<void> | undefined;
+
+/**
+ * Initializes the module with the given options.
+ * Must be called at the global level before starting any uploads.
+ * The notification channel doesn't have to be created beforehand.
+ * @param options
+ */
+const initialize = (options: AndroidInitializationOptions) => {
+  initializedPromise = Promise.resolve(NativeModule.initialize?.(options));
+};
 
 /**
  * Starts uploading a file to an HTTP endpoint.
@@ -35,12 +52,13 @@ if (NativeModules.VydiaRNFileUploader) {
  * Returns a promise with the string ID of the upload.  Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
  * It is recommended to add listeners in the .then of this promise.
 */
-const startUpload = ({
+const startUpload = async ({
   path,
-  android,
   ios,
   ...options
 }: UploadOptions): Promise<UploadId> => {
+  await initializedPromise;
+
   if (!path.startsWith(fileURIPrefix)) {
     path = fileURIPrefix + path;
   }
@@ -49,7 +67,7 @@ const startUpload = ({
     path = path.replace(fileURIPrefix, '');
   }
 
-  return NativeModule.startUpload({ ...options, ...android, ...ios, path });
+  return NativeModule.startUpload({ ...options, ...ios, path });
 };
 
 /**
@@ -127,6 +145,7 @@ const android = {
 };
 
 export default {
+  initialize,
   startUpload,
   cancelUpload,
   addListener,

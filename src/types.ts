@@ -29,11 +29,10 @@ export type UploadOptions = {
   };
   // Whether the upload should wait for wifi before starting
   wifiOnly?: boolean;
-  android: AndroidOnlyUploadOptions;
   ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
 
-type AndroidOnlyUploadOptions = {
+export type AndroidInitializationOptions = {
   notificationId: string;
   notificationTitle: string;
   notificationTitleNoWifi: string;

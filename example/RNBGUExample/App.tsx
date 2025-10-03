@@ -16,10 +16,7 @@ import {
   StatusBar,
   Button,
 } from 'react-native';
-import notifee, {
-  AndroidImportance,
-  AndroidVisibility,
-} from '@notifee/react-native';
+import notifee, {AndroidImportance} from '@notifee/react-native';
 import {Colors} from 'react-native/Libraries/NewAppScreen';
 
 import Upload, {UploadOptions} from 'react-native-background-upload';
@@ -30,6 +27,15 @@ const TEST_FILE = `${RNFS.DocumentDirectoryPath}/1MB.bin`;
 const TEST_FILE_URL =
   'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
 const UPLOAD_URL = 'https://httpbin.org/put/404';
+const ANDROID_NOTIFICATION_CHANNEL = 'RNBGUExample';
+
+Upload.initialize({
+  notificationId: ANDROID_NOTIFICATION_CHANNEL,
+  notificationTitle: ANDROID_NOTIFICATION_CHANNEL,
+  notificationTitleNoWifi: 'No wifi',
+  notificationTitleNoInternet: 'No internet',
+  notificationChannel: ANDROID_NOTIFICATION_CHANNEL,
+});
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
@@ -66,21 +72,13 @@ const App = () => {
   const onPressUpload = async () => {
     await notifee.requestPermission({alert: true, sound: true});
 
-    const channelId = 'RNBGUExample';
     await notifee.createChannel({
-      id: channelId,
-      name: channelId,
+      id: ANDROID_NOTIFICATION_CHANNEL,
+      name: ANDROID_NOTIFICATION_CHANNEL,
       importance: AndroidImportance.LOW,
     });
 
     const uploadOpts: UploadOptions = {
-      android: {
-        notificationId: channelId,
-        notificationTitle: channelId,
-        notificationTitleNoWifi: 'No wifi',
-        notificationTitleNoInternet: 'No internet',
-        notificationChannel: channelId,
-      },
       type: 'raw',
       url: UPLOAD_URL,
       path: TEST_FILE,
