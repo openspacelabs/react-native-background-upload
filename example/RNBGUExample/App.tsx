@@ -16,10 +16,7 @@ import {
   StatusBar,
   Button,
 } from 'react-native';
-import notifee, {
-  AndroidImportance,
-  AndroidVisibility,
-} from '@notifee/react-native';
+import notifee, {AndroidImportance} from '@notifee/react-native';
 import {Colors} from 'react-native/Libraries/NewAppScreen';
 
 import Upload, {UploadOptions} from 'react-native-background-upload';
