@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@notifee/react-native": "^9.1.8",
-    "notifee": "^0.0.1",
     "path": "^0.12.7",
     "react": "18.3.1",
     "react-native": "0.75.3",
