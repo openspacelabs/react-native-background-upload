@@ -12,7 +12,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 
-object NotificationConfigsSerializer : Serializer<NotificationConfigs> {
+private object NotificationConfigsSerializer : Serializer<NotificationConfigs> {
   override val defaultValue: NotificationConfigs = NotificationConfigs.getDefaultInstance()
 
   override suspend fun readFrom(input: InputStream): NotificationConfigs {
