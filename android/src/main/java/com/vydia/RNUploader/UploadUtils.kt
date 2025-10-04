@@ -76,3 +76,6 @@ private fun withProgressListener(
     bufferedSink.flush()
   }
 }
+
+class MissingOptionException(optionName: String) :
+  IllegalArgumentException("Missing '$optionName'")

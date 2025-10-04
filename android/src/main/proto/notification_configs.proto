@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+option java_package = "com.vydia.RNUploader";
+option java_multiple_files = true;
+
+// Keep field numbers STABLE forever; add new fields with new tags.
+message NotificationConfigs {
+  int32 id = 1;
+  string title = 2;
+  string title_no_internet = 3;
+  string title_no_wifi = 4;
+  string channel = 5;
+}

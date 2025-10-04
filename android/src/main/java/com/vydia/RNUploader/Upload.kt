@@ -14,15 +14,7 @@ data class Upload(
   val maxRetries: Int,
   val wifiOnly: Boolean,
   val headers: Map<String, String>,
-  val notificationId: String,
-  val notificationTitle: String,
-  val notificationTitleNoInternet: String,
-  val notificationTitleNoWifi: String,
-  val notificationChannel: String,
 ) {
-  class MissingOptionException(optionName: String) :
-    IllegalArgumentException("Missing '$optionName'")
-
   companion object {
     fun fromReadableMap(map: ReadableMap) = Upload(
       id = map.getString("customUploadId") ?: UUID.randomUUID().toString(),
@@ -39,16 +31,6 @@ data class Upload(
         }
         return@let map
       },
-      notificationId = map.getString(Upload::notificationId.name)
-        ?: throw MissingOptionException(Upload::notificationId.name),
-      notificationTitle = map.getString(Upload::notificationTitle.name)
-        ?: throw MissingOptionException(Upload::notificationTitle.name),
-      notificationTitleNoInternet = map.getString(Upload::notificationTitleNoInternet.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoInternet.name),
-      notificationTitleNoWifi = map.getString(Upload::notificationTitleNoWifi.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoWifi.name),
-      notificationChannel = map.getString(Upload::notificationChannel.name)
-        ?: throw MissingOptionException(Upload::notificationChannel.name),
     )
   }
 }

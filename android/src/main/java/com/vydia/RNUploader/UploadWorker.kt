@@ -212,14 +212,15 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   // builds the notification required to enable Foreground mode
   override suspend fun getForegroundInfo(): ForegroundInfo {
     // All workers share the same notification that shows the total progress
-    val id = upload.notificationId.hashCode()
-    val channel = upload.notificationChannel
+    val notificationConfigs = fetchNotificationConfigs(context)
+    val id = notificationConfigs.id
+    val channel = notificationConfigs.channel
     val progress = UploadProgress.total(context)
     val progress2Decimals = "%.2f".format(progress)
     val title = when (connectivity) {
-      Connectivity.NoWifi -> upload.notificationTitleNoWifi
-      Connectivity.NoInternet -> upload.notificationTitleNoInternet
-      Connectivity.Ok -> upload.notificationTitle
+      Connectivity.NoWifi -> notificationConfigs.titleNoWifi
+      Connectivity.NoInternet -> notificationConfigs.titleNoInternet
+      Connectivity.Ok -> notificationConfigs.title
     }
 
     // Custom layout for progress notification.
