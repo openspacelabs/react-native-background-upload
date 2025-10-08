@@ -40,7 +40,7 @@ class UploaderModule(private val context: ReactApplicationContext) :
 
 
   @ReactMethod
-  fun initialize(opts: ReadableMap, promise: Promise) {
+  fun initialize(opts: ReadableMap, promise: Promise) =
     CoroutineScope(Dispatchers.IO).launch {
       try {
         updateNotificationConfigs(opts, context)
@@ -53,7 +53,6 @@ class UploaderModule(private val context: ReactApplicationContext) :
         promise.reject(exc)
       }
     }
-  }
 
 
   /*

@@ -23,9 +23,7 @@ private object NotificationConfigsSerializer : Serializer<NotificationConfigs> {
     }
   }
 
-  override suspend fun writeTo(
-    t: NotificationConfigs,
-    output: OutputStream) = t.writeTo(output)
+  override suspend fun writeTo(t: NotificationConfigs, output: OutputStream) = t.writeTo(output)
 }
 
 // This is the recommended way to create a DataStore instance
@@ -35,7 +33,7 @@ private val Context.vydiaNotificationConfigs: DataStore<NotificationConfigs> by 
   serializer = NotificationConfigsSerializer
 )
 
-suspend fun fetchNotificationConfigs(context: Context): NotificationConfigs =
+suspend fun fetchNotificationConfigs(context: Context) =
   context.vydiaNotificationConfigs.data.first()
 
 suspend fun updateNotificationConfigs(opts: ReadableMap, context: Context) {
