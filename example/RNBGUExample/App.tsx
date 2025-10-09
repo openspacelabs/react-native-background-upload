@@ -8,13 +8,13 @@
 
 import React, {useEffect, useState} from 'react';
 import {
-  SafeAreaView,
-  StyleSheet,
-  ScrollView,
-  View,
-  Text,
-  StatusBar,
   Button,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 import notifee, {AndroidImportance} from '@notifee/react-native';
 import {Colors} from 'react-native/Libraries/NewAppScreen';
@@ -46,6 +46,7 @@ const App = () => {
 
   useEffect(() => {
     Upload.addListener('progress', null, data => {
+      setUploadId(data.uploadId);
       setProgress(data.progress);
       console.log(`Progress: ${data.progress}%`);
     });
@@ -58,6 +59,14 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    notifee.requestPermission({alert: true, sound: true});
+
+    notifee.createChannel({
+      id: ANDROID_NOTIFICATION_CHANNEL,
+      name: ANDROID_NOTIFICATION_CHANNEL,
+      importance: AndroidImportance.LOW,
+    });
+
     RNFS.exists('file://' + TEST_FILE)
       .then(exists => {
         if (exists) return;
@@ -69,16 +78,12 @@ const App = () => {
       .then(() => setTestFileDownload('downloaded'));
   }, []);
 
-  const onPressUpload = async () => {
-    await notifee.requestPermission({alert: true, sound: true});
-
-    await notifee.createChannel({
-      id: ANDROID_NOTIFICATION_CHANNEL,
-      name: ANDROID_NOTIFICATION_CHANNEL,
-      importance: AndroidImportance.LOW,
-    });
+  const doUpload = async (id?: string) => {
+    const customUploadId = id ?? Date.now().toString() + Math.random();
+    console.log('---starting', customUploadId);
 
     const uploadOpts: UploadOptions = {
+      customUploadId,
       type: 'raw',
       url: UPLOAD_URL,
       path: TEST_FILE,
@@ -99,6 +104,12 @@ const App = () => {
         setProgress(undefined);
         console.log('Upload error!', err);
       });
+  };
+
+  const onPressUpload = () => {
+    for (let i = 0; i < 100; i++) {
+      doUpload();
+    }
   };
 
   return (

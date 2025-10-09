@@ -4,13 +4,11 @@ import android.util.Log
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
-import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,9 +28,6 @@ class UploaderModule(private val context: ReactApplicationContext) :
 
   init {
     reactContext = context
-    // workers may be killed abruptly for whatever reasons,
-    // so they might not have had a chance to clear the progress data.
-    UploadProgress.clearIfNeeded(context)
   }
 
 
@@ -62,8 +57,15 @@ class UploaderModule(private val context: ReactApplicationContext) :
   @ReactMethod
   fun startUpload(rawOptions: ReadableMap, promise: Promise) {
     try {
-      val id = startUpload(rawOptions)
-      promise.resolve(id)
+      val upload = Upload.fromRawOptions(rawOptions)
+      UploadQueue.add(upload)
+
+      val request = OneTimeWorkRequestBuilder<UploadWorker>().build()
+      workManager
+        .beginUniqueWork(WORKER_TAG, ExistingWorkPolicy.KEEP, request)
+        .enqueue()
+
+      promise.resolve(upload.id)
     } catch (exc: Throwable) {
       if (exc !is MissingOptionException) {
         exc.printStackTrace()
@@ -73,30 +75,6 @@ class UploaderModule(private val context: ReactApplicationContext) :
     }
   }
 
-  /**
-   * @return whether the upload was started
-   */
-  private fun startUpload(options: ReadableMap): String {
-    val upload = Upload.fromReadableMap(options)
-    val data = Gson().toJson(upload)
-
-    val request = OneTimeWorkRequestBuilder<UploadWorker>()
-      .addTag(WORKER_TAG)
-      .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
-      .build()
-
-    workManager
-      // Using KEEP policy to prevent it from cancelling the work if it's already running.
-      // Otherwise, it will emit "cancelled" and then go on to emit "progress" events,
-      // which is confusing and quite difficult to manage. "cancelled" should be reserved for
-      // when the user explicitly cancels the upload.
-      .beginUniqueWork(upload.id, ExistingWorkPolicy.KEEP, request)
-      .enqueue()
-
-    return upload.id
-  }
-
-
   /*
    * Cancels file upload
    * Accepts upload ID as a first argument, this upload will be cancelled
@@ -105,7 +83,8 @@ class UploaderModule(private val context: ReactApplicationContext) :
   @ReactMethod
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
-      workManager.cancelUniqueWork(uploadId)
+      // Just remove from queue, worker will handle progress cleanup
+      UploadQueue.remove(uploadId)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
@@ -114,13 +93,13 @@ class UploaderModule(private val context: ReactApplicationContext) :
     }
   }
 
-
   /*
    * Cancels all file uploads
    */
   @ReactMethod
   fun stopAllUploads(promise: Promise) {
     try {
+      UploadQueue.clear()
       workManager.cancelAllWorkByTag(WORKER_TAG)
       promise.resolve(true)
     } catch (exc: Throwable) {
@@ -130,6 +109,4 @@ class UploaderModule(private val context: ReactApplicationContext) :
     }
   }
 
-
 }
-

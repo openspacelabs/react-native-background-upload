@@ -15,6 +15,13 @@ import kotlin.coroutines.resumeWithException
 // Throttling interval of progress reports
 private const val PROGRESS_INTERVAL = 500 // milliseconds
 
+// Data class to hold the important response information
+data class UploadResponse(
+  val statusCode: Int,
+  val statusMessage: String,
+  val headers: Map<String, String>,
+  val body: String? = null
+)
 
 // make an upload request using okhttp
 suspend fun okhttpUpload(
@@ -22,8 +29,8 @@ suspend fun okhttpUpload(
   upload: Upload,
   file: File,
   onProgress: (Long) -> Unit
-) =
-  suspendCancellableCoroutine<Response> { continuation ->
+): UploadResponse =
+  suspendCancellableCoroutine { continuation ->
     val requestBody = file.asRequestBody()
     var lastProgressReport = 0L
     fun throttled(): Boolean {
@@ -47,8 +54,19 @@ suspend fun okhttpUpload(
       override fun onFailure(call: Call, e: IOException) =
         continuation.resumeWithException(e)
 
-      override fun onResponse(call: Call, response: Response) =
-        continuation.resumeWith(Result.success(response))
+      override fun onResponse(call: Call, response: Response) {
+        response.use { // Automatically closes the response
+          val uploadResponse = UploadResponse(
+            statusCode = response.code,
+            statusMessage = response.message,
+            headers = response.headers.toMap(),
+            body = response.body?.string().let {
+              if (it.isNullOrBlank()) response.message else it
+            }
+          )
+          continuation.resumeWith(Result.success(uploadResponse))
+        }
+      }
     })
   }
 

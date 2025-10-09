@@ -15,8 +15,13 @@ data class Upload(
   val wifiOnly: Boolean,
   val headers: Map<String, String>,
 ) {
+  // Progress tracking properties
+  var bytesUploaded: Long = 0L
+  var size: Long = 0L
+  var completed: Boolean = false
+
   companion object {
-    fun fromReadableMap(map: ReadableMap) = Upload(
+    fun fromRawOptions(map: ReadableMap) = Upload(
       id = map.getString("customUploadId") ?: UUID.randomUUID().toString(),
       url = map.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
       path = map.getString(Upload::path.name) ?: throw MissingOptionException(Upload::path.name),
@@ -34,6 +39,3 @@ data class Upload(
     )
   }
 }
-
-
-
