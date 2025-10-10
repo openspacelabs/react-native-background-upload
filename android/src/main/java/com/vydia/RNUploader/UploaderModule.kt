@@ -14,7 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 
-class UploaderModule(private val context: ReactApplicationContext) :
+class UploaderModule(context: ReactApplicationContext) :
   ReactContextBaseJavaModule(context) {
 
   companion object {
@@ -38,7 +38,7 @@ class UploaderModule(private val context: ReactApplicationContext) :
   fun initialize(opts: ReadableMap, promise: Promise) =
     CoroutineScope(Dispatchers.IO).launch {
       try {
-        updateNotificationConfigs(opts, context)
+        NotificationConfigs.update(opts)
         promise.resolve(true)
       } catch (exc: Throwable) {
         if (exc !is MissingOptionException) {
@@ -60,7 +60,9 @@ class UploaderModule(private val context: ReactApplicationContext) :
       val upload = Upload.fromRawOptions(rawOptions)
       UploadQueue.add(upload)
 
-      val request = OneTimeWorkRequestBuilder<UploadWorker>().build()
+      val request = OneTimeWorkRequestBuilder<UploadWorker>()
+        .build()
+
       workManager
         .beginUniqueWork(WORKER_TAG, ExistingWorkPolicy.KEEP, request)
         .enqueue()

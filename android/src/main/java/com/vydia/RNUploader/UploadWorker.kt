@@ -1,6 +1,7 @@
 package com.vydia.RNUploader
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -17,7 +18,6 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
@@ -46,17 +46,20 @@ private enum class Connectivity { NoWifi, NoInternet, Ok }
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
-
   private lateinit var upload: Upload
   private var retries = 0
   private var connectivity = Connectivity.Ok
+  private var foreground = false
+
+  val notificationManager =
+    context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     try {
       setForeground(getForegroundInfo())
+      foreground = true
     } catch (error: Throwable) {
-      UploadQueue.clear()
-      throw error
+      // Should not block the worker if setting foreground fails
     }
 
     try {
@@ -100,8 +103,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         val response = okhttpUpload(client, upload, file) { bytesSentTotal ->
           UploadQueue.progress(upload.id, bytesSentTotal)
           EventReporter.progress(upload.id)
-
-          launch { setForeground(getForegroundInfo()) }
+          updateNotification()
         }
 
         handleSuccess(upload, response)
@@ -166,25 +168,27 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   // Checks connection and alerts connection issues
-  private suspend fun validateAndReportConnectivity(): Boolean {
+  private fun validateAndReportConnectivity(): Boolean {
     this.connectivity = validateConnectivity(context, upload.wifiOnly)
-    // alert connectivity mode
-    setForeground(getForegroundInfo())
+    // Update notification instead of calling setForeground
+    updateNotification()
     return this.connectivity == Connectivity.Ok
   }
 
-  // builds the notification required to enable Foreground mode
-  override suspend fun getForegroundInfo(): ForegroundInfo {
-    // All workers share the same notification that shows the total progress
-    val notificationConfigs = fetchNotificationConfigs(context)
-    val id = notificationConfigs.id
-    val channel = notificationConfigs.channel
+  private fun updateNotification() {
+    if (!foreground) return
+
+    val (id, notification) = buildNotification()
+    notificationManager.notify(id, notification)
+  }
+
+  private fun buildNotification(): Pair<Int, Notification> {
     val progress = UploadQueue.progressPercentage()
     val progress2Decimals = "%.2f".format(progress)
     val title = when (connectivity) {
-      Connectivity.NoWifi -> notificationConfigs.titleNoWifi
-      Connectivity.NoInternet -> notificationConfigs.titleNoInternet
-      Connectivity.Ok -> notificationConfigs.title
+      Connectivity.NoWifi -> NotificationConfigs.titleNoWifi
+      Connectivity.NoInternet -> NotificationConfigs.titleNoInternet
+      Connectivity.Ok -> NotificationConfigs.title
     }
 
     // Custom layout for progress notification.
@@ -195,7 +199,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
     content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
 
-    val notification = NotificationCompat.Builder(context, channel).run {
+    val notification = NotificationCompat.Builder(context, NotificationConfigs.channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
       // This fixes that delay.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
@@ -213,6 +217,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       setContentIntent(openAppIntent(context))
       build()
     }
+
+    return Pair(NotificationConfigs.id, notification)
+  }
+
+  // builds the notification required to enable Foreground mode
+  override suspend fun getForegroundInfo(): ForegroundInfo {
+    val (id, notification) = buildNotification()
 
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
