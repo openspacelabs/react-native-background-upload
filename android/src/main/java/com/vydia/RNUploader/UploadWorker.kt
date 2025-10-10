@@ -56,6 +56,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     try {
+      // `setForeground` is recommended for long-running workers.
+      // Foreground mode helps prioritize the worker, reducing the risk
+      // of it being killed during low memory or Doze/App Standby situations.
+      // ⚠️ This should be called in the foreground
       setForeground(getForegroundInfo())
       foreground = true
     } catch (error: Throwable) {
@@ -78,6 +82,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     connectivity = Connectivity.Ok
 
     // Complex work, errors thrown below here trigger retry.
+    // We don't let WorkManager manage retries and network constraints as it's very buggy.
+    // i.e. we'd occasionally get BackgroundServiceStartNotAllowedException,
+    // or ForegroundServiceStartNotAllowedException, or "isStopped" gets set to "true"
+    // for no reason
     var isRetried = false
     while (true) {
       try {
