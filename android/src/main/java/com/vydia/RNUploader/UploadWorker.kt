@@ -10,7 +10,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
 import android.net.NetworkCapabilities.TRANSPORT_WIFI
 import android.os.Build
-import android.util.Log
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -117,14 +116,14 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         handleSuccess(upload, response)
         return@withContext
       } catch (error: Throwable) {
+        // TODO not necessary anymore?
         if (checkAndHandleCancellation(upload)) throw error
         if (checkRetry(upload, error)) continue
 
         // Log error but continue with next upload
-        Log.e("UploadWorker", "Upload ${upload.id} failed", error)
         UploadQueue.pop()
         EventReporter.error(upload.id, error)
-        throw error
+        return@withContext
       }
     }
   }
