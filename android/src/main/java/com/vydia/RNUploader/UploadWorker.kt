@@ -50,6 +50,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private var connectivity = Connectivity.Ok
   private var foreground = false
 
+  private var lastNotificationUpdate = 0L
+
   val notificationManager =
     context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -184,6 +186,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   private fun updateNotification() {
     if (!foreground) return
+
+    val timeSinceLastUpdate = System.currentTimeMillis() - lastNotificationUpdate
+    if (timeSinceLastUpdate < 1000L) return
 
     val (id, notification) = buildNotification()
     notificationManager.notify(id, notification)
