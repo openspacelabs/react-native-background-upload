@@ -5,12 +5,17 @@ import java.io.FileNotFoundException
 
 object UploadQueue {
   private val queue = ArrayDeque<Upload>()
+
+  /**
+   * Keeps track of the total bytes of completed uploads to report overall progress correctly.
+   */
   private var completedBytes = 0L
 
   /**
    * Returns the overall progress percentage of all uploads in the queue.
    * 0 - 100
    */
+  @Synchronized
   fun progressPercentage(): Float {
     if (queue.isEmpty()) return 0f
 
@@ -21,6 +26,7 @@ object UploadQueue {
     return uploadedBytes.toFloat() / totalBytes.toFloat() * 100
   }
 
+  @Synchronized
   fun add(upload: Upload) {
     if (queue.any { it.id == upload.id }) return
 
@@ -33,12 +39,14 @@ object UploadQueue {
     queue.add(upload)
   }
 
+  @Synchronized
   fun progress(uploadId: String, bytesUploaded: Long) {
     queue.find { it.id == uploadId }?.bytesUploaded = bytesUploaded
   }
 
+  @Synchronized
   fun complete() {
-    val upload = pop()
+    val upload = queue.removeFirst()
 
     upload.bytesUploaded = upload.size
     upload.completed = true
@@ -46,13 +54,21 @@ object UploadQueue {
     completedBytes += upload.size
   }
 
+  @Synchronized
   fun pop() = queue.removeFirst()
 
-  fun remove(uploadId: String) = queue.removeIf { it.id === uploadId }
+  @Synchronized
+  fun cancel(uploadId: String) = queue.removeIf { it.id == uploadId }
 
+  @Synchronized
   fun current() = queue.first()
 
-  fun clear() = queue.clear()
+  @Synchronized
+  fun clear() {
+    queue.clear()
+    completedBytes = 0L
+  }
 
+  @Synchronized
   fun isEmpty() = queue.isEmpty()
 }
