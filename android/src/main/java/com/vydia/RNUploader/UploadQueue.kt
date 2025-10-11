@@ -60,6 +60,18 @@ object UploadQueue {
   @Synchronized
   fun cancel(uploadId: String) = queue.removeIf { it.id == uploadId }
 
+
+  @Synchronized
+  fun selectNext(wifiOnly: Boolean): Boolean {
+    val upload = queue.find { it.wifiOnly == wifiOnly } ?: return false
+    queue.remove(upload)
+    queue.addFirst(upload)
+    return true
+  }
+
+  @Synchronized
+  fun allWifiOnly() = !queue.isEmpty() && queue.all { it.wifiOnly }
+
   @Synchronized
   fun current() = queue.first()
 

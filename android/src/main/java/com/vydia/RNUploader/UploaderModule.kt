@@ -19,7 +19,7 @@ class UploaderModule(context: ReactApplicationContext) :
 
   companion object {
     const val TAG = "RNFileUploader.UploaderModule"
-    const val WORKER_TAG = "RNFileUploader"
+    const val WORKER_ID = "RNFileUploader"
     var reactContext: ReactApplicationContext? = null
       private set
   }
@@ -64,7 +64,7 @@ class UploaderModule(context: ReactApplicationContext) :
         .build()
 
       workManager
-        .beginUniqueWork(WORKER_TAG, ExistingWorkPolicy.KEEP, request)
+        .beginUniqueWork(WORKER_ID, ExistingWorkPolicy.KEEP, request)
         .enqueue()
 
       promise.resolve(upload.id)
@@ -86,7 +86,8 @@ class UploaderModule(context: ReactApplicationContext) :
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
       // Just remove from queue, worker will handle progress cleanup
-      UploadQueue.remove(uploadId)
+      UploadQueue.cancel(uploadId)
+      if (UploadQueue.isEmpty()) workManager.cancelUniqueWork(WORKER_ID)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
@@ -102,7 +103,7 @@ class UploaderModule(context: ReactApplicationContext) :
   fun stopAllUploads(promise: Promise) {
     try {
       UploadQueue.clear()
-      workManager.cancelAllWorkByTag(WORKER_TAG)
+      workManager.cancelUniqueWork(WORKER_ID)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
