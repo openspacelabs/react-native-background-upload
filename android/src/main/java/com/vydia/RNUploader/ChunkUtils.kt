@@ -15,9 +15,9 @@ data class Chunk(val position: Long, val size: Long, val path: String) {
       val chunks = mutableListOf<Chunk>()
       for (i in 0 until paramChunks.size()) {
         val paramChunk = paramChunks.getMap(i)
-        val position = paramChunk.getDouble("position").toLong()
-        val size = paramChunk.getDouble("size").toLong()
-        val path = paramChunk.getString("path") ?: throw Throwable("Path is not defined")
+        val position = paramChunk!!.getDouble("position").toLong()
+        val size = paramChunk!!.getDouble("size").toLong()
+        val path = paramChunk!!.getString("path") ?: throw Throwable("Path is not defined")
 
         if (size <= 0) throw Throwable("Size is smaller than or equal 0")
         if (position < 0) throw Throwable("Position is smaller than 0")
