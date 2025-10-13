@@ -7,9 +7,6 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.facebook.react.bridge.*
 import com.google.gson.Gson
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 
 class UploaderModule(context: ReactApplicationContext) :
@@ -33,18 +30,6 @@ class UploaderModule(context: ReactApplicationContext) :
 
 
   override fun getName(): String = "RNFileUploader"
-
-  @ReactMethod
-  fun chunkFile(parentFilePath: String, chunks: ReadableArray, promise: Promise) {
-    CoroutineScope(Dispatchers.IO).launch {
-      try {
-        chunkFile(parentFilePath, Chunk.fromReadableArray(chunks))
-        promise.resolve(true)
-      } catch (e: Throwable) {
-        promise.reject(e)
-      }
-    }
-  }
 
 
   /*
