@@ -201,7 +201,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     val notificationConnectivity =
       if (!connectivity.connected) NotificationConnectivity.NoInternet
-      else if (UploadQueue.allWifiOnly() && !connectivity.wifi) NotificationConnectivity.NoWifi
+      else if (UploadQueue.isAllWifiOnly() && !connectivity.wifi) NotificationConnectivity.NoWifi
       else NotificationConnectivity.Ok
 
     val (id, notification) = buildNotification(context, notificationConnectivity)
