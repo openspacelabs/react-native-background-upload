@@ -74,8 +74,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     }
 
     try {
-      // Keep processing uploads until no more incomplete uploads
-      while (!UploadQueue.isEmpty()) processUpload()
+      // Keep processing uploads until the queue is empty
+      while (!UploadQueue.isEmpty()) uploadCurrent()
 
       return@withContext Result.success()
     } finally {
@@ -84,7 +84,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     }
   }
 
-  private suspend fun processUpload() {
+  private suspend fun uploadCurrent() {
     val upload = UploadQueue.current()
     // Complex work, errors thrown below here trigger retry.
     // We don't let WorkManager manage retries and network constraints as it's very buggy.
@@ -114,13 +114,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
         // If upload requires wifi and we're not on wifi, try to switch to a non-wifi upload
         if (!connectivity.wifi && upload.wifiOnly) {
-          if (UploadQueue.selectNext(wifiOnly = false)) {
-            // switched to a non-wifi upload
-            return
-          } else {
-            // no non-wifi uploads, wait for wifi
-            continue
-          }
+          // switched to a non-wifi upload
+          if (UploadQueue.selectNext(wifiOnly = false)) return
+          // no non-wifi uploads, wait for wifi
+          continue
         }
 
         // Start the upload
