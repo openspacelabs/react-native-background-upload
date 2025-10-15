@@ -59,11 +59,11 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     var notificationJob: Job? = null
     try {
       notificationJob = startNotificationUpdateJob()
-    } catch (_: Throwable) {
+    } catch (error: Throwable) {
       // Should not block the worker if notification job setup fails
       EventReporter.globalError(
         "UploadWorker.startNotificationUpdateJob",
-        Error("Failed to start notification job")
+        Error("Failed to start notification job: ${error.message}")
       )
     }
 
