@@ -23,6 +23,13 @@ class EventReporter {
         putString("error", exception.message ?: "Unknown exception")
       })
 
+    // TODO expose via JS
+    fun globalError(origin: String, exception: Throwable) =
+      sendEvent("globalError", Arguments.createMap().apply {
+        putString("origin", origin)
+        putString("error", exception.message ?: "Unknown exception")
+      })
+
     fun success(uploadId: String, response: UploadResponse) =
       CoroutineScope(Dispatchers.IO).launch {
         sendEvent("completed", Arguments.createMap().apply {

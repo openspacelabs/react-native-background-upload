@@ -60,9 +60,9 @@ class UploaderModule(context: ReactApplicationContext) :
       val upload = Upload.fromRawOptions(rawOptions)
       UploadQueue.add(upload)
 
-      val request = OneTimeWorkRequestBuilder<UploadWorker>()
-        .build()
+      val request = OneTimeWorkRequestBuilder<UploadWorker>().build()
 
+      // TODO check if cancelling and starting will keep the queue
       workManager
         .beginUniqueWork(WORKER_ID, ExistingWorkPolicy.KEEP, request)
         .enqueue()
@@ -85,9 +85,8 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
-      // Just remove from queue, worker will handle progress cleanup
       UploadQueue.cancel(uploadId)
-      if (UploadQueue.isEmpty()) workManager.cancelUniqueWork(WORKER_ID)
+      EventReporter.cancelled(uploadId)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
@@ -102,8 +101,10 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun stopAllUploads(promise: Promise) {
     try {
-      UploadQueue.clear()
-      workManager.cancelUniqueWork(WORKER_ID)
+      while (!UploadQueue.isEmpty()) {
+        val upload = UploadQueue.pop()
+        EventReporter.cancelled(upload.id)
+      }
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()

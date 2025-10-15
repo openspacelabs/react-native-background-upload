@@ -21,7 +21,7 @@ object UploadQueue {
 
     val totalBytes = queue.sumOf { it.size } + completedBytes
     if (totalBytes == 0L) return 0f
-    val uploadedBytes = current().bytesUploaded + completedBytes
+    val uploadedBytes = (current()?.bytesUploaded ?: 0L) + completedBytes
 
     return uploadedBytes.toFloat() / totalBytes.toFloat() * 100
   }
@@ -40,18 +40,14 @@ object UploadQueue {
   }
 
   @Synchronized
-  fun progress(uploadId: String, bytesUploaded: Long) {
-    queue.find { it.id == uploadId }?.bytesUploaded = bytesUploaded
+  fun progress(bytesUploaded: Long) {
+    current()?.bytesUploaded = bytesUploaded
   }
 
   @Synchronized
   fun complete() {
-    val upload = queue.removeFirst()
-
-    upload.bytesUploaded = upload.size
-    upload.completed = true
-    // Keep completed upload sizes for a while to report overall progress correctly
-    completedBytes += upload.size
+    // Extract size immediately and allow upload object to be garbage collected
+    completedBytes += queue.removeFirst().size
   }
 
   @Synchronized
@@ -62,18 +58,23 @@ object UploadQueue {
 
 
   @Synchronized
-  fun selectNext(wifiOnly: Boolean): Boolean {
-    val upload = queue.find { it.wifiOnly == wifiOnly } ?: return false
-    queue.remove(upload)
+  fun skipWifiOnly(): Boolean {
+    // Find index instead of element to avoid double search
+    val index = queue.indexOfFirst { !it.wifiOnly }
+    if (index == -1) return false
+    if (index == 0) return true // Already at front
+
+    // Remove by index (still O(n) but avoids the find step)
+    val upload = queue.removeAt(index)
     queue.addFirst(upload)
     return true
   }
 
   @Synchronized
-  fun allWifiOnly() = !queue.isEmpty() && queue.all { it.wifiOnly }
+  fun isAllWifiOnly() = !queue.isEmpty() && queue.all { it.wifiOnly }
 
   @Synchronized
-  fun current() = queue.first()
+  fun current() = queue.firstOrNull()
 
   @Synchronized
   fun clear() {

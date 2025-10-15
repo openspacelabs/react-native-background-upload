@@ -144,13 +144,16 @@ class MissingOptionException(optionName: String) :
   IllegalArgumentException("Missing '$optionName'")
 
 
-data class Connectivity(val wifi: Boolean, val connected: Boolean)
+data class Connection(val wifi: Boolean, val connected: Boolean)
 
 enum class NotificationConnectivity {
   NoWifi, NoInternet, Ok
 }
 
-fun buildNotification(context: Context, connectivity: NotificationConnectivity): Pair<Int, Notification> {
+fun buildNotification(
+  context: Context,
+  connectivity: NotificationConnectivity
+): Pair<Int, Notification> {
   val progress = UploadQueue.progressPercentage()
   val progress2Decimals = "%.2f".format(progress)
   val title = when (connectivity) {

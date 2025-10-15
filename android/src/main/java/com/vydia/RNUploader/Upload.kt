@@ -1,7 +1,7 @@
 package com.vydia.RNUploader
 
 import com.facebook.react.bridge.ReadableMap
-import java.util.*
+import java.util.UUID
 
 // Data model of a single upload
 // Can be created from RN's ReadableMap
@@ -18,7 +18,6 @@ data class Upload(
   // Progress tracking properties
   var bytesUploaded: Long = 0L
   var size: Long = 0L
-  var completed: Boolean = false
 
   companion object {
     fun fromRawOptions(map: ReadableMap) = Upload(
