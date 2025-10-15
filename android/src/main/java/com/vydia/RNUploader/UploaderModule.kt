@@ -4,14 +4,9 @@ import android.util.Log
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
-import com.facebook.react.bridge.Promise
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
-import com.facebook.react.bridge.ReadableMap
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import androidx.work.workDataOf
+import com.facebook.react.bridge.*
+import com.google.gson.Gson
 
 
 class UploaderModule(context: ReactApplicationContext) :
@@ -19,7 +14,7 @@ class UploaderModule(context: ReactApplicationContext) :
 
   companion object {
     const val TAG = "RNFileUploader.UploaderModule"
-    const val WORKER_ID = "RNFileUploader"
+    const val WORKER_TAG = "RNFileUploader"
     var reactContext: ReactApplicationContext? = null
       private set
   }
@@ -28,26 +23,13 @@ class UploaderModule(context: ReactApplicationContext) :
 
   init {
     reactContext = context
+    // workers may be killed abruptly for whatever reasons,
+    // so they might not have had a chance to clear the progress data.
+    UploadProgress.clearIfNeeded(context)
   }
 
 
   override fun getName(): String = "RNFileUploader"
-
-
-  @ReactMethod
-  fun initialize(opts: ReadableMap, promise: Promise) =
-    CoroutineScope(Dispatchers.IO).launch {
-      try {
-        NotificationConfigs.update(opts)
-        promise.resolve(true)
-      } catch (exc: Throwable) {
-        if (exc !is MissingOptionException) {
-          exc.printStackTrace()
-          Log.e(TAG, exc.message, exc)
-        }
-        promise.reject(exc)
-      }
-    }
 
 
   /*
@@ -57,25 +39,40 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun startUpload(rawOptions: ReadableMap, promise: Promise) {
     try {
-      val upload = Upload.fromRawOptions(rawOptions)
-      UploadQueue.add(upload)
-
-      val request = OneTimeWorkRequestBuilder<UploadWorker>().build()
-
-      // TODO check if cancelling and starting will keep the queue
-      workManager
-        .beginUniqueWork(WORKER_ID, ExistingWorkPolicy.KEEP, request)
-        .enqueue()
-
-      promise.resolve(upload.id)
+      val id = startUpload(rawOptions)
+      promise.resolve(id)
     } catch (exc: Throwable) {
-      if (exc !is MissingOptionException) {
+      if (exc !is Upload.MissingOptionException) {
         exc.printStackTrace()
         Log.e(TAG, exc.message, exc)
       }
       promise.reject(exc)
     }
   }
+
+  /**
+   * @return whether the upload was started
+   */
+  private fun startUpload(options: ReadableMap): String {
+    val upload = Upload.fromReadableMap(options)
+    val data = Gson().toJson(upload)
+
+    val request = OneTimeWorkRequestBuilder<UploadWorker>()
+      .addTag(WORKER_TAG)
+      .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
+      .build()
+
+    workManager
+      // Using KEEP policy to prevent it from cancelling the work if it's already running.
+      // Otherwise, it will emit "cancelled" and then go on to emit "progress" events,
+      // which is confusing and quite difficult to manage. "cancelled" should be reserved for
+      // when the user explicitly cancels the upload.
+      .beginUniqueWork(upload.id, ExistingWorkPolicy.KEEP, request)
+      .enqueue()
+
+    return upload.id
+  }
+
 
   /*
    * Cancels file upload
@@ -85,8 +82,7 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
-      UploadQueue.cancel(uploadId)
-      EventReporter.cancelled(uploadId)
+      workManager.cancelUniqueWork(uploadId)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
@@ -94,6 +90,7 @@ class UploaderModule(context: ReactApplicationContext) :
       promise.reject(exc)
     }
   }
+
 
   /*
    * Cancels all file uploads
@@ -101,10 +98,7 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun stopAllUploads(promise: Promise) {
     try {
-      while (!UploadQueue.isEmpty()) {
-        val upload = UploadQueue.pop()
-        EventReporter.cancelled(upload.id)
-      }
+      workManager.cancelAllWorkByTag(WORKER_TAG)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()
@@ -113,4 +107,6 @@ class UploaderModule(context: ReactApplicationContext) :
     }
   }
 
+
 }
+

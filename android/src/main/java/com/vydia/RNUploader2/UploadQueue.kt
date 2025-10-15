@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package com.vydia.RNUploader2
 
 import java.io.File
 import java.io.FileNotFoundException

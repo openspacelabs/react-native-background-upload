@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package com.vydia.RNUploader2
 
 import com.facebook.react.bridge.ReadableMap
 

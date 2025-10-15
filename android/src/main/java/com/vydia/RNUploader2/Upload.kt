@@ -1,7 +1,7 @@
-package com.vydia.RNUploader
+package com.vydia.RNUploader2
 
 import com.facebook.react.bridge.ReadableMap
-import java.util.*
+import java.util.UUID
 
 // Data model of a single upload
 // Can be created from RN's ReadableMap
@@ -14,17 +14,13 @@ data class Upload(
   val maxRetries: Int,
   val wifiOnly: Boolean,
   val headers: Map<String, String>,
-  val notificationId: String,
-  val notificationTitle: String,
-  val notificationTitleNoInternet: String,
-  val notificationTitleNoWifi: String,
-  val notificationChannel: String,
 ) {
-  class MissingOptionException(optionName: String) :
-    IllegalArgumentException("Missing '$optionName'")
+  // Progress tracking properties
+  var bytesUploaded: Long = 0L
+  var size: Long = 0L
 
   companion object {
-    fun fromReadableMap(map: ReadableMap) = Upload(
+    fun fromRawOptions(map: ReadableMap) = Upload(
       id = map.getString("customUploadId") ?: UUID.randomUUID().toString(),
       url = map.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
       path = map.getString(Upload::path.name) ?: throw MissingOptionException(Upload::path.name),
@@ -39,19 +35,6 @@ data class Upload(
         }
         return@let map
       },
-      notificationId = map.getString(Upload::notificationId.name)
-        ?: throw MissingOptionException(Upload::notificationId.name),
-      notificationTitle = map.getString(Upload::notificationTitle.name)
-        ?: throw MissingOptionException(Upload::notificationTitle.name),
-      notificationTitleNoInternet = map.getString(Upload::notificationTitleNoInternet.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoInternet.name),
-      notificationTitleNoWifi = map.getString(Upload::notificationTitleNoWifi.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoWifi.name),
-      notificationChannel = map.getString(Upload::notificationChannel.name)
-        ?: throw MissingOptionException(Upload::notificationChannel.name),
     )
   }
 }
-
-
-
