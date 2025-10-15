@@ -22,6 +22,7 @@ import java.io.File
 import java.io.IOException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlin.math.pow
 
 
 // Max total time for a single request to complete
@@ -86,8 +87,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     var retries = 0
     while (true) {
       try {
-        // even this delay needs to be part of the try block
-        if (retries > 0) delay(5_000L)
+        // delay needs to be part of the try block
+        if (retries > 0) exponentialBackoffDelay(retries)
 
         // If there's no internet, wait until there is
         val connection = waitForInternet()
@@ -150,6 +151,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         }
       }
     }
+  }
+
+  private suspend fun exponentialBackoffDelay(retries: Int) {
+    var time = 5000L // 5 seconds
+    time = (time * (2.toDouble().pow(retries - 1))).toLong()
+    time = time.coerceAtMost(60_000L) // max 5 minutes
+    delay(time)
   }
 
   private suspend fun waitForInternet(): Connection {
