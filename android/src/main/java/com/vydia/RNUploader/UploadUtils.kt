@@ -57,15 +57,17 @@ suspend fun okhttpUpload(
       override fun onFailure(call: Call, e: IOException) =
         continuation.resumeWithException(e)
 
-      override fun onResponse(call: Call, response: Response) =
-        response.use { // close the response asap
-          val result = UploadResponse(
+      override fun onResponse(call: Call, response: Response) {
+        val result = response.use { // close the response asap
+          UploadResponse(
             response.code,
             response.body?.string().takeIf { !it.isNullOrBlank() } ?: response.message,
             response.headers.toMultimap().mapValues { it.value.joinToString(", ") }
           )
-          continuation.resumeWith(Result.success(result))
         }
+
+        continuation.resumeWith(Result.success(result))
+      }
     })
   }
 
