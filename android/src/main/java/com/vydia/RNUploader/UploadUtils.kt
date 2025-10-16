@@ -58,7 +58,7 @@ suspend fun okhttpUpload(
         continuation.resumeWithException(e)
 
       override fun onResponse(call: Call, response: Response) =
-        response.use {
+        response.use { // close the response asap
           val result = UploadResponse(
             response.code,
             response.body?.string().takeIf { !it.isNullOrBlank() } ?: response.message,
