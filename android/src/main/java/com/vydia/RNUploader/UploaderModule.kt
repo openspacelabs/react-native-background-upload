@@ -5,7 +5,11 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
-import com.facebook.react.bridge.*
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableMap
 import com.google.gson.Gson
 
 
@@ -23,9 +27,6 @@ class UploaderModule(context: ReactApplicationContext) :
 
   init {
     reactContext = context
-    // workers may be killed abruptly for whatever reasons,
-    // so they might not have had a chance to clear the progress data.
-    UploadProgress.clearIfNeeded(context)
   }
 
 
