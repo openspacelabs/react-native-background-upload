@@ -151,6 +151,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private fun handleSuccess(response: UploadResponse) {
+    UploadProgress.complete(upload.id)
     EventReporter.success(upload.id, response)
   }
 

@@ -1,16 +1,15 @@
 package com.vydia.RNUploader
 
-import android.content.Context
-import androidx.work.WorkManager
-import com.vydia.RNUploader.UploaderModule.Companion.WORKER_TAG
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import android.os.Handler
+import android.os.Looper
 
 // Stores and aggregates total progress from all workers
 object UploadProgress {
-  private data class Progress(var bytesUploaded: Long, val size: Long)
+  private data class Progress(
+    var bytesUploaded: Long,
+    val size: Long,
+    var complete: Boolean = false
+  )
 
   private val map = mutableMapOf<String, Progress>()
 
@@ -22,6 +21,19 @@ object UploadProgress {
   @Synchronized
   fun set(uploadId: String, bytesUploaded: Long) {
     map[uploadId]?.bytesUploaded = bytesUploaded
+  }
+
+  @Synchronized
+  fun complete(uploadId: String) {
+    map[uploadId]?.let {
+      it.bytesUploaded = it.size
+      it.complete = true
+    }
+
+    // Attempt to clear in 2 seconds. This is the simplest way to let the
+    // last worker reset the overall progress.
+    // Clearing progress ensures the notification starts at 0% next time.
+    Handler(Looper.getMainLooper()).postDelayed({ clearIfNeeded() }, 2000)
   }
 
   @Synchronized
@@ -38,19 +50,7 @@ object UploadProgress {
   }
 
   @Synchronized
-  private fun clearIfNeeded(context: Context) {
-    val workManager = WorkManager.getInstance(context)
-    val works = workManager.getWorkInfosByTag(WORKER_TAG).get()
-
-    if (works.all { it.state.isFinished }) map.clear()
-  }
-
-  init {
-    CoroutineScope(Dispatchers.IO).launch {
-      while (true) {
-        delay(5000L)
-        clearIfNeeded(UploaderModule.reactContext ?: continue)
-      }
-    }
+  private fun clearIfNeeded() {
+    if (map.values.all { it.complete }) map.clear()
   }
 }
