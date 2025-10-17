@@ -57,7 +57,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   private lateinit var upload: Upload
   private var retries = 0
-  private var connectivity = Connectivity.Ok
   private val notificationManager =
     context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -125,14 +124,19 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     UploadProgress.add(upload.id, size)
 
     // Don't bother to run on an invalid network
-    if (!validateAndReportConnectivity()) return null
+    if (getConnectivity(context, upload.wifiOnly) != Connectivity.Ok) return null
 
     // wait for its turn to run
     semaphore.acquire()
 
+    // mark as active upload for notification
+    UploadNotification.setActiveUpload(upload)
+    notificationManager.notify(UploadNotification.id, buildNotification())
+
     try {
       return okhttpUpload(client, upload, file) { progress ->
         handleProgress(progress, size)
+        notificationManager.notify(UploadNotification.id, buildNotification())
       }
     } catch (error: Throwable) {
       // reset progress on error
@@ -141,13 +145,15 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       throw error
     } finally {
       semaphore.release()
+      // by this point, another worker might have started and set itself as active upload
+      // so only clear if it's still this upload
+      UploadNotification.releaseActiveUpload(upload)
     }
   }
 
   private fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
     UploadProgress.set(upload.id, bytesSentTotal)
     EventReporter.progress(upload.id, bytesSentTotal, fileSize)
-    notificationManager.notify(upload.notificationId, buildNotification())
   }
 
   private fun handleSuccess(response: UploadResponse) {
@@ -176,7 +182,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // Error was thrown due to unmet network preferences.
     // Also happens every time you switch from one network to any other
-    if (!validateAndReportConnectivity()) unlimitedRetry = true
+    if (getConnectivity(context, upload.wifiOnly) != Connectivity.Ok) unlimitedRetry = true
     // Due to the flaky nature of networking, sometimes the network is
     // valid but the URL is still inaccessible, so keep waiting until
     // the URL is accessible
@@ -200,23 +206,19 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return retries <= upload.maxRetries
   }
 
-  // Checks connection and alerts connection issues
-  private fun validateAndReportConnectivity(): Boolean {
-    this.connectivity = validateConnectivity(context, upload.wifiOnly)
-    // alert connectivity mode
-    notificationManager.notify(upload.notificationId, buildNotification())
-    return this.connectivity == Connectivity.Ok
-  }
 
   // builds the notification required to enable Foreground mode
   fun buildNotification(): Notification {
-    val channel = upload.notificationChannel
+    // since all workers share the same notification ID,
+    // get the active upload so we don't overwrite the notification when multiple uploads are running
+    val upload = UploadNotification.getActiveUpload() ?: this.upload
+    val channel = UploadNotification.channel
     val progress = UploadProgress.total()
     val progress2Decimals = "%.2f".format(progress)
-    val title = when (connectivity) {
-      Connectivity.NoWifi -> upload.notificationTitleNoWifi
-      Connectivity.NoInternet -> upload.notificationTitleNoInternet
-      Connectivity.Ok -> upload.notificationTitle
+    val title = when (getConnectivity(context, upload.wifiOnly)) {
+      Connectivity.NoWifi -> UploadNotification.titleNoWifi
+      Connectivity.NoInternet -> UploadNotification.titleNoInternet
+      Connectivity.Ok -> UploadNotification.title
     }
 
     // Custom layout for progress notification.
@@ -249,7 +251,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
     val notification = buildNotification()
-    val id = upload.notificationId
+    val id = UploadNotification.id
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
       ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -258,9 +260,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 }
 
-// This is outside and synchronized to ensure consistent status across workers
-@Synchronized
-private fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
+private fun getConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
   val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
   val network = manager.activeNetwork
   val capabilities = manager.getNetworkCapabilities(network)

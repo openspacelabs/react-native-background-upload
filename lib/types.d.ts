@@ -22,10 +22,9 @@ export type UploadOptions = {
         [index: string]: string;
     };
     wifiOnly?: boolean;
-    android: AndroidOnlyUploadOptions;
     ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
-type AndroidOnlyUploadOptions = {
+export type AndroidInitializationOptions = {
     notificationId: string;
     notificationTitle: string;
     notificationTitleNoWifi: string;

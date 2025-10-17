@@ -43,7 +43,7 @@ class UploaderModule(context: ReactApplicationContext) :
       val id = startUpload(rawOptions)
       promise.resolve(id)
     } catch (exc: Throwable) {
-      if (exc !is Upload.MissingOptionException) {
+      if (exc !is MissingOptionException) {
         exc.printStackTrace()
         Log.e(TAG, exc.message, exc)
       }
@@ -72,6 +72,20 @@ class UploaderModule(context: ReactApplicationContext) :
       .enqueue()
 
     return upload.id
+  }
+
+  @ReactMethod
+  fun initialize(options: ReadableMap, promise: Promise) {
+    try {
+      UploadNotification.update(options)
+      promise.resolve(true)
+    } catch (exc: Throwable) {
+      if (exc !is MissingOptionException) {
+        exc.printStackTrace()
+        Log.e(TAG, exc.message, exc)
+      }
+      promise.reject(exc)
+    }
   }
 
 

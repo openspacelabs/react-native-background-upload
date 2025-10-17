@@ -28,6 +28,16 @@ const TEST_FILE_URL =
   'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
 const UPLOAD_URL = 'https://httpbin.org/put/404';
 
+const channelId = 'RNBGUExample';
+
+Upload.initialize({
+  notificationId: channelId,
+  notificationTitle: channelId,
+  notificationTitleNoWifi: 'No wifi',
+  notificationTitleNoInternet: 'No internet',
+  notificationChannel: channelId,
+});
+
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
   const [progress, setProgress] = useState<number>();
@@ -63,41 +73,35 @@ const App = () => {
   const onPressUpload = async () => {
     await notifee.requestPermission({alert: true, sound: true});
 
-    const channelId = 'RNBGUExample';
     await notifee.createChannel({
       id: channelId,
       name: channelId,
       importance: AndroidImportance.LOW,
     });
 
-    const uploadOpts: UploadOptions = {
-      android: {
-        notificationId: channelId,
-        notificationTitle: channelId,
-        notificationTitleNoWifi: 'No wifi',
-        notificationTitleNoInternet: 'No internet',
-        notificationChannel: channelId,
-      },
-      type: 'raw',
-      url: UPLOAD_URL,
-      path: TEST_FILE,
-      method: 'POST',
-      headers: {},
-    };
+    for (let i = 0; i < 100; i++) {
+      const uploadOpts: UploadOptions = {
+        type: 'raw',
+        url: UPLOAD_URL,
+        path: TEST_FILE,
+        method: 'POST',
+        headers: {},
+      };
 
-    Upload.startUpload(uploadOpts)
-      .then(uploadId => {
-        console.log(
-          `Upload started with options: ${JSON.stringify(uploadOpts)}`,
-        );
-        setUploadId(uploadId);
-        setProgress(0);
-      })
-      .catch(function (err) {
-        setUploadId(undefined);
-        setProgress(undefined);
-        console.log('Upload error!', err);
-      });
+      Upload.startUpload(uploadOpts)
+        .then(uploadId => {
+          console.log(
+            `Upload started with options: ${JSON.stringify(uploadOpts)}`,
+          );
+          setUploadId(uploadId);
+          setProgress(0);
+        })
+        .catch(function (err) {
+          setUploadId(undefined);
+          setProgress(undefined);
+          console.log('Upload error!', err);
+        });
+    }
   };
 
   return (
