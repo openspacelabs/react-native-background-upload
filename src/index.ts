@@ -28,7 +28,7 @@ let initializedPromise: Promise<void> | undefined;
 
 /**
  * Initializes the module with the given options.
- * Must be called at the global level before starting any uploads.
+ * Must be called before starting any uploads.
  * The notification channel doesn't have to be created beforehand.
  * @param options
  */
