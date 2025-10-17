@@ -1,17 +1,9 @@
 package com.vydia.RNUploader
 
-import android.app.Notification
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
-import android.net.NetworkCapabilities.TRANSPORT_WIFI
 import android.os.Build
-import android.widget.RemoteViews
-import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
@@ -47,8 +39,6 @@ private val semaphore = Semaphore(MAX_CONCURRENCY)
 private val client = OkHttpClient.Builder()
   .callTimeout(REQUEST_TIMEOUT, REQUEST_TIMEOUT_UNIT)
   .build()
-
-private enum class Connectivity { NoWifi, NoInternet, Ok }
 
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -124,19 +114,18 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     UploadProgress.add(upload.id, size)
 
     // Don't bother to run on an invalid network
-    if (getConnectivity(context, upload.wifiOnly) != Connectivity.Ok) return null
+    if (Connectivity.fetch(context, upload.wifiOnly) != Connectivity.Ok) return null
 
     // wait for its turn to run
     semaphore.acquire()
 
     // mark as active upload for notification
     UploadNotification.setActiveUpload(upload)
-    notificationManager.notify(UploadNotification.id, buildNotification())
+    UploadNotification.update(context)
 
     try {
       return okhttpUpload(client, upload, file) { progress ->
         handleProgress(progress, size)
-        notificationManager.notify(UploadNotification.id, buildNotification())
       }
     } catch (error: Throwable) {
       // reset progress on error
@@ -154,16 +143,19 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
     UploadProgress.set(upload.id, bytesSentTotal)
     EventReporter.progress(upload.id, bytesSentTotal, fileSize)
+    UploadNotification.update(context)
   }
 
   private fun handleSuccess(response: UploadResponse) {
     UploadProgress.complete(upload.id)
     EventReporter.success(upload.id, response)
+    UploadNotification.update(context)
   }
 
   private fun handleError(error: Throwable) {
     UploadProgress.remove(upload.id)
     EventReporter.error(upload.id, error)
+    UploadNotification.update(context)
   }
 
   // Check if cancelled by user or new worker with same ID
@@ -173,6 +165,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     UploadProgress.remove(upload.id)
     EventReporter.cancelled(upload.id)
+    UploadNotification.update(context)
     return true
   }
 
@@ -182,7 +175,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // Error was thrown due to unmet network preferences.
     // Also happens every time you switch from one network to any other
-    if (getConnectivity(context, upload.wifiOnly) != Connectivity.Ok) unlimitedRetry = true
+    if (Connectivity.fetch(context, upload.wifiOnly) != Connectivity.Ok) unlimitedRetry = true
     // Due to the flaky nature of networking, sometimes the network is
     // valid but the URL is still inaccessible, so keep waiting until
     // the URL is accessible
@@ -207,50 +200,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
 
-  // builds the notification required to enable Foreground mode
-  fun buildNotification(): Notification {
-    // since all workers share the same notification ID,
-    // get the active upload so we don't overwrite the notification when multiple uploads are running
-    val upload = UploadNotification.getActiveUpload() ?: this.upload
-    val channel = UploadNotification.channel
-    val progress = UploadProgress.total()
-    val progress2Decimals = "%.2f".format(progress)
-    val title = when (getConnectivity(context, upload.wifiOnly)) {
-      Connectivity.NoWifi -> UploadNotification.titleNoWifi
-      Connectivity.NoInternet -> UploadNotification.titleNoInternet
-      Connectivity.Ok -> UploadNotification.title
-    }
-
-    // Custom layout for progress notification.
-    // The default hides the % text. This one shows it on the right,
-    // like most examples in various docs.
-    val content = RemoteViews(context.packageName, R.layout.notification)
-    content.setTextViewText(R.id.notification_title, title)
-    content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
-    content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
-
-    return NotificationCompat.Builder(context, channel).run {
-      // Starting Android 12, the notification shows up with a confusing delay of 10s.
-      // This fixes that delay.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-        foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
-
-      // Required by android. Here we use the system's default upload icon
-      setSmallIcon(android.R.drawable.stat_sys_upload)
-      // These prevent the notification from being force-dismissed or dismissed when pressed
-      setOngoing(true)
-      setAutoCancel(false)
-      // These help show the same custom content when the notification collapses and expands
-      setCustomContentView(content)
-      setCustomBigContentView(content)
-      // opens the app when the notification is pressed
-      setContentIntent(openAppIntent(context))
-      build()
-    }
-  }
-
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val notification = buildNotification()
+    val notification = UploadNotification.build(context)
     val id = UploadNotification.id
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
@@ -260,26 +211,4 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 }
 
-private fun getConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
-  val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-  val network = manager.activeNetwork
-  val capabilities = manager.getNetworkCapabilities(network)
 
-  val hasInternet = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true
-
-  // not wifiOnly, return early
-  if (!wifiOnly) return if (hasInternet) Connectivity.Ok else Connectivity.NoInternet
-
-  // handle wifiOnly
-  return if (hasInternet && capabilities?.hasTransport(TRANSPORT_WIFI) == true)
-    Connectivity.Ok
-  else
-    Connectivity.NoWifi // don't return NoInternet here, more direct to request to join wifi
-}
-
-
-private fun openAppIntent(context: Context): PendingIntent? {
-  val intent = Intent(context, NotificationReceiver::class.java)
-  val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-  return PendingIntent.getBroadcast(context, "RNFileUpload-notification".hashCode(), intent, flags)
-}
