@@ -1,6 +1,5 @@
 package com.vydia.RNUploader
 
-import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -47,8 +46,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   private lateinit var upload: Upload
   private var retries = 0
-  private val notificationManager =
-    context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     // Retrieve the upload. If this throws errors, error reporting won't work.
