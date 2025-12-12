@@ -136,7 +136,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       }
     } catch (error: Throwable) {
       // reset progress on error
-      UploadProgress.setIfNotNull(upload.id, 0L)
+      UploadProgress.set(upload.id, 0L)
       // pass the error to upper layer for retry decision
       throw error
     } finally {
@@ -145,7 +145,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
-    UploadProgress.setIfNotNull(upload.id, bytesSentTotal)
+    UploadProgress.set(upload.id, bytesSentTotal)
     EventReporter.progress(upload.id, bytesSentTotal, fileSize)
     notificationManager.notify(upload.notificationId, buildNotification())
   }

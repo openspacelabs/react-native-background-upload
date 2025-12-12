@@ -24,7 +24,7 @@ object UploadProgress {
   }
 
   @Synchronized
-  fun setIfNotNull(uploadId: String, bytesUploaded: Long) {
+  fun set(uploadId: String, bytesUploaded: Long) {
     map[uploadId]?.bytesUploaded = bytesUploaded
   }
 
