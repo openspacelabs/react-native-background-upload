@@ -1,6 +1,7 @@
 package com.vydia.RNUploader
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -17,11 +18,9 @@ import androidx.work.WorkerParameters
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.net.UnknownHostException
@@ -59,6 +58,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private lateinit var upload: Upload
   private var retries = 0
   private var connectivity = Connectivity.Ok
+  private val notificationManager =
+    context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     // Retrieve the upload. If this throws errors, error reporting won't work.
@@ -115,48 +116,47 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return@withContext Result.failure()
   }
 
-  private suspend fun upload(): Response? = withContext(Dispatchers.IO) {
+  private suspend fun upload(): UploadResponse? {
     val file = File(upload.path)
     val size = file.length()
 
     // Register progress asap so the total progress is accurate
     // This needs to happen before the semaphore wait
-    handleProgress(0, size)
+    UploadProgress.add(upload.id, size)
 
     // Don't bother to run on an invalid network
-    if (!validateAndReportConnectivity()) return@withContext null
+    if (!validateAndReportConnectivity()) return null
 
     // wait for its turn to run
     semaphore.acquire()
 
     try {
-      val response = okhttpUpload(client, upload, file) { progress ->
-        launch { handleProgress(progress, size) }
+      return okhttpUpload(client, upload, file) { progress ->
+        handleProgress(progress, size)
       }
-
-      handleProgress(size, size)
-      return@withContext response
-    }
-    // don't catch, propagate error up
-    finally {
+    } catch (error: Throwable) {
+      // reset progress on error
+      UploadProgress.set(upload.id, 0L)
+      // pass the error to upper layer for retry decision
+      throw error
+    } finally {
       semaphore.release()
     }
   }
 
-  private suspend fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
-    UploadProgress.set(context, upload.id, bytesSentTotal, fileSize)
+  private fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
+    UploadProgress.set(upload.id, bytesSentTotal)
     EventReporter.progress(upload.id, bytesSentTotal, fileSize)
-    setForeground(getForegroundInfo())
+    notificationManager.notify(upload.notificationId, buildNotification())
   }
 
-  private fun handleSuccess(response: Response) {
-    UploadProgress.scheduleClearing(context)
+  private fun handleSuccess(response: UploadResponse) {
+    UploadProgress.complete(upload.id)
     EventReporter.success(upload.id, response)
   }
 
   private fun handleError(error: Throwable) {
-    UploadProgress.remove(context, upload.id)
-    UploadProgress.scheduleClearing(context)
+    UploadProgress.remove(upload.id)
     EventReporter.error(upload.id, error)
   }
 
@@ -165,14 +165,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun checkAndHandleCancellation(): Boolean {
     if (!isStopped) return false
 
-    UploadProgress.remove(context, upload.id)
-    UploadProgress.scheduleClearing(context)
+    UploadProgress.remove(upload.id)
     EventReporter.cancelled(upload.id)
     return true
   }
 
   /** @return whether to retry */
-  private suspend fun checkRetry(error: Throwable): Boolean {
+  private fun checkRetry(error: Throwable): Boolean {
     var unlimitedRetry = false
 
     // Error was thrown due to unmet network preferences.
@@ -202,19 +201,17 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   // Checks connection and alerts connection issues
-  private suspend fun validateAndReportConnectivity(): Boolean {
+  private fun validateAndReportConnectivity(): Boolean {
     this.connectivity = validateConnectivity(context, upload.wifiOnly)
     // alert connectivity mode
-    setForeground(getForegroundInfo())
+    notificationManager.notify(upload.notificationId, buildNotification())
     return this.connectivity == Connectivity.Ok
   }
 
   // builds the notification required to enable Foreground mode
-  override suspend fun getForegroundInfo(): ForegroundInfo {
-    // All workers share the same notification that shows the total progress
-    val id = upload.notificationId.hashCode()
+  fun buildNotification(): Notification {
     val channel = upload.notificationChannel
-    val progress = UploadProgress.total(context)
+    val progress = UploadProgress.total()
     val progress2Decimals = "%.2f".format(progress)
     val title = when (connectivity) {
       Connectivity.NoWifi -> upload.notificationTitleNoWifi
@@ -230,7 +227,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
     content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
 
-    val notification = NotificationCompat.Builder(context, channel).run {
+    return NotificationCompat.Builder(context, channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
       // This fixes that delay.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
@@ -248,7 +245,11 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       setContentIntent(openAppIntent(context))
       build()
     }
+  }
 
+  override suspend fun getForegroundInfo(): ForegroundInfo {
+    val notification = buildNotification()
+    val id = upload.notificationId
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
       ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)

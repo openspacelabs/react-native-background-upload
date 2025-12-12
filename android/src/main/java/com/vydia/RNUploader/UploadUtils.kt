@@ -1,9 +1,14 @@
 package com.vydia.RNUploader
 
 import kotlinx.coroutines.suspendCancellableCoroutine
-import okhttp3.*
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Headers.Companion.toHeaders
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.Response
 import okio.Buffer
 import okio.BufferedSink
 import okio.ForwardingSink
@@ -15,6 +20,11 @@ import kotlin.coroutines.resumeWithException
 // Throttling interval of progress reports
 private const val PROGRESS_INTERVAL = 500 // milliseconds
 
+data class UploadResponse(
+  val code: Int,
+  val body: String,
+  val headers: Map<String, String>
+)
 
 // make an upload request using okhttp
 suspend fun okhttpUpload(
@@ -23,7 +33,7 @@ suspend fun okhttpUpload(
   file: File,
   onProgress: (Long) -> Unit
 ) =
-  suspendCancellableCoroutine<Response> { continuation ->
+  suspendCancellableCoroutine { continuation ->
     val requestBody = file.asRequestBody()
     var lastProgressReport = 0L
     fun throttled(): Boolean {
@@ -47,8 +57,17 @@ suspend fun okhttpUpload(
       override fun onFailure(call: Call, e: IOException) =
         continuation.resumeWithException(e)
 
-      override fun onResponse(call: Call, response: Response) =
-        continuation.resumeWith(Result.success(response))
+      override fun onResponse(call: Call, response: Response) {
+        val result = response.use { res -> // close the response asap
+          UploadResponse(
+            res.code,
+            res.body?.string()?.takeIf { str -> str.isNotEmpty() } ?: res.message,
+            res.headers.toMultimap().mapValues { it.value.joinToString(", ") }
+          )
+        }
+
+        continuation.resumeWith(Result.success(result))
+      }
     })
   }
 

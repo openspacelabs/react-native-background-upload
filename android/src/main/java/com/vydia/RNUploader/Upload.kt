@@ -1,7 +1,7 @@
 package com.vydia.RNUploader
 
 import com.facebook.react.bridge.ReadableMap
-import java.util.*
+import java.util.UUID
 
 // Data model of a single upload
 // Can be created from RN's ReadableMap
@@ -14,7 +14,7 @@ data class Upload(
   val maxRetries: Int,
   val wifiOnly: Boolean,
   val headers: Map<String, String>,
-  val notificationId: String,
+  val notificationId: Int,
   val notificationTitle: String,
   val notificationTitleNoInternet: String,
   val notificationTitleNoWifi: String,
@@ -39,7 +39,7 @@ data class Upload(
         }
         return@let map
       },
-      notificationId = map.getString(Upload::notificationId.name)
+      notificationId = map.getString(Upload::notificationId.name)?.hashCode()
         ?: throw MissingOptionException(Upload::notificationId.name),
       notificationTitle = map.getString(Upload::notificationTitle.name)
         ?: throw MissingOptionException(Upload::notificationTitle.name),
