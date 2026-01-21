@@ -115,12 +115,11 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // wait for its turn to run
     semaphore.acquire()
-
-    // mark as active upload for notification
-    UploadNotification.setActiveUpload(upload)
-    UploadNotification.update(context)
-
     try {
+      // mark as active upload for notification
+      UploadNotification.setActiveUpload(upload)
+      UploadNotification.update(context)
+
       return okhttpUpload(client, upload, file) { progress ->
         handleProgress(progress, size)
       }
