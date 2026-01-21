@@ -9,7 +9,12 @@ object UploadProgress {
     var bytesUploaded: Long,
     val size: Long,
     var complete: Boolean = false
-  )
+  ) {
+    fun complete() {
+      bytesUploaded = size
+      complete = true
+    }
+  }
 
   private val map = mutableMapOf<String, Progress>()
 
@@ -25,15 +30,12 @@ object UploadProgress {
 
   @Synchronized
   fun complete(uploadId: String) {
-    map[uploadId]?.let {
-      it.bytesUploaded = it.size
-      it.complete = true
-    }
+    map[uploadId]?.complete()
 
     // Attempt to clear in 2 seconds. This is the simplest way to let the
     // last worker reset the overall progress.
     // Clearing progress ensures the notification starts at 0% next time.
-    Handler(Looper.getMainLooper()).postDelayed({ clearIfNeeded() }, 2000)
+    Handler(Looper.getMainLooper()).postDelayed({ clearIfCompleted() }, 2000)
   }
 
   @Synchronized
@@ -50,7 +52,7 @@ object UploadProgress {
   }
 
   @Synchronized
-  private fun clearIfNeeded() {
+  private fun clearIfCompleted() {
     if (map.values.all { it.complete }) map.clear()
   }
 }
