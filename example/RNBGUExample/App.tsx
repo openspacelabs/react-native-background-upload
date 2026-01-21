@@ -79,6 +79,7 @@ const App = () => {
       importance: AndroidImportance.LOW,
     });
 
+    // Start multiple uploads to test performance
     for (let i = 0; i < 100; i++) {
       const uploadOpts: UploadOptions = {
         type: 'raw',
