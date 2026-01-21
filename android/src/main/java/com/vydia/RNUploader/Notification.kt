@@ -22,6 +22,8 @@ object UploadNotification {
     private set
   var channel: String = "File Uploads"
     private set
+  var maxRetries: Int = 5
+    private set
 
   private var activeUpload: Upload? = null
 
@@ -51,6 +53,7 @@ object UploadNotification {
       ?: throw MissingOptionException("notificationTitleNoWifi")
     channel = opts.getString("notificationChannel")
       ?: throw MissingOptionException("notificationChannel")
+    maxRetries = if (opts.hasKey("maxRetries")) opts.getInt("maxRetries") else 5
   }
 
   // builds the notification required to enable Foreground mode

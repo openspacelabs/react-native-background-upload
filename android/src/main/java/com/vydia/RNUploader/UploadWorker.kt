@@ -192,7 +192,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     }
 
     retries = if (unlimitedRetry) 0 else retries + 1
-    return retries <= upload.maxRetries
+    return retries <= UploadNotification.maxRetries
   }
 
 
