@@ -108,7 +108,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // Register progress asap so the total progress is accurate
     // This needs to happen before the semaphore wait
-    UploadProgress.add(upload.id, size)
+    UploadProgress.add(upload.id, size, upload.wifiOnly)
 
     // Don't bother to run on an invalid network
     if (Connectivity.fetch(context, upload.wifiOnly) != Connectivity.Ok) {

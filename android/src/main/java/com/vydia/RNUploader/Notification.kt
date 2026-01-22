@@ -58,9 +58,13 @@ object UploadNotification {
 
   // builds the notification required to enable Foreground mode
   fun build(context: Context): Notification {
-    // since all workers share the same notification ID,
-    // get the active upload so we don't overwrite the notification when multiple uploads are running
-    val wifiOnly = getActiveUpload()?.wifiOnly ?: false
+    // Determine wifiOnly preference for connectivity check:
+    // - If an upload is actively running, use its preference
+    // - Otherwise, check the queue: if ANY upload can proceed with just mobile data (wifiOnly=false),
+    //   we only need internet to make progress. If ALL uploads need WiFi, we need WiFi.
+    //   This ensures the notification ("Waiting for internet" vs "Waiting for WiFi") reflects
+    //   the minimum connectivity required to make progress.
+    val wifiOnly = getActiveUpload()?.wifiOnly ?: !UploadProgress.hasNonWifiOnlyUploads()
     val channel = channel
     val progress = UploadProgress.total()
     val progress2Decimals = "%.2f".format(progress)

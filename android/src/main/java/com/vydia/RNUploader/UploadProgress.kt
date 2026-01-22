@@ -8,6 +8,7 @@ object UploadProgress {
   private data class Progress(
     var bytesUploaded: Long,
     val size: Long,
+    val wifiOnly: Boolean,
     var complete: Boolean = false
   ) {
     fun complete() {
@@ -19,8 +20,8 @@ object UploadProgress {
   private val map = mutableMapOf<String, Progress>()
 
   @Synchronized
-  fun add(id: String, size: Long) {
-    map[id] = Progress(bytesUploaded = 0L, size = size)
+  fun add(id: String, size: Long, wifiOnly: Boolean) {
+    map[id] = Progress(bytesUploaded = 0L, size = size, wifiOnly = wifiOnly)
   }
 
   @Synchronized
@@ -54,5 +55,17 @@ object UploadProgress {
   @Synchronized
   private fun clearIfCompleted() {
     if (map.values.all { it.complete }) map.clear()
+  }
+
+  /**
+   * Returns true if any incomplete upload can proceed without WiFi (wifiOnly=false).
+   * Used to determine notification text when no upload is actively running:
+   * - If true: at least one upload only needs mobile data, so show "Waiting for internet"
+   * - If false: all uploads need WiFi, so show "Waiting for WiFi"
+   * This ensures the notification reflects the minimum connectivity needed to make progress.
+   */
+  @Synchronized
+  fun hasNonWifiOnlyUploads(): Boolean {
+    return map.values.any { !it.complete && !it.wifiOnly }
   }
 }
