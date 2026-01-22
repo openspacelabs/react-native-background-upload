@@ -111,7 +111,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     UploadProgress.add(upload.id, size)
 
     // Don't bother to run on an invalid network
-    if (Connectivity.fetch(context, upload.wifiOnly) != Connectivity.Ok) return null
+    if (Connectivity.fetch(context, upload.wifiOnly) != Connectivity.Ok) {
+      UploadNotification.update(context)
+      return null
+    }
 
     // wait for its turn to run
     semaphore.acquire()
