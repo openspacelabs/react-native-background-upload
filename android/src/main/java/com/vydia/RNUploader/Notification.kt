@@ -42,6 +42,7 @@ object UploadNotification {
     if (this.activeUpload?.id == upload.id) this.activeUpload = null
   }
 
+  @Synchronized
   fun setOptions(opts: ReadableMap) {
     id = opts.getString("notificationId")?.hashCode()
       ?: throw MissingOptionException("notificationId")
@@ -57,6 +58,7 @@ object UploadNotification {
   }
 
   // builds the notification required to enable Foreground mode
+  @Synchronized
   fun build(context: Context): Notification {
     // Determine wifiOnly preference for connectivity check:
     // - If an upload is actively running, use its preference
@@ -102,6 +104,7 @@ object UploadNotification {
     }
   }
 
+  @Synchronized
   fun update(context: Context) {
     val notification = build(context)
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
