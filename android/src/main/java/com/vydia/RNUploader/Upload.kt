@@ -12,6 +12,7 @@ data class Upload(
   val path: String,
   val method: String,
   val wifiOnly: Boolean,
+  val maxRetries: Int,
   val headers: Map<String, String>,
 ) {
   companion object {
@@ -21,6 +22,7 @@ data class Upload(
       path = map.getString(Upload::path.name) ?: throw MissingOptionException(Upload::path.name),
       method = map.getString(Upload::method.name) ?: "POST",
       wifiOnly = if (map.hasKey(Upload::wifiOnly.name)) map.getBoolean(Upload::wifiOnly.name) else false,
+      maxRetries = if (map.hasKey(Upload::maxRetries.name)) map.getInt(Upload::maxRetries.name) else 5,
       headers = map.getMap(Upload::headers.name).let { headers ->
         if (headers == null) return@let mapOf()
         val map = mutableMapOf<String, String>()

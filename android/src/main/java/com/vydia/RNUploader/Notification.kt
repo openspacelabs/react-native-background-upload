@@ -8,24 +8,17 @@ import android.content.Intent
 import android.os.Build
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
 import com.facebook.react.bridge.ReadableMap
 
 
 object UploadNotification {
-  var id: Int = 0
-    private set
-  var title: String = "Uploading files"
-    private set
-  var titleNoInternet: String = "Waiting for internet connection"
-    private set
-  var titleNoWifi: String = "Waiting for WiFi connection"
-    private set
-  var channel: String = "File Uploads"
-    private set
-  var maxRetries: Int = 5
-    private set
-
   private var activeUpload: Upload? = null
+
+  @Synchronized
+  fun setOptions(opts: ReadableMap, context: Context) {
+    NotificationOptions.set(opts, context)
+  }
 
   @Synchronized
   fun setActiveUpload(upload: Upload?) {
@@ -42,24 +35,11 @@ object UploadNotification {
     if (this.activeUpload?.id == upload.id) this.activeUpload = null
   }
 
-  @Synchronized
-  fun setOptions(opts: ReadableMap) {
-    id = opts.getString("notificationId")?.hashCode()
-      ?: throw MissingOptionException("notificationId")
-    title = opts.getString("notificationTitle")
-      ?: throw MissingOptionException("notificationTitle")
-    titleNoInternet = opts.getString("notificationTitleNoInternet")
-      ?: throw MissingOptionException("notificationTitleNoInternet")
-    titleNoWifi = opts.getString("notificationTitleNoWifi")
-      ?: throw MissingOptionException("notificationTitleNoWifi")
-    channel = opts.getString("notificationChannel")
-      ?: throw MissingOptionException("notificationChannel")
-    maxRetries = if (opts.hasKey("maxRetries")) opts.getInt("maxRetries") else 5
-  }
-
   // builds the notification required to enable Foreground mode
   @Synchronized
-  fun build(context: Context): Notification {
+  fun build(context: Context): Pair<Int, Notification> {
+    val opts = NotificationOptions.get(context)
+
     // Determine wifiOnly preference for connectivity check:
     // - If an upload is actively running, use its preference
     // - Otherwise, check the queue: if ANY upload can proceed with just mobile data (wifiOnly=false),
@@ -67,13 +47,12 @@ object UploadNotification {
     //   This ensures the notification ("Waiting for internet" vs "Waiting for WiFi") reflects
     //   the minimum connectivity required to make progress.
     val wifiOnly = getActiveUpload()?.wifiOnly ?: !UploadProgress.hasNonWifiOnlyUploads()
-    val channel = channel
     val progress = UploadProgress.total()
     val progress2Decimals = "%.2f".format(progress)
     val title = when (Connectivity.fetch(context, wifiOnly)) {
-      Connectivity.NoWifi -> titleNoWifi
-      Connectivity.NoInternet -> titleNoInternet
-      Connectivity.Ok -> title
+      Connectivity.NoWifi -> opts.titleNoWifi
+      Connectivity.NoInternet -> opts.titleNoInternet
+      Connectivity.Ok -> opts.title
     }
 
     // Custom layout for progress notification.
@@ -84,7 +63,7 @@ object UploadNotification {
     content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
     content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
 
-    return NotificationCompat.Builder(context, channel).run {
+    val notification = NotificationCompat.Builder(context, opts.channel).run {
       // Starting Android 12, the notification shows up with a confusing delay of 10s.
       // This fixes that delay.
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
@@ -102,11 +81,13 @@ object UploadNotification {
       setContentIntent(openAppIntent(context))
       build()
     }
+
+    return Pair(opts.id, notification)
   }
 
   @Synchronized
   fun update(context: Context) {
-    val notification = build(context)
+    val (id, notification) = build(context)
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     manager.notify(id, notification)
   }
@@ -119,4 +100,88 @@ private fun openAppIntent(context: Context): PendingIntent? {
   return PendingIntent.getBroadcast(context, "RNFileUpload-notification".hashCode(), intent, flags)
 }
 
+
+private data class Options(
+  val id: Int,
+  val title: String,
+  val titleNoInternet: String,
+  val titleNoWifi: String,
+  val channel: String
+)
+
+/**
+ * Manages notification options with persistence to SharedPreferences.
+ * Options are loaded lazily: from memory if set, otherwise from SharedPreferences,
+ * otherwise falls back to defaults.
+ */
+private object NotificationOptions {
+  private const val PREFS_NAME = "UploadNotificationPrefs"
+  private const val PREF_ID = "id"
+  private const val PREF_TITLE = "title"
+  private const val PREF_TITLE_NO_INTERNET = "titleNoInternet"
+  private const val PREF_TITLE_NO_WIFI = "titleNoWifi"
+  private const val PREF_CHANNEL = "channel"
+
+  private var cached: Options? = null
+
+  @Synchronized
+  fun get(context: Context): Options {
+    cached?.let { return it }
+    loadFromPrefs(context)?.let { cached = it; return it }
+    return Options(
+      id = "default-upload-notification".hashCode(),
+      title = "Uploading files",
+      titleNoInternet = "Waiting for internet connection",
+      titleNoWifi = "Waiting for WiFi connection",
+      channel = "File Uploads"
+    )
+  }
+
+  @Synchronized
+  fun set(opts: ReadableMap, context: Context) {
+    val options = Options(
+      id = opts.getString("notificationId")?.hashCode()
+        ?: throw MissingOptionException("notificationId"),
+      title = opts.getString("notificationTitle")
+        ?: throw MissingOptionException("notificationTitle"),
+      titleNoInternet = opts.getString("notificationTitleNoInternet")
+        ?: throw MissingOptionException("notificationTitleNoInternet"),
+      titleNoWifi = opts.getString("notificationTitleNoWifi")
+        ?: throw MissingOptionException("notificationTitleNoWifi"),
+      channel = opts.getString("notificationChannel")
+        ?: throw MissingOptionException("notificationChannel")
+    )
+    cached = options
+    // In rare cases, the Worker might be killed and restarted by the operating system,
+    // so we need to persist the options
+    saveToPrefs(context, options)
+  }
+
+  private fun loadFromPrefs(context: Context): Options? {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val id = prefs.getInt(PREF_ID, 0)
+    if (id == 0) return null
+
+    return Options(
+      id = id,
+      title = prefs.getString(PREF_TITLE, "Uploading files") ?: "Uploading files",
+      titleNoInternet = prefs.getString(PREF_TITLE_NO_INTERNET, "Waiting for internet connection")
+        ?: "Waiting for internet connection",
+      titleNoWifi = prefs.getString(PREF_TITLE_NO_WIFI, "Waiting for WiFi connection")
+        ?: "Waiting for WiFi connection",
+      channel = prefs.getString(PREF_CHANNEL, "File Uploads") ?: "File Uploads"
+    )
+  }
+
+  private fun saveToPrefs(context: Context, options: Options) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+      .edit {
+        putInt(PREF_ID, options.id)
+          .putString(PREF_TITLE, options.title)
+          .putString(PREF_TITLE_NO_INTERNET, options.titleNoInternet)
+          .putString(PREF_TITLE_NO_WIFI, options.titleNoWifi)
+          .putString(PREF_CHANNEL, options.channel)
+      }
+  }
+}
 

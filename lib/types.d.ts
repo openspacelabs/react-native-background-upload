@@ -22,6 +22,7 @@ export type UploadOptions = {
         [index: string]: string;
     };
     wifiOnly?: boolean;
+    maxRetries?: number;
     ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
 export type AndroidInitializationOptions = {
@@ -30,7 +31,6 @@ export type AndroidInitializationOptions = {
     notificationTitleNoWifi: string;
     notificationTitleNoInternet: string;
     notificationChannel: string;
-    maxRetries?: number;
 };
 type IOSOnlyUploadOptions = {
     /**

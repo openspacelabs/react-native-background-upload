@@ -195,13 +195,12 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     }
 
     retries = if (unlimitedRetry) 0 else retries + 1
-    return retries <= UploadNotification.maxRetries
+    return retries <= upload.maxRetries
   }
 
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
-    val notification = UploadNotification.build(context)
-    val id = UploadNotification.id
+    val (id, notification) = UploadNotification.build(context)
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
       ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)

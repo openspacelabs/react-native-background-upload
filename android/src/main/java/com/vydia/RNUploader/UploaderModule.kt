@@ -77,7 +77,7 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun initialize(options: ReadableMap, promise: Promise) {
     try {
-      UploadNotification.setOptions(options)
+      UploadNotification.setOptions(options, reactApplicationContext)
       promise.resolve(true)
     } catch (exc: Throwable) {
       if (exc !is MissingOptionException) {

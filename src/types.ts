@@ -29,6 +29,10 @@ export type UploadOptions = {
   };
   // Whether the upload should wait for wifi before starting
   wifiOnly?: boolean;
+  // Max retries for IO and unknown errors (not HTTP errors).
+  // Network connectivity issues don't count towards this limit.
+  // Default: 5
+  maxRetries?: number;
   ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
 
@@ -38,10 +42,6 @@ export type AndroidInitializationOptions = {
   notificationTitleNoWifi: string;
   notificationTitleNoInternet: string;
   notificationChannel: string;
-  // Does not retry based on http code.
-  // Only retry IO and other unknown issues.
-  // Network failure does not count towards retries
-  maxRetries?: number;
 };
 
 type IOSOnlyUploadOptions = {
