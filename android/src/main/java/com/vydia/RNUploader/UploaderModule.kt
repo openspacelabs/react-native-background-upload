@@ -120,23 +120,10 @@ class UploaderModule(context: ReactApplicationContext) :
   @ReactMethod
   fun cancelUpload(uploadId: String, promise: Promise) {
     try {
+      // Record intent BEFORE cancelling so the worker's stop handler can tell
+      // this apart from a system stop and report cancelReason 'user'.
+      UserCancellations.mark(uploadId)
       workManager.cancelUniqueWork(uploadId)
-      promise.resolve(true)
-    } catch (exc: Throwable) {
-      exc.printStackTrace()
-      Log.e(TAG, exc.message, exc)
-      promise.reject(exc)
-    }
-  }
-
-
-  /*
-   * Cancels all file uploads
-   */
-  @ReactMethod
-  fun stopAllUploads(promise: Promise) {
-    try {
-      workManager.cancelAllWorkByTag(WORKER_TAG)
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()

@@ -1,6 +1,7 @@
 package com.vydia.RNUploader
 
 import android.app.Notification
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -71,6 +72,9 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // initialization, errors thrown here won't be retried
     try {
+      // The foreground notification needs a channel to exist first, or posting
+      // it silently fails and setForeground can crash on newer Android.
+      ensureNotificationChannel()
       // `setForeground` is recommended for long-running workers.
       // Foreground mode helps prioritize the worker, reducing the risk
       // of it being killed during low memory or Doze/App Standby situations.
@@ -249,6 +253,21 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // alert connectivity mode
     notificationManager.notify(upload.notificationId, buildNotification())
     return this.connectivity == Connectivity.Ok
+  }
+
+  // Ensures the channel used by the foreground notification exists. Only creates
+  // it when absent, so a channel the consumer registered themselves (with their
+  // own name/importance) always wins; when they pass nothing we fall back to a
+  // default LOW-importance channel and no notifee setup is required.
+  private fun ensureNotificationChannel() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    if (notificationManager.getNotificationChannel(upload.notificationChannel) != null) return
+    val channel = NotificationChannel(
+      upload.notificationChannel,
+      "Uploads",
+      NotificationManager.IMPORTANCE_LOW,
+    )
+    notificationManager.createNotificationChannel(channel)
   }
 
   // builds the notification required to enable Foreground mode

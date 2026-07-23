@@ -28,6 +28,8 @@ data class Upload(
     IllegalArgumentException("Missing '$optionName'")
 
   companion object {
+    const val DEFAULT_NOTIFICATION_CHANNEL = "background-upload"
+
     fun fromReadableMap(map: ReadableMap) = Upload(
       id = map.getString("customUploadId") ?: UUID.randomUUID().toString(),
       url = map.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
@@ -46,16 +48,18 @@ data class Upload(
         }
         return@let map
       },
-      notificationId = map.getString(Upload::notificationId.name)?.hashCode()
-        ?: throw MissingOptionException(Upload::notificationId.name),
+      // Notification options are optional: the library supplies sensible defaults
+      // and creates its own channel, so consumers don't need any notifee plumbing.
+      notificationId = (map.getString(Upload::notificationId.name)
+        ?: DEFAULT_NOTIFICATION_CHANNEL).hashCode(),
       notificationTitle = map.getString(Upload::notificationTitle.name)
-        ?: throw MissingOptionException(Upload::notificationTitle.name),
+        ?: "Uploading…",
       notificationTitleNoInternet = map.getString(Upload::notificationTitleNoInternet.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoInternet.name),
+        ?: "Waiting for connection…",
       notificationTitleNoWifi = map.getString(Upload::notificationTitleNoWifi.name)
-        ?: throw MissingOptionException(Upload::notificationTitleNoWifi.name),
+        ?: "Waiting for Wi-Fi…",
       notificationChannel = map.getString(Upload::notificationChannel.name)
-        ?: throw MissingOptionException(Upload::notificationChannel.name),
+        ?: DEFAULT_NOTIFICATION_CHANNEL,
     )
   }
 }
