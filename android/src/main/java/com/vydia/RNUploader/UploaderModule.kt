@@ -3,6 +3,7 @@ package com.vydia.RNUploader
 import android.util.Log
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.facebook.react.bridge.Arguments
@@ -21,6 +22,9 @@ class UploaderModule(context: ReactApplicationContext) :
   companion object {
     const val TAG = "RNFileUploader.UploaderModule"
     const val WORKER_TAG = "RNFileUploader"
+    // WorkInfo exposes tags but not the unique-work name, so the upload id is
+    // also stored as a prefixed tag to recover it in getAllUploads.
+    const val ID_TAG_PREFIX = "RNFileUploaderId:"
     var reactContext: ReactApplicationContext? = null
       private set
   }
@@ -70,6 +74,42 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
 
+  /**
+   * Enumerates uploads WorkManager still knows about, as [{ id, state }].
+   * WorkManager auto-prunes finished work after roughly a day, so this is for
+   * reconciling live/recent uploads — terminal outcomes must be read from
+   * getUnacknowledgedEvents, which is durable until acknowledged.
+   */
+  @ReactMethod
+  fun getAllUploads(promise: Promise) {
+    try {
+      val infos = workManager.getWorkInfosByTag(WORKER_TAG).get()
+      val arr = Arguments.createArray()
+      for (info in infos) {
+        val id = info.tags.firstOrNull { it.startsWith(ID_TAG_PREFIX) }
+          ?.removePrefix(ID_TAG_PREFIX) ?: continue
+        arr.pushMap(Arguments.createMap().apply {
+          putString("id", id)
+          putString(
+            "state",
+            when (info.state) {
+              WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "pending"
+              WorkInfo.State.RUNNING -> "running"
+              WorkInfo.State.SUCCEEDED -> "completed"
+              WorkInfo.State.FAILED -> "error"
+              WorkInfo.State.CANCELLED -> "cancelled"
+            },
+          )
+        })
+      }
+      promise.resolve(arr)
+    } catch (exc: Throwable) {
+      Log.e(TAG, exc.message, exc)
+      promise.reject(exc)
+    }
+  }
+
+
   /*
    * Starts a file upload.
    * Returns a promise with the string ID of the upload.
@@ -97,6 +137,7 @@ class UploaderModule(context: ReactApplicationContext) :
 
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
       .addTag(WORKER_TAG)
+      .addTag(ID_TAG_PREFIX + upload.id)
       .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
       .build()
 
