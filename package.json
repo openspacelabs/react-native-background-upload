@@ -1,13 +1,13 @@
 {
   "name": "react-native-background-upload",
-  "version": "7.5.3",
+  "version": "8.0.0",
   "description": "Cross platform http post file uploader with android and iOS background support",
   "main": "src/index",
-  "typings": "lib/index.d.ts",
+  "typings": "src/index.ts",
   "react-native": "src/index",
   "source": "src/index",
   "scripts": {
-    "build": "tsc && tsc-alias",
+    "typecheck": "tsc",
     "test": "jest",
     "lint": "yarn lint-root --fix && yarn lint-example --fix",
     "lint:ci": "yarn lint-root && yarn lint-example",
@@ -31,7 +31,7 @@
     "react-native": ">=0.47.0"
   },
   "author": "OpenSpace",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/openspacelabs/react-native-background-upload/issues"
   },
