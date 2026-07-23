@@ -20,7 +20,7 @@ Note: if you are installing on React Native < 0.47, use `react-native-background
 
 ## 3. Expo
 
-To use this library with [Expo](https://expo.io) one must first detach (eject) the project and follow [step 2](#2-link-native-code) instructions. Additionally on iOS there is a must to add a Header Search Path to other dependencies which are managed using Pods. To do so one has to add `$(SRCROOT)/../../../ios/Pods/Headers/Public` to Header Search Path in `VydiaRNFileUploader` module using XCode.
+To use this library with [Expo](https://expo.io) one must first detach (eject) the project and follow [step 2](#2-link-native-code) instructions. Additionally on iOS there is a must to add a Header Search Path to other dependencies which are managed using Pods. To do so one has to add `$(SRCROOT)/../../../ios/Pods/Headers/Public` to Header Search Path in the `react-native-background-upload` pod using XCode.
 
 # Usage
 
@@ -211,7 +211,3 @@ Why should I use this file uploader instead of others that I've Googled like [re
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 # Common Issues
-
-## Gratitude
-
-Many thanks to the [Original Library](https://github.com/Vydia/react-native-background-upload) for the boilerplate and inspiration

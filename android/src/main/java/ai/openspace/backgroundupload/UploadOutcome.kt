@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 import java.io.IOException
 

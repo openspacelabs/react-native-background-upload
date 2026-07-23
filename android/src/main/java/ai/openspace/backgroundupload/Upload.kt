@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 import com.facebook.react.bridge.ReadableMap
 import java.util.UUID

@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 // Upload ids the JS side explicitly cancelled. Consulted by the worker to
 // distinguish user cancels from system kills (WorkManager 2.8.1 has no

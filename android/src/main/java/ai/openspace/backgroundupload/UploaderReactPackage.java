@@ -1,4 +1,4 @@
-package com.vydia.RNUploader;
+package ai.openspace.backgroundupload;
 
 import com.facebook.react.ReactPackage;
 import com.facebook.react.bridge.JavaScriptModule;

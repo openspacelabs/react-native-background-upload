@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Vydia/react-native-background-upload.git"
+    "url": "https://github.com/openspacelabs/react-native-background-upload.git"
   },
   "keywords": [
     "NSURLSession",
@@ -29,12 +29,12 @@
     "react": "*",
     "react-native": ">=0.47.0"
   },
-  "author": "Steve Potter",
+  "author": "OpenSpace",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/Vydia/react-native-background-upload/issues"
+    "url": "https://github.com/openspacelabs/react-native-background-upload/issues"
   },
-  "homepage": "https://github.com/Vydia/react-native-background-upload#readme",
+  "homepage": "https://github.com/openspacelabs/react-native-background-upload#readme",
   "devDependencies": {
     "@babel/core": "^7.20.0",
     "@babel/preset-env": "^7.20.0",
