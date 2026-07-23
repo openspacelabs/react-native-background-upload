@@ -2,7 +2,13 @@
  * Handles HTTP background file uploads from an iOS or Android device.
  */
 import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
-import { AddListener, UploadId, UploadOptions } from './types';
+import {
+  AddListener,
+  JournaledEvent,
+  UploadId,
+  UploadOptions,
+  UploadSnapshot,
+} from './types';
 
 export * from './types';
 
@@ -19,21 +25,12 @@ if (Platform.OS === 'ios') {
 }
 
 /**
- * Starts uploading a file to an HTTP endpoint.
- * Options object:
-  ```
-  {
-    url: string.  url to post to.
-    path: string.  path to the file on the device
-    headers: hash of name/value header pairs
-    method: HTTP method to use.  Default is "POST"
-    notification: hash for customizing tray notifiaction
-      enabled: boolean to enable/disabled notifications, true by default.
-  }
-  ```
- * Returns a promise with the string ID of the upload.  Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
- * It is recommended to add listeners in the .then of this promise.
-*/
+ * Starts uploading a file to an HTTP endpoint. See UploadOptions for the full
+ * option set (url, path, method, headers, wifiOnly, acceptStatus, android, ios).
+ * Returns a promise resolving to the upload's string id. Rejects only on a bad
+ * option (e.g. missing/invalid url or path); transport failures and HTTP error
+ * responses surface later as 'error' events, not a rejection here.
+ */
 const startUpload = ({
   path,
   android,
@@ -67,10 +64,10 @@ const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
  * Listens for the given event on the given upload ID (resolved from startUpload).
  * If you don't supply a value for uploadId, the event will fire for all uploads.
  * Events (id is always the upload ID):
- * progress - { id: string, progress: int (0-100) }
- * error - { id: string, error: string }
- * cancelled - { id: string, error: string }
- * completed - { id: string }
+ * progress - { id, progress: 0-100 }
+ * error - { id, error, errorKind?, responseCode?, responseBody?, responseHeaders? }
+ * cancelled - { id, cancelReason?: 'user' | 'system' }
+ * completed - { id, responseCode, responseBody, responseHeaders?, eventId? }
  */
 const addListener: AddListener = (eventType, uploadId, listener) =>
   DeviceEventEmitter.addListener(eventPrefix + eventType, (data) => {
@@ -78,6 +75,31 @@ const addListener: AddListener = (eventType, uploadId, listener) =>
       listener(data);
     }
   });
+
+/**
+ * Terminal events (completed/error/cancelled) are journaled natively before being
+ * emitted, so they survive the app being killed or JS reloading. Read them on
+ * startup, process each, then acknowledge — unacknowledged events are re-delivered
+ * here on every call until you ack them.
+ *
+ * Note: `completed` fires only for 2xx (or a request's `acceptStatus`); other HTTP
+ * responses arrive as `error` with `errorKind: 'http'` and the response attached.
+ */
+const getUnacknowledgedEvents = (): Promise<JournaledEvent[]> =>
+  NativeModule.getUnacknowledgedEvents();
+
+/** Removes journaled events by eventId once you've processed them. */
+const ackEvents = (eventIds: string[]): Promise<boolean> =>
+  NativeModule.ackEvents(eventIds);
+
+/**
+ * Enumerates uploads the OS still knows about, for reconciling in-flight work on
+ * boot. Terminal outcomes come from getUnacknowledgedEvents (durable), not here:
+ * on Android finished work is pruned after ~a day, and on iOS only live tasks are
+ * listed.
+ */
+const getAllUploads = (): Promise<UploadSnapshot[]> =>
+  NativeModule.getAllUploads();
 
 const ios = {
   /**
@@ -111,6 +133,9 @@ export default {
   startUpload,
   cancelUpload,
   addListener,
+  getUnacknowledgedEvents,
+  ackEvents,
+  getAllUploads,
   ios,
   android,
 };

@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "noImplicitAny": true
   },
-  "exclude": ["example", "lib"]
+  "exclude": ["example", "lib", "src/__tests__"]
 }
