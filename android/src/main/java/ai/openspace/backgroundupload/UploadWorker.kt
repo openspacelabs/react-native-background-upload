@@ -162,39 +162,37 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun handleResponse(response: UploadResponse) {
     UploadProgress.complete(upload.id)
     val accepted = UploadOutcome.isAccepted(response.code, upload.acceptStatus)
-    EventJournal.get(context).append(
+    val (body, truncated) = EventJournal.capBody(response.body)
+    journalAndEmit(
       EventJournal.Entry(
         eventId = UUID.randomUUID().toString(),
         uploadId = upload.id,
         type = if (accepted) "completed" else "error",
         timestamp = System.currentTimeMillis(),
         responseCode = response.code,
-        responseBody = response.body,
+        responseBody = body,
+        responseBodyTruncated = truncated,
         responseHeaders = response.headers,
         errorKind = if (accepted) null else "http",
         error = if (accepted) null else "HTTP ${response.code}",
       )
     )
-    if (accepted) EventReporter.success(upload.id, response)
-    else EventReporter.httpError(upload.id, response)
   }
 
   private fun handleError(error: Throwable) {
     UploadProgress.remove(upload.id)
     // Default fileExists=true so a failed existence probe reads as network, not file.
     val fileExists = runCatching { File(upload.path).exists() }.getOrDefault(true)
-    val kind = UploadOutcome.errorKind(error, fileExists)
-    EventJournal.get(context).append(
+    journalAndEmit(
       EventJournal.Entry(
         eventId = UUID.randomUUID().toString(),
         uploadId = upload.id,
         type = "error",
         timestamp = System.currentTimeMillis(),
         error = error.message ?: "Unknown exception",
-        errorKind = kind,
+        errorKind = UploadOutcome.errorKind(error, fileExists),
       )
     )
-    EventReporter.error(upload.id, error, kind)
   }
 
   // Check if cancelled by user or new worker with same ID
@@ -204,7 +202,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     val reason = if (UserCancellations.consume(upload.id)) "user" else "system"
     UploadProgress.remove(upload.id)
-    EventJournal.get(context).append(
+    journalAndEmit(
       EventJournal.Entry(
         eventId = UUID.randomUUID().toString(),
         uploadId = upload.id,
@@ -213,8 +211,15 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         cancelReason = reason,
       )
     )
-    EventReporter.cancelled(upload.id, reason)
     return true
+  }
+
+  // Journal before emitting: the journal is the durable record (survives JS being
+  // dead); the live emit is best-effort. Both carry the identical payload, so a
+  // consumer can ack a live event by its eventId.
+  private fun journalAndEmit(entry: EventJournal.Entry) {
+    EventJournal.get(context).append(entry)
+    EventReporter.emit(entry)
   }
 
   /** @return whether to retry */
@@ -260,7 +265,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   // own name/importance) always wins; when they pass nothing we fall back to a
   // default LOW-importance channel and no notifee setup is required.
   private fun ensureNotificationChannel() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    // minSdk is 29, so NotificationChannel (API 26) is always available.
     if (notificationManager.getNotificationChannel(upload.notificationChannel) != null) return
     val channel = NotificationChannel(
       upload.notificationChannel,

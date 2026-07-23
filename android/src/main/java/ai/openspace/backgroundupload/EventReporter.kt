@@ -9,44 +9,19 @@ import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEm
 object EventReporter {
 
   private const val TAG = "UploadReceiver"
-  fun cancelled(uploadId: String, reason: String) =
-    sendEvent("cancelled", Arguments.createMap().apply {
-      putString("id", uploadId)
-      putString("cancelReason", reason)
-    })
 
-  fun error(uploadId: String, exception: Throwable, kind: String) =
-    sendEvent("error", Arguments.createMap().apply {
-      putString("id", uploadId)
-      putString("error", exception.message ?: "Unknown exception")
-      putString("errorKind", kind)
-    })
-
-  // A non-accepted HTTP response (e.g. 400/500). Emitted as an "error" with the
-  // full response attached so consumers can inspect the body/status.
-  fun httpError(uploadId: String, response: UploadResponse) =
-    sendEvent("error", Arguments.createMap().apply {
-      putString("id", uploadId)
-      putString("error", "HTTP ${response.code}")
-      putString("errorKind", "http")
-      putInt("responseCode", response.code)
-      putString("responseBody", response.body)
-      putMap("responseHeaders", Arguments.makeNativeMap(response.headers))
-    })
-
-  fun success(uploadId: String, response: UploadResponse) =
-    sendEvent("completed", Arguments.createMap().apply {
-      putString("id", uploadId)
-      putInt("responseCode", response.code)
-      putString("responseBody", response.body)
-      putMap("responseHeaders", Arguments.makeNativeMap(response.headers))
-    })
-
+  // Emit a terminal event from its journal entry, so the live event carries the
+  // exact same payload (incl. eventId) as the journaled copy — letting a consumer
+  // ackEvents([eventId]) right after handling a live event, and keeping iOS/Android
+  // event shapes identical. The event name is the entry's type.
+  fun emit(entry: EventJournal.Entry) = sendEvent(entry.type, entry.toWritableMap())
 
   fun progress(uploadId: String, bytesSentTotal: Long, contentLength: Long) =
     sendEvent("progress", Arguments.createMap().apply {
       putString("id", uploadId)
-      putDouble("progress", (bytesSentTotal.toDouble() * 100 / contentLength)) //0-100
+      // Guard against a zero-byte file (contentLength == 0) producing NaN.
+      val pct = if (contentLength <= 0) 0.0 else bytesSentTotal.toDouble() * 100 / contentLength
+      putDouble("progress", pct) // 0-100
     })
 
   fun notification() = sendEvent("notification")

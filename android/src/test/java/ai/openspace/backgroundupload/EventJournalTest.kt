@@ -52,11 +52,11 @@ class EventJournalTest {
   @Test
   fun `oversized body is truncated and flagged`() {
     val journal = EventJournal(tmp.newFolder())
-    val big = "x".repeat(EventJournal.MAX_BODY_BYTES + 100)
+    val big = "x".repeat(EventJournal.MAX_BODY_CHARS + 100)
     journal.append(entry("e1").copy(responseBody = big))
     val read = journal.unacknowledged()[0]
     assertTrue(read.responseBodyTruncated)
-    assertTrue(read.responseBody!!.length <= EventJournal.MAX_BODY_BYTES)
+    assertTrue(read.responseBody!!.length <= EventJournal.MAX_BODY_CHARS)
   }
 
   @Test

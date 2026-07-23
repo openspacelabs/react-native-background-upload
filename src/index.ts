@@ -16,8 +16,9 @@ const NativeModule = NativeModules.RNFileUploader;
 const eventPrefix = 'RNFileUploader-';
 const fileURIPrefix = 'file://';
 
-// for iOS, register event listeners or else they don't fire on DeviceEventEmitter
-if (Platform.OS === 'ios') {
+// for iOS, register event listeners or else they don't fire on DeviceEventEmitter.
+// Guard on the module too: if it failed to link, skip rather than throw at import.
+if (Platform.OS === 'ios' && NativeModule) {
   NativeModule.addListener(eventPrefix + 'progress');
   NativeModule.addListener(eventPrefix + 'error');
   NativeModule.addListener(eventPrefix + 'cancelled');
@@ -34,7 +35,6 @@ if (Platform.OS === 'ios') {
 const startUpload = ({
   path,
   android,
-  ios,
   ...options
 }: UploadOptions): Promise<UploadId> => {
   if (!path.startsWith(fileURIPrefix)) {
@@ -45,7 +45,7 @@ const startUpload = ({
     path = path.replace(fileURIPrefix, '');
   }
 
-  return NativeModule.startUpload({ ...options, ...android, ...ios, path });
+  return NativeModule.startUpload({ ...options, ...android, path });
 };
 
 /**

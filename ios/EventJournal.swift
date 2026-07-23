@@ -45,7 +45,16 @@ enum EventJournal {
 
   private static let queue = DispatchQueue(label: "ai.openspace.rnbgupload.journal")
 
-  private static var dirURL: URL {
+  // Char-count cap (a byte-accurate split could cut a surrogate pair). Single
+  // source of truth so the journaled body and the live-emitted body match.
+  static func capBody(_ body: String?) -> (String?, Bool) {
+    guard let body, body.count > maxBodyChars else { return (body, false) }
+    return (String(body.prefix(maxBodyChars)), true)
+  }
+
+  // Computed once: creating the dir and re-setting the backup flag on every
+  // append/read/ack call is wasteful.
+  private static let dirURL: URL = {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     var dir = base.appendingPathComponent("RNFileUploaderEvents", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -54,13 +63,14 @@ enum EventJournal {
     values.isExcludedFromBackup = true
     try? dir.setResourceValues(values)
     return dir
-  }
+  }()
 
   static func append(_ event: JournaledEvent) {
     queue.sync {
       var e = event
-      if let body = e.responseBody, body.count > maxBodyChars {
-        e.responseBody = String(body.prefix(maxBodyChars))
+      let (body, truncated) = capBody(e.responseBody)
+      if truncated {
+        e.responseBody = body
         e.responseBodyTruncated = true
       }
       // A journal write must never throw into the caller: the delegate calls this

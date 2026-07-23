@@ -135,6 +135,12 @@ class UploaderModule(context: ReactApplicationContext) :
     val upload = Upload.fromReadableMap(options)
     val data = Gson().toJson(upload)
 
+    // Clear any stale user-cancel mark for this (possibly reused customUploadId)
+    // from a prior life, so a later system stop of this fresh upload isn't
+    // misreported as a user cancel. Done here (before enqueue), never in the
+    // worker, so a real cancel arriving as the worker starts can't be erased.
+    UserCancellations.consume(upload.id)
+
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
       .addTag(WORKER_TAG)
       .addTag(ID_TAG_PREFIX + upload.id)

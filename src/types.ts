@@ -75,7 +75,6 @@ export type UploadOptions = {
   acceptStatus?: number[];
   // Optional: the library supplies notification defaults and creates its own channel.
   android?: Partial<AndroidOnlyUploadOptions>;
-  ios?: IOSOnlyUploadOptions;
 } & RawUploadOptions;
 
 type AndroidOnlyUploadOptions = {
@@ -88,14 +87,6 @@ type AndroidOnlyUploadOptions = {
   // Only retry IO and other unknown issues.
   // Network failure does not count towards retries
   maxRetries?: number;
-};
-
-type IOSOnlyUploadOptions = {
-  /**
-   * AppGroup defined in XCode for extensions. Necessary when trying to upload things via this library
-   * in the context of ShareExtension.
-   */
-  appGroup?: string;
 };
 
 type RawUploadOptions = {

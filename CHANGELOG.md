@@ -14,8 +14,11 @@ Breaking:
 - iOS AppDelegate must forward `handleEventsForBackgroundURLSession` (see README).
 - Removed the committed `lib/` build output; types are served from `src`
   (deep imports of `lib/*` break — import from the package root).
-- Minimum iOS deployment target is 15.1.
-- Removed non-functional iOS code paths: multipart, `assets-library://`, `appGroup`.
+- Minimum iOS deployment target is 15.1; minimum Android SDK is 29. Minimum React
+  Native is 0.75.
+- Removed non-functional iOS code paths: multipart, `assets-library://`, and the
+  `appGroup` option (a no-op even before this — it mutated the session config after
+  creation, which URLSession ignores; also removed from the TypeScript options).
 - Removed the unexposed Android `stopAllUploads`.
 
 Added:

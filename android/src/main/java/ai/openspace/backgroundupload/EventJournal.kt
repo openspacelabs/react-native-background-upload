@@ -40,7 +40,7 @@ class EventJournal(
         putDouble("timestamp", timestamp.toDouble())
         responseCode?.let { putInt("responseCode", it) }
         responseBody?.let { putString("responseBody", it) }
-        putBoolean("responseBodyTruncated", responseBodyTruncated)
+        if (responseBodyTruncated) putBoolean("responseBodyTruncated", true)
         responseHeaders?.let {
           putMap("responseHeaders", com.facebook.react.bridge.Arguments.makeNativeMap(it))
         }
@@ -51,9 +51,18 @@ class EventJournal(
   }
 
   companion object {
-    const val MAX_BODY_BYTES = 64 * 1024
+    const val MAX_BODY_CHARS = 64 * 1024
     const val MAX_ENTRIES = 1000
     private val gson = Gson()
+
+    // Char-count cap (not byte-accurate: splitting on a byte boundary risks
+    // cutting a surrogate pair; a slightly loose cap is fine as a safety limit).
+    // Returns the (possibly truncated) body and whether truncation occurred.
+    // Single source of truth so the journaled copy and the live-emitted copy match.
+    fun capBody(body: String?): Pair<String?, Boolean> =
+      if (body != null && body.length > MAX_BODY_CHARS)
+        body.substring(0, MAX_BODY_CHARS) to true
+      else body to false
 
     @Volatile
     private var instance: EventJournal? = null
@@ -73,13 +82,10 @@ class EventJournal(
 
   @Synchronized
   fun append(entry: Entry) {
-    val body = entry.responseBody
-    // Char-count cap, not byte-accurate: splitting on a byte boundary risks
-    // cutting a surrogate pair; a slightly loose cap is fine for a safety limit.
+    // Defensive cap in case a caller didn't pre-cap; idempotent when it did.
+    val (body, truncated) = capBody(entry.responseBody)
     val bounded =
-      if (body != null && body.length > MAX_BODY_BYTES)
-        entry.copy(responseBody = body.substring(0, MAX_BODY_BYTES), responseBodyTruncated = true)
-      else entry
+      if (truncated) entry.copy(responseBody = body, responseBodyTruncated = true) else entry
     // A journal write must NEVER throw into the caller. The worker calls this
     // right after a successful upload; a propagated IOException (e.g. disk full)
     // would be classified as a retryable error and re-run the upload, sending
@@ -101,6 +107,8 @@ class EventJournal(
   // propagate for the same reason append() must not.
   private fun pruneToMax() {
     try {
+      // Sweep orphaned .tmp files (writeText succeeded but rename failed).
+      dir.listFiles { f -> f.extension == "tmp" }?.forEach { it.delete() }
       val files = dir.listFiles { f -> f.extension == "json" } ?: return
       if (files.size <= maxEntries) return
       files.sortedBy { it.lastModified() }

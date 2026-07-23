@@ -19,7 +19,6 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
   private static let backgroundSessionId = "ReactNativeBackgroundUpload"
   private static let wifiOnlySessionId = "ReactNativeBackgroundUpload_WifiOnly"
   private static let progressThrottle: TimeInterval = 0.5 // seconds, per upload
-  private static let maxBodyChars = 64 * 1024
 
   private static let lock = NSLock()
   private static var responsesData: [String: NSMutableData] = [:] // sessionId:taskId -> body
@@ -132,7 +131,9 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     }
 
     let wifiOnly = (options["wifiOnly"] as? Bool) ?? false
-    let acceptStatus = (options["acceptStatus"] as? [Int]) ?? []
+    // RN bridges a JS number[] to NSArray<NSNumber>; map explicitly rather than
+    // rely on an [Int] bridging cast that can yield nil and silently drop it.
+    let acceptStatus = (options["acceptStatus"] as? [NSNumber])?.map { $0.intValue } ?? []
     let uploadId = (options["customUploadId"] as? String) ?? UUID().uuidString
     let fileURL = URL(string: path) ?? URL(fileURLWithPath: path)
 
@@ -296,12 +297,9 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     RNFileUploader.lastProgressAt[id] = nil
     RNFileUploader.lock.unlock()
 
-    var responseBody = bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) } ?? ""
-    var truncated = false
-    if responseBody.count > RNFileUploader.maxBodyChars {
-      responseBody = String(responseBody.prefix(RNFileUploader.maxBodyChars))
-      truncated = true
-    }
+    let rawBody = bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) } ?? ""
+    let (cappedBody, truncated) = EventJournal.capBody(rawBody)
+    let responseBody = cappedBody ?? ""
 
     let eventId = UUID().uuidString
     let timestamp = Date().timeIntervalSince1970 * 1000
@@ -339,7 +337,7 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
       } else {
         eventName = "error"
         event.type = "error"
-        event.errorKind = "network"
+        event.errorKind = RNFileUploader.errorKind(for: nsError)
         event.error = nsError.localizedDescription
       }
     }
@@ -356,6 +354,25 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     let handler = RNFileUploader.bgCompletionHandlers.removeValue(forKey: identifier)
     RNFileUploader.bgHandlerLock.unlock()
     if let handler { DispatchQueue.main.async { handler() } }
+  }
+
+  // Classify a transport error to match Android's errorKind taxonomy: a missing or
+  // unreadable source file -> 'file'; other URL-domain errors -> 'network'; anything
+  // else -> 'unknown'.
+  private static func errorKind(for error: NSError) -> String {
+    switch (error.domain, error.code) {
+    case (NSURLErrorDomain, NSURLErrorFileDoesNotExist),
+         (NSURLErrorDomain, NSURLErrorCannotOpenFile),
+         (NSURLErrorDomain, NSURLErrorNoPermissionsToReadFile),
+         (NSCocoaErrorDomain, NSFileNoSuchFileError),
+         (NSCocoaErrorDomain, NSFileReadNoSuchFileError),
+         (NSCocoaErrorDomain, NSFileReadNoPermissionError):
+      return "file"
+    case (NSURLErrorDomain, _):
+      return "network"
+    default:
+      return "unknown"
+    }
   }
 
   private func stateString(_ state: URLSessionTask.State) -> String {
