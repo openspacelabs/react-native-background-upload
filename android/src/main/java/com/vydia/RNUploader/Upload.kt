@@ -13,6 +13,10 @@ data class Upload(
   val method: String,
   val maxRetries: Int,
   val wifiOnly: Boolean,
+  // Non-2xx statuses to treat as a successful completion (e.g. [409] when
+  // duplicate-create conflicts are expected). Everything else non-2xx is a
+  // terminal http error. Empty by default.
+  val acceptStatus: List<Int>,
   val headers: Map<String, String>,
   val notificationId: Int,
   val notificationTitle: String,
@@ -31,6 +35,9 @@ data class Upload(
       method = map.getString(Upload::method.name) ?: "POST",
       maxRetries = if (map.hasKey(Upload::maxRetries.name)) map.getInt(Upload::maxRetries.name) else 5,
       wifiOnly = if (map.hasKey(Upload::wifiOnly.name)) map.getBoolean(Upload::wifiOnly.name) else false,
+      acceptStatus = map.getArray(Upload::acceptStatus.name)?.let { arr ->
+        (0 until arr.size()).map { i -> arr.getInt(i) }
+      } ?: listOf(),
       headers = map.getMap(Upload::headers.name).let { headers ->
         if (headers == null) return@let mapOf()
         val map = mutableMapOf<String, String>()

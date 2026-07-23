@@ -112,6 +112,7 @@ class EventJournal(
   }
 
   @Synchronized
+  @Suppress("SENSELESS_COMPARISON") // Gson can inject null into a non-null field
   fun unacknowledged(): List<Entry> =
     (dir.listFiles { f -> f.extension == "json" } ?: emptyArray())
       .mapNotNull { f ->

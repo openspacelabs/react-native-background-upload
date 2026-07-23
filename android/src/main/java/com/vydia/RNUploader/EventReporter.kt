@@ -9,15 +9,29 @@ import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEm
 object EventReporter {
 
   private const val TAG = "UploadReceiver"
-  fun cancelled(uploadId: String) =
+  fun cancelled(uploadId: String, reason: String) =
     sendEvent("cancelled", Arguments.createMap().apply {
       putString("id", uploadId)
+      putString("cancelReason", reason)
     })
 
-  fun error(uploadId: String, exception: Throwable) =
+  fun error(uploadId: String, exception: Throwable, kind: String) =
     sendEvent("error", Arguments.createMap().apply {
       putString("id", uploadId)
       putString("error", exception.message ?: "Unknown exception")
+      putString("errorKind", kind)
+    })
+
+  // A non-accepted HTTP response (e.g. 400/500). Emitted as an "error" with the
+  // full response attached so consumers can inspect the body/status.
+  fun httpError(uploadId: String, response: UploadResponse) =
+    sendEvent("error", Arguments.createMap().apply {
+      putString("id", uploadId)
+      putString("error", "HTTP ${response.code}")
+      putString("errorKind", "http")
+      putInt("responseCode", response.code)
+      putString("responseBody", response.body)
+      putMap("responseHeaders", Arguments.makeNativeMap(response.headers))
     })
 
   fun success(uploadId: String, response: UploadResponse) =

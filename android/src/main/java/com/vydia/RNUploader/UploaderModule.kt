@@ -5,10 +5,12 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.google.gson.Gson
 
@@ -31,6 +33,41 @@ class UploaderModule(context: ReactApplicationContext) :
 
 
   override fun getName(): String = "RNFileUploader"
+
+
+  /**
+   * Returns terminal events (completed/error/cancelled) that JS has not yet
+   * acknowledged, including ones that fired while JS was dead. Read these on
+   * startup, process them, then call ackEvents to remove them.
+   */
+  @ReactMethod
+  fun getUnacknowledgedEvents(promise: Promise) {
+    try {
+      val events = EventJournal.get(reactApplicationContext).unacknowledged()
+      val arr = Arguments.createArray()
+      events.forEach { arr.pushMap(it.toWritableMap()) }
+      promise.resolve(arr)
+    } catch (exc: Throwable) {
+      Log.e(TAG, exc.message, exc)
+      promise.reject(exc)
+    }
+  }
+
+
+  /**
+   * Removes journaled events by eventId once JS has processed them.
+   */
+  @ReactMethod
+  fun ackEvents(eventIds: ReadableArray, promise: Promise) {
+    try {
+      val ids = (0 until eventIds.size()).mapNotNull { eventIds.getString(it) }
+      EventJournal.get(reactApplicationContext).ack(ids)
+      promise.resolve(true)
+    } catch (exc: Throwable) {
+      Log.e(TAG, exc.message, exc)
+      promise.reject(exc)
+    }
+  }
 
 
   /*

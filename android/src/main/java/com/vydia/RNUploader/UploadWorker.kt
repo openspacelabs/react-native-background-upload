@@ -24,6 +24,7 @@ import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
 import java.net.UnknownHostException
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 // All workers will start `doWork` immediately but only 1 request is active at a time.
@@ -92,17 +93,17 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         // - "delay" should be within the "try" block to account for worker cancellation,
         // which cancels the delay immediately and throws CancellationException.
         // - Linear backoff instead of exponential. One reason for this is we retry on
-        // invalid connections. Exponential will take too long. If the server flakes and
-        // returns 500s, we don't retry but consider the request successful.
-        // This is consistent with iOS behavior. User gets notifications for
-        // these server issues and can manually retry. Since 500s are currently rare,
-        // it's likely ok. If they're too frequent, we can consider adding exponential
-        // backoff for them.
+        // invalid connections. Exponential will take too long.
+        // - We only retry transport failures here (no response). Any HTTP response,
+        // including 4xx/5xx, is terminal at this layer: handleResponse classifies it
+        // (2xx/acceptStatus -> completed, else http error) and the worker returns
+        // without retrying. Response-code-based retry policy is the JS queue's job.
+        // This is consistent with iOS behavior.
         if (isRetried) delay(RETRY_DELAY)
         isRetried = true
 
         val response = upload() ?: continue
-        handleSuccess(response)
+        handleResponse(response)
         return@withContext Result.success()
       } catch (error: Throwable) {
         if (checkAndHandleCancellation()) throw error
@@ -150,14 +151,46 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     notificationManager.notify(upload.notificationId, buildNotification())
   }
 
-  private fun handleSuccess(response: UploadResponse) {
+  // An HTTP response came back. "completed" only for 2xx or a per-request
+  // acceptStatus code (axios validateStatus semantics — a 400 is an error, not a
+  // completion); anything else is a terminal http error carrying the full
+  // response. Either way the request finished, so the worker does not retry.
+  private fun handleResponse(response: UploadResponse) {
     UploadProgress.complete(upload.id)
-    EventReporter.success(upload.id, response)
+    val accepted = UploadOutcome.isAccepted(response.code, upload.acceptStatus)
+    EventJournal.get(context).append(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = if (accepted) "completed" else "error",
+        timestamp = System.currentTimeMillis(),
+        responseCode = response.code,
+        responseBody = response.body,
+        responseHeaders = response.headers,
+        errorKind = if (accepted) null else "http",
+        error = if (accepted) null else "HTTP ${response.code}",
+      )
+    )
+    if (accepted) EventReporter.success(upload.id, response)
+    else EventReporter.httpError(upload.id, response)
   }
 
   private fun handleError(error: Throwable) {
     UploadProgress.remove(upload.id)
-    EventReporter.error(upload.id, error)
+    // Default fileExists=true so a failed existence probe reads as network, not file.
+    val fileExists = runCatching { File(upload.path).exists() }.getOrDefault(true)
+    val kind = UploadOutcome.errorKind(error, fileExists)
+    EventJournal.get(context).append(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = "error",
+        timestamp = System.currentTimeMillis(),
+        error = error.message ?: "Unknown exception",
+        errorKind = kind,
+      )
+    )
+    EventReporter.error(upload.id, error, kind)
   }
 
   // Check if cancelled by user or new worker with same ID
@@ -165,8 +198,18 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun checkAndHandleCancellation(): Boolean {
     if (!isStopped) return false
 
+    val reason = if (UserCancellations.consume(upload.id)) "user" else "system"
     UploadProgress.remove(upload.id)
-    EventReporter.cancelled(upload.id)
+    EventJournal.get(context).append(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = "cancelled",
+        timestamp = System.currentTimeMillis(),
+        cancelReason = reason,
+      )
+    )
+    EventReporter.cancelled(upload.id, reason)
     return true
   }
 
