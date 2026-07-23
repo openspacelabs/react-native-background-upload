@@ -26,7 +26,7 @@ import * as RNFS from 'react-native-fs';
 const TEST_FILE = `${RNFS.DocumentDirectoryPath}/1MB.bin`;
 const TEST_FILE_URL =
   'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
-const UPLOAD_URL = 'https://httpbin.org/put/404';
+const UPLOAD_URL = 'https://httpbin.org/post';
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
@@ -38,13 +38,15 @@ const App = () => {
   useEffect(() => {
     Upload.addListener('progress', null, data => {
       setProgress(data.progress);
-      console.log(`Progress: ${data.progress}%`);
     });
     Upload.addListener('error', null, data => {
-      console.log(`Error: ${data.error}%`);
+      console.log('Error!', JSON.stringify(data));
     });
     Upload.addListener('completed', null, data => {
-      console.log('Completed!', data);
+      console.log('Completed!', JSON.stringify(data));
+    });
+    Upload.addListener('cancelled', null, data => {
+      console.log('Cancelled!', JSON.stringify(data));
     });
   }, []);
 
@@ -141,6 +143,33 @@ const App = () => {
                       setUploadId(undefined);
                       setProgress(undefined);
                     });
+                  }}
+                />
+
+                <View style={{height: 16}} />
+                <Button
+                  testID="dump_journal_button"
+                  title="Dump journal"
+                  onPress={async () => {
+                    const events = await Upload.getUnacknowledgedEvents();
+                    console.log('JOURNAL', JSON.stringify(events, null, 2));
+                  }}
+                />
+                <Button
+                  testID="ack_all_button"
+                  title="Ack all"
+                  onPress={async () => {
+                    const events = await Upload.getUnacknowledgedEvents();
+                    await Upload.ackEvents(events.map(e => e.eventId));
+                    console.log(`ACKED ${events.length}`);
+                  }}
+                />
+                <Button
+                  testID="live_uploads_button"
+                  title="Live uploads"
+                  onPress={async () => {
+                    const live = await Upload.getAllUploads();
+                    console.log('LIVE', JSON.stringify(live, null, 2));
                   }}
                 />
               </View>
