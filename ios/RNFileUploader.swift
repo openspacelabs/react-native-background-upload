@@ -22,7 +22,7 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
   private static let maxBodyChars = 64 * 1024
 
   private static let lock = NSLock()
-  private static var responsesData: [Int: NSMutableData] = [:]   // taskIdentifier -> body
+  private static var responsesData: [String: NSMutableData] = [:] // sessionId:taskId -> body
   private static var lastProgressAt: [String: TimeInterval] = [:] // uploadId -> time
   private static var userCancelledIds = Set<String>()
   private static weak var latestInstance: RNFileUploader?
@@ -247,11 +247,15 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     guard !data.isEmpty else { return }
+    // Key by sessionId:taskId, not taskIdentifier alone: taskIdentifier is unique
+    // per session, so two concurrent uploads (one wifiOnly, one not) can share an
+    // identifier and would otherwise cross-contaminate response bodies.
+    let key = taskMapKey(session, dataTask)
     RNFileUploader.lock.lock()
-    if let existing = RNFileUploader.responsesData[dataTask.taskIdentifier] {
+    if let existing = RNFileUploader.responsesData[key] {
       existing.append(data)
     } else {
-      RNFileUploader.responsesData[dataTask.taskIdentifier] = NSMutableData(data: data)
+      RNFileUploader.responsesData[key] = NSMutableData(data: data)
     }
     RNFileUploader.lock.unlock()
   }
@@ -288,7 +292,7 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     }
 
     RNFileUploader.lock.lock()
-    let bodyData = RNFileUploader.responsesData.removeValue(forKey: task.taskIdentifier)
+    let bodyData = RNFileUploader.responsesData.removeValue(forKey: taskMapKey(session, task))
     RNFileUploader.lastProgressAt[id] = nil
     RNFileUploader.lock.unlock()
 
