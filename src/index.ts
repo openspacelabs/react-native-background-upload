@@ -6,13 +6,12 @@ import { AddListener, UploadId, UploadOptions } from './types';
 
 export * from './types';
 
-const NativeModule =
-  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader;
+const NativeModule = NativeModules.RNFileUploader;
 const eventPrefix = 'RNFileUploader-';
 const fileURIPrefix = 'file://';
 
-// for IOS, register event listeners or else they don't fire on DeviceEventEmitter
-if (NativeModules.VydiaRNFileUploader) {
+// for iOS, register event listeners or else they don't fire on DeviceEventEmitter
+if (Platform.OS === 'ios') {
   NativeModule.addListener(eventPrefix + 'progress');
   NativeModule.addListener(eventPrefix + 'error');
   NativeModule.addListener(eventPrefix + 'cancelled');

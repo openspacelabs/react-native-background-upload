@@ -7,12 +7,14 @@ require "json"
    s.name = package[:name]
    s.version = package[:version]
    s.license = { type: "MIT" }
-   s.homepage = "https://github.com/Vydia/react-native-background-upload"
+   s.homepage = "https://github.com/openspacelabs/react-native-background-upload"
    s.authors = package[:author]
    s.summary = package[:description]
    s.source = { git: package[:repository][:url] }
-   s.source_files = "ios/*.{h,m}"
-   s.platform = :ios, "9.0"
+   s.source_files = "ios/**/*.{h,m,swift}"
+   s.platform = :ios, "15.1"
+   s.swift_version = "5.0"
+   s.pod_target_xcconfig = { "DEFINES_MODULE" => "YES" }
 
-   s.dependency "React"
+   s.dependency "React-Core"
  end
