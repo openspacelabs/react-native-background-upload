@@ -55,7 +55,18 @@ private enum class Connectivity { NoWifi, NoInternet, Ok }
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
-  enum class Input { Params }
+  companion object {
+    /**
+     * Key for the serialized [Upload] in the worker's input data.
+     *
+     * A string literal on purpose. This key is persisted in WorkManager's
+     * database, so the build that runs a job may not be the build that enqueued
+     * it — a key derived from a symbol name (an enum constant, a property) breaks
+     * the moment R8 renames it or someone refactors, and the failure looks like
+     * "No Params" on a job that was queued perfectly well by the previous version.
+     */
+    const val PARAMS_KEY = "params"
+  }
 
   private lateinit var upload: Upload
   private var retries = 0
@@ -67,7 +78,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // Retrieve the upload. If this throws errors, error reporting won't work.
     // However, the only way it has errors is the implementation is incorrect,
     // which can be caught in development
-    val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
+    val paramsJson = inputData.getString(PARAMS_KEY) ?: throw Throwable("No Params")
     upload = Gson().fromJson(paramsJson, Upload::class.java)
 
     // initialization, errors thrown here won't be retried
@@ -200,15 +211,31 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun checkAndHandleCancellation(): Boolean {
     if (!isStopped) return false
 
-    val reason = if (UserCancellations.consume(upload.id)) "user" else "system"
     UploadProgress.remove(upload.id)
+
+    // Only a user cancel is terminal, so only a user cancel is journaled.
+    //
+    // WorkManager decides whether to reschedule BEFORE it stops the worker, and
+    // it ignores the Result we return. cancelUniqueWork marks the row CANCELLED
+    // first, so a user cancel is genuinely the end. A system stop — a
+    // foreground-service timeout, quota, or memory pressure — leaves the row
+    // RUNNING and WorkManager re-runs this same upload. Journaling a terminal
+    // `cancelled` there would durably tell JS the upload was dead while it was in
+    // fact about to be retried, so the consumer would settle the transfer and the
+    // retry would land as a duplicate on the server.
+    //
+    // Emitting nothing is the honest answer for a system stop: the upload is
+    // still in flight as far as anyone should be concerned. If WorkManager ever
+    // declines to reschedule, `getAllUploads()` is how a consumer notices.
+    if (!UserCancellations.consume(upload.id)) return true
+
     journalAndEmit(
       EventJournal.Entry(
         eventId = UUID.randomUUID().toString(),
         uploadId = upload.id,
         type = "cancelled",
         timestamp = System.currentTimeMillis(),
-        cancelReason = reason,
+        cancelReason = "user",
       )
     )
     return true

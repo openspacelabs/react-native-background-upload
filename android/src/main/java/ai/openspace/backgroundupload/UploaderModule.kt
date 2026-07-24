@@ -13,6 +13,7 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.google.gson.Gson
+import java.util.UUID
 
 
 /**
@@ -35,6 +36,10 @@ class UploaderModule(context: ReactApplicationContext) :
     // protected on the generated spec, so only this class may call them. Null
     // whenever JS is absent (headless worker, mid-reload); terminal outcomes are
     // journaled before being emitted, so a dropped live event is never lost.
+    //
+    // Volatile: written on the module-creation thread and read from the
+    // WorkManager worker, OkHttp callbacks and main, with no other barrier.
+    @Volatile
     var instance: UploaderModule? = null
       private set
   }
@@ -70,10 +75,17 @@ class UploaderModule(context: ReactApplicationContext) :
   private inline fun safeEmit(emit: () -> Unit) {
     try {
       emit()
+    } catch (exc: NullPointerException) {
+      // The generated spec's emitter callback is only installed when the C++
+      // TurboModule is constructed, and is gone once the runtime tears down, so a
+      // null callback is expected in both gaps. It is ALSO null for the whole
+      // process on the old architecture, where this module still registers and its
+      // methods work but no event can ever be delivered — hence warn, not debug,
+      // so that case is diagnosable instead of silent.
+      Log.w(TAG, "live event dropped (no event emitter — New Architecture required)")
     } catch (exc: Throwable) {
-      // The generated spec's emitter callback is null until JS attaches a
-      // listener, and gone once the runtime tears down. Both are expected.
-      Log.d(TAG, "live event skipped: ${exc.message}")
+      // Anything else is a real bridging or payload failure worth seeing.
+      Log.e(TAG, "failed to emit live event", exc)
     }
   }
 
@@ -189,7 +201,7 @@ class UploaderModule(context: ReactApplicationContext) :
     val request = OneTimeWorkRequestBuilder<UploadWorker>()
       .addTag(WORKER_TAG)
       .addTag(ID_TAG_PREFIX + upload.id)
-      .setInputData(workDataOf(UploadWorker.Input.Params.name to data))
+      .setInputData(workDataOf(UploadWorker.PARAMS_KEY to data))
       .build()
 
     workManager
@@ -211,10 +223,40 @@ class UploaderModule(context: ReactApplicationContext) :
    */
   override fun cancelUpload(id: String, promise: Promise) {
     try {
+      val active = workManager.getWorkInfosForUniqueWork(id).get()
+        .firstOrNull { !it.state.isFinished }
+
+      if (active == null) {
+        // Nothing to cancel. Drop any mark so a later upload reusing this
+        // customUploadId can't be misreported as a user cancel.
+        UserCancellations.consume(id)
+        promise.resolve(false)
+
+        return
+      }
+
       // Record intent BEFORE cancelling so the worker's stop handler can tell
       // this apart from a system stop and report cancelReason 'user'.
       UserCancellations.mark(id)
       workManager.cancelUniqueWork(id)
+
+      if (active.state == WorkInfo.State.ENQUEUED) {
+        // The worker never started, so it will never run its own stop handler and
+        // nothing else would ever report this cancellation — leaving a consumer
+        // awaiting this upload's outcome forever. Report it here instead, and
+        // consume the mark so it cannot leak.
+        UserCancellations.consume(id)
+        val entry = EventJournal.Entry(
+          eventId = UUID.randomUUID().toString(),
+          uploadId = id,
+          type = "cancelled",
+          timestamp = System.currentTimeMillis(),
+          cancelReason = "user",
+        )
+        EventJournal.get(reactApplicationContext).append(entry)
+        EventReporter.emit(entry)
+      }
+
       promise.resolve(true)
     } catch (exc: Throwable) {
       exc.printStackTrace()

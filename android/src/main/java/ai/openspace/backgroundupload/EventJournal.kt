@@ -126,9 +126,11 @@ class EventJournal(
       .mapNotNull { f ->
         runCatching { gson.fromJson(f.readText(), Entry::class.java) }.getOrNull()
       }
-      // Gson bypasses the constructor, so a parsed file missing eventId yields
-      // a null field despite the non-null type — filter those out explicitly.
-      .filter { it.eventId != null }
+      // Gson bypasses the constructor, so a file missing a field yields null
+      // despite the non-null Kotlin type. Check every field JS relies on being
+      // present, not just eventId — an entry reaching JS with a null `type`
+      // would fall silently through a `switch (event.type)`.
+      .filter { it.eventId != null && it.uploadId != null && it.type != null }
       .sortedBy { it.timestamp }
 
   @Synchronized
