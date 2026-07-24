@@ -34,7 +34,7 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
   private static let bgHandlerLock = NSLock()
   private static var bgCompletionHandlers: [String: () -> Void] = [:]
 
-  override init() {
+  public override init() {
     super.init()
     RNFileUploader.latestInstance = self
     // Recreate the sessions as early as possible so delegate events queued by
@@ -43,9 +43,9 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     _ = session(wifiOnly: true)
   }
 
-  override static func requiresMainQueueSetup() -> Bool { false }
+  public override static func requiresMainQueueSetup() -> Bool { false }
 
-  override func supportedEvents() -> [String]! {
+  public override func supportedEvents() -> [String]! {
     ["RNFileUploader-progress", "RNFileUploader-error", "RNFileUploader-cancelled", "RNFileUploader-completed"]
   }
 
@@ -246,7 +246,7 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
 
   // MARK: - URLSession delegate
 
-  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+  public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
     guard !data.isEmpty else { return }
     // Key by sessionId:taskId, not taskIdentifier alone: taskIdentifier is unique
     // per session, so two concurrent uploads (one wifiOnly, one not) can share an
@@ -261,7 +261,7 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     RNFileUploader.lock.unlock()
   }
 
-  func urlSession(_ session: URLSession, task: URLSessionTask,
+  public func urlSession(_ session: URLSession, task: URLSessionTask,
                   didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
                   totalBytesExpectedToSend: Int64) {
     var progress: Float = -1
@@ -282,7 +282,7 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     emit("RNFileUploader-progress", ["id": id, "progress": progress])
   }
 
-  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+  public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     let id = uploadId(session, task)
     let http = task.response as? HTTPURLResponse
     let statusCode = http?.statusCode ?? 0
@@ -348,7 +348,7 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     emit("RNFileUploader-\(eventName)", event.bridged)
   }
 
-  func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+  public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
     guard let identifier = session.configuration.identifier else { return }
     RNFileUploader.bgHandlerLock.lock()
     let handler = RNFileUploader.bgCompletionHandlers.removeValue(forKey: identifier)
