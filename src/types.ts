@@ -10,46 +10,62 @@ export interface ProgressData extends EventData {
 
 export type ErrorKind = 'http' | 'network' | 'file' | 'unknown';
 
-export interface ErrorData extends EventData {
-  error: string;
-  errorKind?: ErrorKind;
-  // Present when errorKind is 'http' (a non-accepted HTTP response).
-  responseCode?: number;
-  responseBody?: string;
-  responseHeaders?: Record<string, string>;
-}
-
-export interface CompletedData extends EventData {
-  eventId?: string;
-  responseCode: number;
-  responseBody: string;
-  responseHeaders?: Record<string, string>;
-}
-
-export interface CancelledData extends EventData {
-  cancelReason?: 'user' | 'system';
-}
+export type CancelReason = 'user' | 'system';
 
 export type UploadId = string;
 
 /**
- * A terminal event (completed/error/cancelled) journaled natively before being
- * emitted, so it survives app death and JS reloads. Read via
- * getUnacknowledgedEvents, process, then acknowledge via ackEvents.
+ * Fields carried by every terminal event (`completed` / `error` / `cancelled`).
+ *
+ * The native side emits the journal entry itself, so a live terminal event is
+ * the very same object `getUnacknowledgedEvents()` returns — `eventId` included,
+ * which is what lets you `ackEvents([eventId])` immediately after handling a
+ * live event instead of waiting to rediscover it on the next launch.
  */
-export interface JournaledEvent {
+export interface TerminalEventData extends EventData {
   eventId: string;
-  id: UploadId;
   type: 'completed' | 'error' | 'cancelled';
+  /** Epoch milliseconds, stamped natively when the outcome occurred. */
   timestamp: number;
+  /**
+   * The response, when one was received. Absent for a transport failure (the
+   * request never reached the server), so always narrow before using it.
+   */
   responseCode?: number;
   responseBody?: string;
+  /** True when `responseBody` hit the 64KB cap and was truncated. */
   responseBodyTruncated?: boolean;
   responseHeaders?: Record<string, string>;
-  error?: string;
-  errorKind?: ErrorKind;
-  cancelReason?: 'user' | 'system';
 }
+
+/** A 2xx response, or one whose status was listed in the request's `acceptStatus`. */
+export interface CompletedData extends TerminalEventData {
+  type: 'completed';
+}
+
+export interface ErrorData extends TerminalEventData {
+  type: 'error';
+  error: string;
+  /**
+   * Why it failed. `http` means the server responded and the status was not
+   * accepted (the response fields above are populated). `file` means the payload
+   * is missing or unreadable on disk, so retrying can never succeed.
+   */
+  errorKind?: ErrorKind;
+}
+
+export interface CancelledData extends TerminalEventData {
+  type: 'cancelled';
+  /** `user` for an explicit `cancelUpload`; `system` for an OS-initiated stop. */
+  cancelReason?: CancelReason;
+}
+
+/**
+ * A terminal event journaled natively before being emitted, so it survives app
+ * death and JS reloads. Read via `getUnacknowledgedEvents`, process, then
+ * acknowledge via `ackEvents`. Discriminate on `type`.
+ */
+export type JournaledEvent = CompletedData | ErrorData | CancelledData;
 
 /** A snapshot of an upload the OS still knows about (from getAllUploads). */
 export interface UploadSnapshot {
@@ -77,7 +93,7 @@ export type UploadOptions = {
   android?: Partial<AndroidOnlyUploadOptions>;
 } & RawUploadOptions;
 
-type AndroidOnlyUploadOptions = {
+export type AndroidOnlyUploadOptions = {
   notificationId: string;
   notificationTitle: string;
   notificationTitleNoWifi: string;
@@ -89,7 +105,7 @@ type AndroidOnlyUploadOptions = {
   maxRetries?: number;
 };
 
-type RawUploadOptions = {
+export type RawUploadOptions = {
   type: 'raw';
 };
 

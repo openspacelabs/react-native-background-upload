@@ -7,10 +7,21 @@ is killed.
 
 # Installation
 
+**Requires React Native ≥ 0.84 with the New Architecture enabled, and React ≥ 19.**
+This is a codegen TurboModule; it does not support the legacy bridge.
+
 ```
 yarn add react-native-background-upload
 cd ios && pod install && cd ..
 ```
+
+`pod install` is required after installing — it runs codegen to generate the native
+spec this module implements.
+
+> The package ships TypeScript source with no build step, so it resolves through Metro
+> (and `tsc`) but not through plain Node. If you import it from a non-Metro context —
+> a script, or Jest without a transform — add it to your `transformIgnorePatterns`
+> allowlist or mock it.
 
 ## iOS: background completion handler (required)
 

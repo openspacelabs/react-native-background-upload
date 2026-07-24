@@ -20,7 +20,22 @@ Breaking:
   `RNFileUploader-*` device-event names. The `Upload.addListener(...)` API is
   unchanged.
 - `cancelUpload` on iOS now resolves `false` when no matching in-flight upload was
-  found (it previously always resolved `true`).
+  found (it previously always resolved `true`). Android still always resolves `true`.
+- Terminal event payloads are typed as the journal entry they actually are. The
+  natives emit the journaled entry itself, so `CompletedData` / `ErrorData` /
+  `CancelledData` now declare the `eventId`, `type` and `timestamp` they were always
+  sending, plus `responseBodyTruncated`. `eventId` in particular means you can
+  `ackEvents([eventId])` straight after handling a live event. `JournaledEvent` is
+  now a union discriminated on `type`.
+- `CompletedData.responseCode` and `.responseBody` are optional. They were declared
+  required but are absent when a task completes without an HTTP response, so reading
+  them unguarded could throw.
+- The `cancelled` payload no longer carries `error` (it used to hold the cancellation
+  error string). Use `cancelReason` instead.
+- iOS `progress` reports `0` instead of `-1` when the total length is unknown,
+  matching Android and the documented 0-100 range.
+- iOS `getAllUploads` reports `cancelled` and `completed` states instead of
+  collapsing everything non-running into `pending`.
 - `completed` fires only for 2xx responses (plus a request's `acceptStatus`, e.g.
   `acceptStatus: [409]`). Every other HTTP response now emits an `error` with
   `errorKind: 'http'` and the full response attached (previously reported as

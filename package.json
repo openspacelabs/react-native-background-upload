@@ -6,6 +6,18 @@
   "typings": "src/index.ts",
   "react-native": "src/index",
   "source": "src/index",
+  "files": [
+    "src",
+    "!src/__tests__",
+    "android",
+    "!android/build",
+    "!android/.gradle",
+    "ios",
+    "react-native-background-upload.podspec",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "codegenConfig": {
     "name": "RNFileUploaderSpec",
     "type": "modules",
@@ -69,7 +81,6 @@
     "react": "19.2.3",
     "react-native": "0.84.1",
     "semantic-release": "^15.13.31",
-    "tsc-alias": "^1.6.8",
     "typescript": "^5.9.3"
   },
   "release": {

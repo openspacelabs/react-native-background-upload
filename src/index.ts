@@ -45,8 +45,9 @@ const startUpload = ({
  * Upload ID is returned in a promise after a call to startUpload method,
  * use it to cancel started upload.
  * Event "cancelled" will be fired when upload is cancelled.
- * Resolves true if a matching in-flight upload was found and cancelled, false if
- * there was nothing to cancel.
+ * On iOS, resolves true if a matching in-flight upload was found and cancelled,
+ * false if there was nothing to cancel. Android always resolves true — the
+ * WorkManager cancel is fire-and-forget and does not report whether it matched.
  */
 const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
   NativeRNFileUploader.cancelUpload(cancelUploadId);
@@ -70,7 +71,9 @@ const addListener = ((
 ): EventSubscription => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const forMatchingUpload = (data: any) => {
-    if (!uploadId || !data || !data.id || data.id === uploadId) {
+    // A scoped subscription drops anything it can't attribute, rather than
+    // failing open and delivering another upload's (or an unidentified) event.
+    if (!uploadId || data?.id === uploadId) {
       listener(data);
     }
   };
@@ -127,7 +130,7 @@ const ios = {
     jobId: string,
   ): Promise<
     | {
-        state: 'running' | 'suspended' | 'canceling';
+        state: 'running' | 'suspended' | 'canceling' | 'completed';
         bytesSent: number;
         totalBytes: number;
       }
@@ -135,7 +138,7 @@ const ios = {
   > =>
     ((await NativeRNFileUploader.getUploadStatus(jobId)) as
       | {
-          state: 'running' | 'suspended' | 'canceling';
+          state: 'running' | 'suspended' | 'canceling' | 'completed';
           bytesSent: number;
           totalBytes: number;
         }
