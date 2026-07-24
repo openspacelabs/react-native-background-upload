@@ -1,91 +1,52 @@
-buildscript {
-    ext {
-        kotlinVersion = '1.6.20'
-        buildToolsVersion = '29.0.2'
-        compileSdkVersion = 31 // this helps us use the latest Worker version
-        targetSdkVersion = 29
-        minSdkVersion = 18
-    }
-    ext.detoxKotlinVersion = ext.kotlinVersion
-
-    repositories {
-        mavenCentral()
-        google()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.4'
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
-    }
-}
-
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+// Generates NativeRNFileUploaderSpec from src/NativeRNFileUploader.ts, per the
+// codegenConfig block in package.json. Required for the TurboModule.
+apply plugin: 'com.facebook.react'
 
-def DEFAULT_COMPILE_SDK_VERSION = 28
-def DEFAULT_BUILD_TOOLS_VERSION = "28.0.3"
-def DEFAULT_TARGET_SDK_VERSION = 28
-
+// Inherit the host app's toolchain; the fallbacks match Diana, the only consumer.
 def safeExtGet(prop, fallback) {
     rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
 android {
-    buildFeatures {
-        /*
-            This is a replacement for the deprecated 'kotlin-android-extensions' library. More
-            information can be found here: https://developer.android.com/topic/libraries/view-binding/migration
-        */
-        viewBinding = true
-    }
-    compileSdkVersion safeExtGet('compileSdkVersion', DEFAULT_COMPILE_SDK_VERSION)
-    buildToolsVersion safeExtGet('buildToolsVersion', DEFAULT_BUILD_TOOLS_VERSION)
+    namespace 'ai.openspace.backgroundupload'
+
+    compileSdkVersion safeExtGet('compileSdkVersion', 36)
 
     defaultConfig {
-        minSdkVersion 29
-        targetSdkVersion safeExtGet('targetSdkVersion', DEFAULT_TARGET_SDK_VERSION)
-        versionCode 1
-        versionName "1.0"
-        ndk {
-            abiFilters "armeabi-v7a", "x86"
-        }
+        minSdkVersion safeExtGet('minSdkVersion', 29)
+        targetSdkVersion safeExtGet('targetSdkVersion', 36)
     }
-    lintOptions {
-        abortOnError false
-    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
     kotlinOptions {
-        jvmTarget = "17"
+        jvmTarget = '17'
+    }
+
+    lint {
+        abortOnError false
     }
 }
 
 repositories {
+    google()
     mavenCentral()
 }
 
-def _ext = ext
-
-def _kotlinVersion = _ext.has('detoxKotlinVersion') ? _ext.detoxKotlinVersion : '1.3.10'
-def _kotlinStdlib = _ext.has('detoxKotlinStdlib') ? _ext.detoxKotlinStdlib : 'kotlin-stdlib-jdk8'
-
 dependencies {
-    implementation "androidx.core:core-ktx:1.7.0"
+    // Version supplied by the React Native Gradle plugin.
+    implementation 'com.facebook.react:react-android'
 
-    implementation 'com.facebook.react:react-native:+'
-
-    implementation "org.jetbrains.kotlin:$_kotlinStdlib:$_kotlinVersion"
-
-    implementation("com.squareup.okhttp3:okhttp:4.10.0")
-
-    implementation 'com.google.code.gson:gson:2.8.9'
-
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4'
-
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
-
-    implementation "androidx.work:work-runtime-ktx:2.8.1"
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.google.code.gson:gson:2.11.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 
     testImplementation 'junit:junit:4.13.2'
 }

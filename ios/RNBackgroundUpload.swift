@@ -1,20 +1,40 @@
 import Foundation
 import React
 
+// Live events destined for JS. The TurboModule shell (RNFileUploader.mm) adopts
+// this and forwards to the codegen-generated emitters. The delegate is nil
+// whenever JS isn't around (headless relaunch, before the module is created,
+// after a reload tears the old one down) — terminal outcomes are journaled
+// before we ever get here, so dropping a live event is always safe.
+@objc public protocol RNFileUploaderEventDelegate {
+  func emitProgress(_ body: [String: Any])
+  func emitCompleted(_ body: [String: Any])
+  func emitError(_ body: [String: Any])
+  func emitCancelled(_ body: [String: Any])
+}
+
 // Background HTTP file uploader (iOS). Uploads run on a background URLSession so
 // they continue while the app is suspended and complete/relaunch when terminated
 // by the system. Terminal outcomes are journaled before being emitted, so JS can
 // recover them even if it was dead when they fired.
 //
-// State that must be consistent regardless of which module instance is alive is
-// STATIC (process-global): the background sessions, the in-flight response
-// buffers, the user-cancel set, and the latest instance used for emitting. This
-// matters because after a JS reload the URLSession delegate stays pinned to the
-// first instance while JS talks to the newest one; sharing this state via statics
-// keeps cancel-attribution and response assembly correct across that split, and
-// avoids ever creating two background sessions with the same identifier.
-@objc(RNFileUploader)
-public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
+// State that must be consistent for the whole process is STATIC: the background
+// sessions, the in-flight response buffers, the user-cancel set, and the event
+// delegate. The TurboModule instance comes and goes with the JS runtime while the
+// URLSession delegate stays pinned to this object, so keeping that state static
+// (rather than on the module) is what keeps cancel attribution and response
+// assembly correct across a reload — and guarantees we never create two
+// background sessions with the same identifier.
+@objc(RNBackgroundUpload)
+public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
+
+  // The instance that owns the URLSession delegate callbacks. Created on first
+  // access — by the TurboModule, or by the AppDelegate's
+  // handleEventsForBackgroundURLSession hook, whichever happens first. That
+  // second path is load-bearing: on a system relaunch there may be no JS at all,
+  // and touching `shared` is what recreates the sessions so nsurlsessiond can
+  // deliver the delegate events it has queued for us.
+  @objc public static let shared = RNBackgroundUpload()
 
   private static let backgroundSessionId = "ReactNativeBackgroundUpload"
   private static let wifiOnlySessionId = "ReactNativeBackgroundUpload_WifiOnly"
@@ -24,10 +44,15 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
   private static var responsesData: [String: NSMutableData] = [:] // sessionId:taskId -> body
   private static var lastProgressAt: [String: TimeInterval] = [:] // uploadId -> time
   private static var userCancelledIds = Set<String>()
-  private static weak var latestInstance: RNFileUploader?
 
   private static var backgroundSession: URLSession?
   private static var wifiOnlySession: URLSession?
+
+  // Deliberately its own lock, not `lock`: creating `shared` acquires `lock` to
+  // build the sessions, so guarding the delegate with the same lock would risk a
+  // deadlock between "ensure shared exists" and "set the delegate".
+  private static let delegateLock = NSLock()
+  private static weak var eventDelegate: RNFileUploaderEventDelegate?
 
   // AppDelegate stores the system-provided completion handler here (per session
   // id) so the app can be relaunched to finish uploads after termination.
@@ -36,39 +61,43 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
 
   public override init() {
     super.init()
-    RNFileUploader.latestInstance = self
     // Recreate the sessions as early as possible so delegate events queued by
     // nsurlsessiond from a previous launch are delivered to this process.
     _ = session(wifiOnly: false)
     _ = session(wifiOnly: true)
   }
 
-  public override static func requiresMainQueueSetup() -> Bool { false }
+  // MARK: - Event delegate
 
-  public override func supportedEvents() -> [String]! {
-    ["RNFileUploader-progress", "RNFileUploader-error", "RNFileUploader-cancelled", "RNFileUploader-completed"]
+  @objc public static func setEventDelegate(_ delegate: RNFileUploaderEventDelegate?) {
+    // Force the singleton (and therefore the sessions) into existence before
+    // taking the lock — see the note on delegateLock.
+    _ = shared
+    delegateLock.lock()
+    eventDelegate = delegate
+    delegateLock.unlock()
   }
 
-  private func emit(_ name: String, _ body: [String: Any]) {
-    // Route through the latest instance: after a JS reload the delegate may be an
-    // older instance whose bridge is gone.
-    RNFileUploader.latestInstance?.sendEvent(withName: name, body: body)
+  private static var currentDelegate: RNFileUploaderEventDelegate? {
+    delegateLock.lock()
+    defer { delegateLock.unlock() }
+    return eventDelegate
   }
 
   // MARK: - Sessions
 
   private func session(wifiOnly: Bool) -> URLSession {
-    RNFileUploader.lock.lock()
-    defer { RNFileUploader.lock.unlock() }
+    RNBackgroundUpload.lock.lock()
+    defer { RNBackgroundUpload.lock.unlock() }
     if wifiOnly {
-      if let s = RNFileUploader.wifiOnlySession { return s }
-      let s = makeSession(identifier: RNFileUploader.wifiOnlySessionId, wifiOnly: true)
-      RNFileUploader.wifiOnlySession = s
+      if let s = RNBackgroundUpload.wifiOnlySession { return s }
+      let s = makeSession(identifier: RNBackgroundUpload.wifiOnlySessionId, wifiOnly: true)
+      RNBackgroundUpload.wifiOnlySession = s
       return s
     } else {
-      if let s = RNFileUploader.backgroundSession { return s }
-      let s = makeSession(identifier: RNFileUploader.backgroundSessionId, wifiOnly: false)
-      RNFileUploader.backgroundSession = s
+      if let s = RNBackgroundUpload.backgroundSession { return s }
+      let s = makeSession(identifier: RNBackgroundUpload.backgroundSessionId, wifiOnly: false)
+      RNBackgroundUpload.backgroundSession = s
       return s
     }
   }
@@ -101,15 +130,15 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
   }
 
   private var activeSessions: [URLSession] {
-    [RNFileUploader.backgroundSession, RNFileUploader.wifiOnlySession].compactMap { $0 }
+    [RNBackgroundUpload.backgroundSession, RNBackgroundUpload.wifiOnlySession].compactMap { $0 }
   }
 
-  // MARK: - Exported methods
+  // MARK: - Exported methods (called from the TurboModule shell)
 
-  @objc(startUpload:resolver:rejecter:)
-  func startUpload(_ options: [String: Any],
-                   resolver resolve: @escaping RCTPromiseResolveBlock,
-                   rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(startUpload:resolve:reject:)
+  public func startUpload(_ options: [String: Any],
+                          resolve: @escaping RCTPromiseResolveBlock,
+                          reject: @escaping RCTPromiseRejectBlock) {
     guard let urlString = options["url"] as? String, let path = options["path"] as? String else {
       reject("RN Uploader", "Missing 'url' or 'path'", nil); return
     }
@@ -146,33 +175,44 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     resolve(uploadId)
   }
 
-  @objc(cancelUpload:resolver:rejecter:)
-  func cancelUpload(_ cancelUploadId: String,
-                    resolver resolve: @escaping RCTPromiseResolveBlock,
-                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(cancelUpload:resolve:reject:)
+  public func cancelUpload(_ cancelUploadId: String,
+                           resolve: @escaping RCTPromiseResolveBlock,
+                           reject: @escaping RCTPromiseRejectBlock) {
     // Record intent before cancelling so the delegate reports cancelReason 'user'.
-    RNFileUploader.lock.lock()
-    RNFileUploader.userCancelledIds.insert(cancelUploadId)
-    RNFileUploader.lock.unlock()
+    RNBackgroundUpload.lock.lock()
+    RNBackgroundUpload.userCancelledIds.insert(cancelUploadId)
+    RNBackgroundUpload.lock.unlock()
 
     let sessions = activeSessions
     let group = DispatchGroup()
+    let found = NSMutableArray()
     for session in sessions {
       group.enter()
       session.getAllTasks { tasks in
         for task in tasks where self.uploadId(session, task) == cancelUploadId {
+          found.add(true)
           task.cancel()
         }
         group.leave()
       }
     }
-    group.notify(queue: .main) { resolve(true) }
+    group.notify(queue: .main) {
+      if found.count == 0 {
+        // Nothing to cancel: drop the intent again so a later upload reusing this
+        // customUploadId isn't misattributed as a user cancel.
+        RNBackgroundUpload.lock.lock()
+        RNBackgroundUpload.userCancelledIds.remove(cancelUploadId)
+        RNBackgroundUpload.lock.unlock()
+      }
+      resolve(found.count > 0)
+    }
   }
 
-  @objc(getUploadStatus:resolver:rejecter:)
-  func getUploadStatus(_ uploadId: String,
-                       resolver resolve: @escaping RCTPromiseResolveBlock,
-                       rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(getUploadStatus:resolve:reject:)
+  public func getUploadStatus(_ uploadId: String,
+                              resolve: @escaping RCTPromiseResolveBlock,
+                              reject: @escaping RCTPromiseRejectBlock) {
     let sessions = activeSessions
     let group = DispatchGroup()
     let lock = NSLock()
@@ -195,23 +235,23 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     group.notify(queue: .main) { resolve(result) }
   }
 
-  @objc(getUnacknowledgedEvents:rejecter:)
-  func getUnacknowledgedEvents(_ resolve: @escaping RCTPromiseResolveBlock,
-                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(getUnacknowledgedEvents:reject:)
+  public func getUnacknowledgedEvents(_ resolve: @escaping RCTPromiseResolveBlock,
+                                      reject: @escaping RCTPromiseRejectBlock) {
     resolve(EventJournal.unacknowledged())
   }
 
-  @objc(ackEvents:resolver:rejecter:)
-  func ackEvents(_ eventIds: [String],
-                 resolver resolve: @escaping RCTPromiseResolveBlock,
-                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(ackEvents:resolve:reject:)
+  public func ackEvents(_ eventIds: [String],
+                        resolve: @escaping RCTPromiseResolveBlock,
+                        reject: @escaping RCTPromiseRejectBlock) {
     EventJournal.ack(eventIds)
     resolve(true)
   }
 
-  @objc(getAllUploads:rejecter:)
-  func getAllUploads(_ resolve: @escaping RCTPromiseResolveBlock,
-                     rejecter reject: @escaping RCTPromiseRejectBlock) {
+  @objc(getAllUploads:reject:)
+  public func getAllUploads(_ resolve: @escaping RCTPromiseResolveBlock,
+                            reject: @escaping RCTPromiseRejectBlock) {
     let sessions = activeSessions
     let group = DispatchGroup()
     let lock = NSLock()
@@ -235,10 +275,17 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     group.notify(queue: .main) { resolve(result) }
   }
 
-  // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:)
+  // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:).
+  // Reachable from a consumer's plain Obj-C via `@import
+  // react_native_background_upload;` — deliberately NOT on the TurboModule class,
+  // whose header is Obj-C++ only.
   @objc(setBackgroundSessionCompletionHandler:forIdentifier:)
   public static func setBackgroundSessionCompletionHandler(_ handler: @escaping () -> Void,
-                                                    forIdentifier identifier: String) {
+                                                          forIdentifier identifier: String) {
+    // Touching `shared` recreates the background sessions when this is a fresh,
+    // system-relaunched process, which is what lets the queued delegate events
+    // (and therefore this handler) actually fire.
+    _ = shared
     bgHandlerLock.lock()
     bgCompletionHandlers[identifier] = handler
     bgHandlerLock.unlock()
@@ -252,34 +299,34 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     // per session, so two concurrent uploads (one wifiOnly, one not) can share an
     // identifier and would otherwise cross-contaminate response bodies.
     let key = taskMapKey(session, dataTask)
-    RNFileUploader.lock.lock()
-    if let existing = RNFileUploader.responsesData[key] {
+    RNBackgroundUpload.lock.lock()
+    if let existing = RNBackgroundUpload.responsesData[key] {
       existing.append(data)
     } else {
-      RNFileUploader.responsesData[key] = NSMutableData(data: data)
+      RNBackgroundUpload.responsesData[key] = NSMutableData(data: data)
     }
-    RNFileUploader.lock.unlock()
+    RNBackgroundUpload.lock.unlock()
   }
 
   public func urlSession(_ session: URLSession, task: URLSessionTask,
-                  didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
-                  totalBytesExpectedToSend: Int64) {
+                         didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
+                         totalBytesExpectedToSend: Int64) {
     var progress: Float = -1
     if totalBytesExpectedToSend > 0 {
       progress = 100.0 * Float(totalBytesSent) / Float(totalBytesExpectedToSend)
     }
     let id = uploadId(session, task)
     let now = Date().timeIntervalSince1970
-    RNFileUploader.lock.lock()
+    RNBackgroundUpload.lock.lock()
     if progress < 100,
-       let last = RNFileUploader.lastProgressAt[id],
-       now - last < RNFileUploader.progressThrottle {
-      RNFileUploader.lock.unlock()
+       let last = RNBackgroundUpload.lastProgressAt[id],
+       now - last < RNBackgroundUpload.progressThrottle {
+      RNBackgroundUpload.lock.unlock()
       return
     }
-    RNFileUploader.lastProgressAt[id] = now
-    RNFileUploader.lock.unlock()
-    emit("RNFileUploader-progress", ["id": id, "progress": progress])
+    RNBackgroundUpload.lastProgressAt[id] = now
+    RNBackgroundUpload.lock.unlock()
+    RNBackgroundUpload.currentDelegate?.emitProgress(["id": id, "progress": progress])
   }
 
   public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -292,10 +339,10 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
       for (key, value) in http.allHeaderFields { headers["\(key)"] = "\(value)" }
     }
 
-    RNFileUploader.lock.lock()
-    let bodyData = RNFileUploader.responsesData.removeValue(forKey: taskMapKey(session, task))
-    RNFileUploader.lastProgressAt[id] = nil
-    RNFileUploader.lock.unlock()
+    RNBackgroundUpload.lock.lock()
+    let bodyData = RNBackgroundUpload.responsesData.removeValue(forKey: taskMapKey(session, task))
+    RNBackgroundUpload.lastProgressAt[id] = nil
+    RNBackgroundUpload.lock.unlock()
 
     let rawBody = bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) } ?? ""
     let (cappedBody, truncated) = EventJournal.capBody(rawBody)
@@ -311,16 +358,13 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
       event.responseBodyTruncated = truncated
     }
 
-    let eventName: String
     if error == nil {
       // "completed" only for 2xx or a per-request acceptStatus code; any other
       // HTTP response is a terminal http error carrying the full response.
       let accepted = (200..<300).contains(statusCode) || acceptStatus(session, task).contains(statusCode)
       if accepted {
-        eventName = "completed"
         event.type = "completed"
       } else {
-        eventName = "error"
         event.type = "error"
         event.errorKind = "http"
         event.error = "HTTP \(statusCode)"
@@ -328,16 +372,14 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     } else {
       let nsError = error! as NSError
       if nsError.code == NSURLErrorCancelled {
-        eventName = "cancelled"
         event.type = "cancelled"
-        RNFileUploader.lock.lock()
-        let userCancelled = RNFileUploader.userCancelledIds.remove(id) != nil
-        RNFileUploader.lock.unlock()
+        RNBackgroundUpload.lock.lock()
+        let userCancelled = RNBackgroundUpload.userCancelledIds.remove(id) != nil
+        RNBackgroundUpload.lock.unlock()
         event.cancelReason = userCancelled ? "user" : "system"
       } else {
-        eventName = "error"
         event.type = "error"
-        event.errorKind = RNFileUploader.errorKind(for: nsError)
+        event.errorKind = RNBackgroundUpload.errorKind(for: nsError)
         event.error = nsError.localizedDescription
       }
     }
@@ -345,14 +387,21 @@ public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
     // Journal BEFORE emitting; the emit is best-effort (JS may be dead).
     EventJournal.append(event)
     TaskMap.removeKey(taskMapKey(session, task))
-    emit("RNFileUploader-\(eventName)", event.bridged)
+
+    let body = event.bridged
+    let delegate = RNBackgroundUpload.currentDelegate
+    switch event.type {
+    case "completed": delegate?.emitCompleted(body)
+    case "cancelled": delegate?.emitCancelled(body)
+    default: delegate?.emitError(body)
+    }
   }
 
   public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
     guard let identifier = session.configuration.identifier else { return }
-    RNFileUploader.bgHandlerLock.lock()
-    let handler = RNFileUploader.bgCompletionHandlers.removeValue(forKey: identifier)
-    RNFileUploader.bgHandlerLock.unlock()
+    RNBackgroundUpload.bgHandlerLock.lock()
+    let handler = RNBackgroundUpload.bgCompletionHandlers.removeValue(forKey: identifier)
+    RNBackgroundUpload.bgHandlerLock.unlock()
     if let handler { DispatchQueue.main.async { handler() } }
   }
 

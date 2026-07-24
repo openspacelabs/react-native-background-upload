@@ -1,6 +1,7 @@
+<!-- The package/namespace is declared in build.gradle (android.namespace); the
+     manifest `package` attribute is removed as AGP 8 requires. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          xmlns:tools="http://schemas.android.com/tools"
-          package="ai.openspace.backgroundupload">
+          xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

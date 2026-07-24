@@ -23,14 +23,20 @@ journaled, add this to your `AppDelegate`:
 - (void)application:(UIApplication *)application
 handleEventsForBackgroundURLSession:(NSString *)identifier
   completionHandler:(void (^)(void))completionHandler {
-  [RNFileUploader setBackgroundSessionCompletionHandler:completionHandler
-                                          forIdentifier:identifier];
+  [RNBackgroundUpload setBackgroundSessionCompletionHandler:completionHandler
+                                             forIdentifier:identifier];
 }
 ```
 
 > The Swift header import name is the pod name with hyphens as underscores. If
 > your app links pods as frameworks, use `@import react_native_background_upload;`
 > instead of the `#import <...-Swift.h>` line.
+
+This hook is load-bearing beyond just calling the completion handler: it is what
+brings the library's background `URLSession` back to life in a process the system
+relaunched with no JS running, so queued completions get journaled. `RNFileUploader`
+is the TurboModule and is deliberately not reachable from plain Objective-C — its
+generated header is Objective-C++ only — so the handler lives on `RNBackgroundUpload`.
 
 # Usage
 

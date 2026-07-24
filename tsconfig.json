@@ -12,7 +12,11 @@
     "strictNullChecks": true,
     "skipLibCheck": true,
     "noImplicitAny": true,
-    "noEmit": true
+    "noEmit": true,
+    // Don't auto-include every @types/* in node_modules: src needs no ambient
+    // types (it imports react-native's explicitly, and tests are excluded), and
+    // deprecated stub packages like @types/minimatch otherwise fail resolution.
+    "types": []
   },
   "exclude": ["example", "src/__tests__"]
 }

@@ -6,6 +6,19 @@
   "typings": "src/index.ts",
   "react-native": "src/index",
   "source": "src/index",
+  "codegenConfig": {
+    "name": "RNFileUploaderSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "ai.openspace.backgroundupload"
+    },
+    "ios": {
+      "modulesProvider": {
+        "RNFileUploader": "RNFileUploader"
+      }
+    }
+  },
   "scripts": {
     "typecheck": "tsc",
     "test": "jest",
@@ -27,8 +40,8 @@
     "react"
   ],
   "peerDependencies": {
-    "react": "*",
-    "react-native": ">=0.75.0"
+    "react": ">=19.0.0",
+    "react-native": ">=0.84.0"
   },
   "author": "OpenSpace",
   "license": "MIT",
@@ -39,13 +52,13 @@
   "devDependencies": {
     "@babel/core": "^7.20.0",
     "@babel/preset-env": "^7.20.0",
+    "@babel/preset-typescript": "^7.20.0",
     "@babel/runtime": "^7.20.0",
-    "@react-native/babel-preset": "0.75.3",
-    "@react-native/eslint-config": "0.75.3",
-    "@react-native/metro-config": "0.75.3",
-    "@react-native/typescript-config": "0.75.3",
-    "@types/react": "^18.2.6",
-    "@types/react-test-renderer": "^18.0.0",
+    "@react-native/babel-preset": "0.84.1",
+    "@react-native/eslint-config": "0.84.1",
+    "@react-native/metro-config": "0.84.1",
+    "@react-native/typescript-config": "0.84.1",
+    "@types/react": "^19.2.15",
     "babel-jest": "^29.6.3",
     "eslint": "^8.19.0",
     "eslint-plugin-unused-imports": "^4.1.4",
@@ -53,12 +66,11 @@
     "jest": "^29.6.3",
     "lint-staged": "^10.0.8",
     "prettier": "2.8.8",
-    "react": "18.3.1",
-    "react-native": "0.75.3",
-    "react-test-renderer": "18.3.1",
+    "react": "19.2.3",
+    "react-native": "0.84.1",
     "semantic-release": "^15.13.31",
     "tsc-alias": "^1.6.8",
-    "typescript": "5.0.4"
+    "typescript": "^5.9.3"
   },
   "release": {
     "plugins": [
