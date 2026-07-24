@@ -14,7 +14,7 @@ import React
 // keeps cancel-attribution and response assembly correct across that split, and
 // avoids ever creating two background sessions with the same identifier.
 @objc(RNFileUploader)
-class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
+public class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
 
   private static let backgroundSessionId = "ReactNativeBackgroundUpload"
   private static let wifiOnlySessionId = "ReactNativeBackgroundUpload_WifiOnly"
@@ -237,7 +237,7 @@ class RNFileUploader: RCTEventEmitter, URLSessionDataDelegate {
 
   // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:)
   @objc(setBackgroundSessionCompletionHandler:forIdentifier:)
-  static func setBackgroundSessionCompletionHandler(_ handler: @escaping () -> Void,
+  public static func setBackgroundSessionCompletionHandler(_ handler: @escaping () -> Void,
                                                     forIdentifier identifier: String) {
     bgHandlerLock.lock()
     bgCompletionHandlers[identifier] = handler
