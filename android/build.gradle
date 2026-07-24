@@ -17,6 +17,9 @@ android {
     defaultConfig {
         minSdkVersion safeExtGet('minSdkVersion', 29)
         targetSdkVersion safeExtGet('targetSdkVersion', 36)
+        // Keeps the Gson-persisted models intact under the host app's R8. See the
+        // file for why a minified build breaks silently without it.
+        consumerProguardFiles 'consumer-rules.pro'
     }
 
     compileOptions {
