@@ -27,12 +27,30 @@
 
 - (void)invalidate
 {
-  [RNBackgroundUpload setEventDelegate:nil];
+  // Identity-checked: React Native dispatches invalidate asynchronously and
+  // stops waiting after 10s, so the replacement module can register itself
+  // first. Clearing unconditionally would kill events for the whole process.
+  [RNBackgroundUpload clearEventDelegate:self];
 }
 
 + (BOOL)requiresMainQueueSetup
 {
   return NO;
+}
+
+// Without this, RN hands the module its process-wide shared TurboModule queue,
+// where our synchronous journal and task-map disk I/O would stall unrelated
+// native modules — and RN's own invalidate, which queues behind it. The legacy
+// bridge gave every module its own queue; a TurboModule has to ask.
+- (dispatch_queue_t)methodQueue
+{
+  static dispatch_queue_t queue;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    queue = dispatch_queue_create("ai.openspace.rnbgupload.module", DISPATCH_QUEUE_SERIAL);
+  });
+
+  return queue;
 }
 
 + (NSString *)moduleName
@@ -90,24 +108,25 @@
 
 #pragma mark - RNFileUploaderEventDelegate
 
-// Delegate callbacks arrive on the URLSession delegate queue, so hop to main
-// before touching the emitter. Emitting with no listeners attached throws, which
-// is expected and harmless: the terminal outcome is already in the journal and JS
-// will pick it up via getUnacknowledgedEvents.
+// Called synchronously on the URLSession delegate queue. That is safe and
+// deliberate: the generated emitter locks its own state and dispatches each
+// listener through the JS CallInvoker, so it is already thread-safe and already
+// async onto the JS thread. Deferring to the main queue instead would open a
+// window where the module's TurboModule is torn down before the block runs.
+//
+// The try/catch is required, not defensive: the generated emitOnX calls an
+// std::function that is only installed when the TurboModule is constructed,
+// which happens after this module's init has already registered as the delegate.
+// An event in that gap throws std::bad_function_call, as does one emitted with no
+// JS listeners attached. Both are harmless — the terminal outcome is already in
+// the journal, so JS recovers it from getUnacknowledgedEvents.
 - (void)safeEmit:(void (^)(RNFileUploader *emitter))block
 {
-  __weak RNFileUploader *weakSelf = self;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    RNFileUploader *strongSelf = weakSelf;
-    if (strongSelf == nil) {
-      return;
-    }
-    try {
-      block(strongSelf);
-    } catch (const std::exception &e) {
-      // No listeners / runtime gone — drop the live event.
-    }
-  });
+  try {
+    block(self);
+  } catch (const std::exception &e) {
+    // No listeners yet, or the runtime is gone — drop the live event.
+  }
 }
 
 - (void)emitProgress:(NSDictionary *)body

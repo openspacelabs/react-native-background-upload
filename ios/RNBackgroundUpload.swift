@@ -69,13 +69,26 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
 
   // MARK: - Event delegate
 
-  @objc public static func setEventDelegate(_ delegate: RNFileUploaderEventDelegate?) {
+  @objc public static func setEventDelegate(_ delegate: RNFileUploaderEventDelegate) {
     // Force the singleton (and therefore the sessions) into existence before
     // taking the lock — see the note on delegateLock.
     _ = shared
     delegateLock.lock()
     eventDelegate = delegate
     delegateLock.unlock()
+  }
+
+  /// Deregisters a delegate, but only if it is still the registered one.
+  ///
+  /// React Native dispatches `invalidate` asynchronously and gives up waiting
+  /// after 10s, so a slow call can let the replacement module register itself
+  /// before the outgoing module's `invalidate` actually runs. Clearing
+  /// unconditionally there would null out the live delegate and silently stop
+  /// every event for the rest of the process.
+  @objc public static func clearEventDelegate(_ delegate: RNFileUploaderEventDelegate) {
+    delegateLock.lock()
+    defer { delegateLock.unlock() }
+    if eventDelegate === delegate { eventDelegate = nil }
   }
 
   private static var currentDelegate: RNFileUploaderEventDelegate? {
@@ -154,8 +167,15 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     request.httpMethod = (options["method"] as? String) ?? "POST"
     if let headers = options["headers"] as? [String: Any] {
       for (key, value) in headers {
-        if let s = value as? String { request.setValue(s, forHTTPHeaderField: key) }
-        else { request.setValue("\(value)", forHTTPHeaderField: key) }
+        // Only strings and numbers become headers. The original Obj-C skipped
+        // anything else, and interpolating instead would put "<null>" (or a
+        // Swift struct description) on the wire for a null/object value —
+        // silently corrupting e.g. an Authorization header rather than omitting it.
+        if let s = value as? String {
+          request.setValue(s, forHTTPHeaderField: key)
+        } else if let n = value as? NSNumber {
+          request.setValue(n.stringValue, forHTTPHeaderField: key)
+        }
       }
     }
 
@@ -186,26 +206,34 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
 
     let sessions = activeSessions
     let group = DispatchGroup()
-    let found = NSMutableArray()
+    // Guarded: the two sessions' getAllTasks completions run on independent
+    // delegate queues, so this is written concurrently.
+    let foundLock = NSLock()
+    var found = false
     for session in sessions {
       group.enter()
       session.getAllTasks { tasks in
         for task in tasks where self.uploadId(session, task) == cancelUploadId {
-          found.add(true)
+          foundLock.lock()
+          found = true
+          foundLock.unlock()
           task.cancel()
         }
         group.leave()
       }
     }
     group.notify(queue: .main) {
-      if found.count == 0 {
+      foundLock.lock()
+      let matched = found
+      foundLock.unlock()
+      if !matched {
         // Nothing to cancel: drop the intent again so a later upload reusing this
         // customUploadId isn't misattributed as a user cancel.
         RNBackgroundUpload.lock.lock()
         RNBackgroundUpload.userCancelledIds.remove(cancelUploadId)
         RNBackgroundUpload.lock.unlock()
       }
-      resolve(found.count > 0)
+      resolve(matched)
     }
   }
 
@@ -263,8 +291,20 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
           let id = self.uploadId(session, task)
           if id == "unknown" { continue }
           lock.lock()
+          // Report the real state. Collapsing everything non-running into
+          // "pending" told a consumer's boot reconciliation that an upload had
+          // never started, inviting it to re-enqueue one that was already
+          // finishing or cancelling.
+          let state: String
+          switch task.state {
+          case .running: state = "running"
+          case .suspended: state = "pending"
+          case .canceling: state = "cancelled"
+          case .completed: state = "completed"
+          @unknown default: state = "pending"
+          }
           result.append(["id": id,
-                         "state": task.state == .running ? "running" : "pending",
+                         "state": state,
                          "bytesSent": task.countOfBytesSent,
                          "totalBytes": task.countOfBytesExpectedToSend])
           lock.unlock()
@@ -311,7 +351,10 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   public func urlSession(_ session: URLSession, task: URLSessionTask,
                          didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
                          totalBytesExpectedToSend: Int64) {
-    var progress: Float = -1
+    // 0 rather than -1 when the length is unknown: the documented range is
+    // 0-100, Android reports 0 for the same case, and a negative value renders
+    // as a broken progress bar in a consumer that passes it straight through.
+    var progress: Float = 0
     if totalBytesExpectedToSend > 0 {
       progress = 100.0 * Float(totalBytesSent) / Float(totalBytesExpectedToSend)
     }
@@ -342,6 +385,11 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     RNBackgroundUpload.lock.lock()
     let bodyData = RNBackgroundUpload.responsesData.removeValue(forKey: taskMapKey(session, task))
     RNBackgroundUpload.lastProgressAt[id] = nil
+    // Consume the user-cancel intent on EVERY terminal outcome, not only the
+    // cancelled branch. If cancelUpload lost the race with completion, the id
+    // would otherwise linger for the life of the process and a later upload
+    // reusing that customUploadId would report a system cancel as a user cancel.
+    let userCancelled = RNBackgroundUpload.userCancelledIds.remove(id) != nil
     RNBackgroundUpload.lock.unlock()
 
     let rawBody = bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) } ?? ""
@@ -373,9 +421,6 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       let nsError = error! as NSError
       if nsError.code == NSURLErrorCancelled {
         event.type = "cancelled"
-        RNBackgroundUpload.lock.lock()
-        let userCancelled = RNBackgroundUpload.userCancelledIds.remove(id) != nil
-        RNBackgroundUpload.lock.unlock()
         event.cancelReason = userCancelled ? "user" : "system"
       } else {
         event.type = "error"
