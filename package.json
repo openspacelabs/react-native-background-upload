@@ -33,6 +33,7 @@
   },
   "scripts": {
     "typecheck": "tsc",
+    "test": "jest",
     "lint": "yarn lint-root --fix && yarn lint-example --fix",
     "lint:ci": "yarn lint-root && yarn lint-example",
     "lint-root": "eslint --ext js,jsx,ts,tsx src --quiet",

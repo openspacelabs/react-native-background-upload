@@ -1,44 +1,31 @@
 /**
  * Handles HTTP background file uploads from an iOS or Android device.
  */
-import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
-import { AddListener, UploadId, UploadOptions } from './types';
+import { Platform } from 'react-native';
+import type { EventSubscription } from 'react-native';
+import NativeRNFileUploader from './NativeRNFileUploader';
+import {
+  AddListener,
+  JournaledEvent,
+  UploadId,
+  UploadOptions,
+  UploadSnapshot,
+} from './types';
 
 export * from './types';
 
-const NativeModule =
-  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader;
-const eventPrefix = 'RNFileUploader-';
 const fileURIPrefix = 'file://';
 
-// for IOS, register event listeners or else they don't fire on DeviceEventEmitter
-if (NativeModules.VydiaRNFileUploader) {
-  NativeModule.addListener(eventPrefix + 'progress');
-  NativeModule.addListener(eventPrefix + 'error');
-  NativeModule.addListener(eventPrefix + 'cancelled');
-  NativeModule.addListener(eventPrefix + 'completed');
-}
-
 /**
- * Starts uploading a file to an HTTP endpoint.
- * Options object:
-  ```
-  {
-    url: string.  url to post to.
-    path: string.  path to the file on the device
-    headers: hash of name/value header pairs
-    method: HTTP method to use.  Default is "POST"
-    notification: hash for customizing tray notifiaction
-      enabled: boolean to enable/disabled notifications, true by default.
-  }
-  ```
- * Returns a promise with the string ID of the upload.  Will reject if there is a connection problem, the file doesn't exist, or there is some other problem.
- * It is recommended to add listeners in the .then of this promise.
-*/
+ * Starts uploading a file to an HTTP endpoint. See UploadOptions for the full
+ * option set (url, path, method, headers, wifiOnly, acceptStatus, android).
+ * Returns a promise resolving to the upload's string id. Rejects only on a bad
+ * option (e.g. missing/invalid url or path); transport failures and HTTP error
+ * responses surface later as 'error' events, not a rejection here.
+ */
 const startUpload = ({
   path,
   android,
-  ios,
   ...options
 }: UploadOptions): Promise<UploadId> => {
   if (!path.startsWith(fileURIPrefix)) {
@@ -49,7 +36,7 @@ const startUpload = ({
     path = path.replace(fileURIPrefix, '');
   }
 
-  return NativeModule.startUpload({ ...options, ...android, ...ios, path });
+  return NativeRNFileUploader.startUpload({ ...options, ...android, path });
 };
 
 /**
@@ -58,27 +45,77 @@ const startUpload = ({
  * Upload ID is returned in a promise after a call to startUpload method,
  * use it to cancel started upload.
  * Event "cancelled" will be fired when upload is cancelled.
- * Returns a promise with boolean true if operation was successfully completed.
- * Will reject if there was an internal error or ID format is invalid.
+ * On iOS, resolves true if a matching in-flight upload was found and cancelled,
+ * false if there was nothing to cancel. Android always resolves true — the
+ * WorkManager cancel is fire-and-forget and does not report whether it matched.
  */
 const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
-  NativeModule.cancelUpload(cancelUploadId);
+  NativeRNFileUploader.cancelUpload(cancelUploadId);
 
 /**
  * Listens for the given event on the given upload ID (resolved from startUpload).
  * If you don't supply a value for uploadId, the event will fire for all uploads.
  * Events (id is always the upload ID):
- * progress - { id: string, progress: int (0-100) }
- * error - { id: string, error: string }
- * cancelled - { id: string, error: string }
- * completed - { id: string }
+ * progress - { id, progress: 0-100 }
+ * error - { id, error, errorKind?, responseCode?, responseBody?, responseHeaders? }
+ * cancelled - { id, cancelReason?: 'user' | 'system' }
+ * completed - { id, responseCode, responseBody, responseHeaders?, eventId? }
  */
-const addListener: AddListener = (eventType, uploadId, listener) =>
-  DeviceEventEmitter.addListener(eventPrefix + eventType, (data) => {
-    if (!uploadId || !data || !data.id || data.id === uploadId) {
+const addListener = ((
+  eventType: 'progress' | 'error' | 'completed' | 'cancelled',
+  uploadId: UploadId | null,
+  // The payload shape varies per event; the public AddListener overloads carry
+  // the precise contract, so the internal forwarder stays untyped.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  listener: (data: any) => void,
+): EventSubscription => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const forMatchingUpload = (data: any) => {
+    // A scoped subscription drops anything it can't attribute, rather than
+    // failing open and delivering another upload's (or an unidentified) event.
+    if (!uploadId || data?.id === uploadId) {
       listener(data);
     }
-  });
+  };
+
+  switch (eventType) {
+    case 'progress':
+      return NativeRNFileUploader.onProgress(forMatchingUpload);
+    case 'error':
+      return NativeRNFileUploader.onError(forMatchingUpload);
+    case 'cancelled':
+      return NativeRNFileUploader.onCancelled(forMatchingUpload);
+    case 'completed':
+      return NativeRNFileUploader.onCompleted(forMatchingUpload);
+    default:
+      throw new Error(`Unknown upload event: ${eventType}`);
+  }
+}) as AddListener;
+
+/**
+ * Terminal events (completed/error/cancelled) are journaled natively before being
+ * emitted, so they survive the app being killed or JS reloading. Read them on
+ * startup, process each, then acknowledge — unacknowledged events are re-delivered
+ * here on every call until you ack them.
+ *
+ * Note: `completed` fires only for 2xx (or a request's `acceptStatus`); other HTTP
+ * responses arrive as `error` with `errorKind: 'http'` and the response attached.
+ */
+const getUnacknowledgedEvents = async (): Promise<JournaledEvent[]> =>
+  (await NativeRNFileUploader.getUnacknowledgedEvents()) as JournaledEvent[];
+
+/** Removes journaled events by eventId once you've processed them. */
+const ackEvents = (eventIds: string[]): Promise<boolean> =>
+  NativeRNFileUploader.ackEvents(eventIds);
+
+/**
+ * Enumerates uploads the OS still knows about, for reconciling in-flight work on
+ * boot. Terminal outcomes come from getUnacknowledgedEvents (durable), not here:
+ * on Android finished work is pruned after ~a day, and on iOS only live tasks are
+ * listed.
+ */
+const getAllUploads = async (): Promise<UploadSnapshot[]> =>
+  (await NativeRNFileUploader.getAllUploads()) as UploadSnapshot[];
 
 const ios = {
   /**
@@ -86,32 +123,45 @@ const ios = {
    * Note that this method has no way of distinguishing between a task being completed, errored, or non-existent.
    * They're all `undefined`. You will need to either rely on the listeners or
    * check with the API service you're using to upload.
+   *
+   * Android always resolves `undefined`.
    */
   getUploadStatus: async (
     jobId: string,
   ): Promise<
     | {
-        state: 'running' | 'suspended' | 'canceling';
+        state: 'running' | 'suspended' | 'canceling' | 'completed';
         bytesSent: number;
         totalBytes: number;
       }
     | undefined
-  > => await NativeModule.getUploadStatus?.(jobId),
+  > =>
+    ((await NativeRNFileUploader.getUploadStatus(jobId)) as
+      | {
+          state: 'running' | 'suspended' | 'canceling' | 'completed';
+          bytesSent: number;
+          totalBytes: number;
+        }
+      | null) ?? undefined,
 };
 
 const android = {
   /**
-   * When the upload progress notification is pressed, it will open the app and fire this event
+   * When the upload progress notification is pressed, it will open the app and fire this event.
+   * Android only — never fires on iOS.
    * @param listener
    */
-  addNotificationListener: (listener: () => void) =>
-    DeviceEventEmitter.addListener(eventPrefix + 'notification', listener),
+  addNotificationListener: (listener: () => void): EventSubscription =>
+    NativeRNFileUploader.onNotification(() => listener()),
 };
 
 export default {
   startUpload,
   cancelUpload,
   addListener,
+  getUnacknowledgedEvents,
+  ackEvents,
+  getAllUploads,
   ios,
   android,
 };

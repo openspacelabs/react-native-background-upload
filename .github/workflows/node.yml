@@ -27,6 +27,9 @@ jobs:
       - name: typecheck
         run: yarn typecheck
 
+      - name: js tests
+        run: yarn test
+
       - name: setup java
         uses: actions/setup-java@v4
         with:
