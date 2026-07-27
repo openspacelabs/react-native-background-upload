@@ -1,13 +1,9 @@
 {
   "compilerOptions": {
-    "outDir": "lib",
     "baseUrl": "src",
-    "declaration": true,
-    "emitDeclarationOnly": true,
     "module": "esnext",
     "target": "es6",
     "lib": ["es6", "dom", "es2016", "es2017"],
-    "sourceMap": true,
     "jsx": "react",
     "moduleResolution": "node",
     "allowSyntheticDefaultImports": true,
@@ -15,7 +11,12 @@
     "strict": false,
     "strictNullChecks": true,
     "skipLibCheck": true,
-    "noImplicitAny": true
+    "noImplicitAny": true,
+    "noEmit": true,
+    // Don't auto-include every @types/* in node_modules: src needs no ambient
+    // types (it imports react-native's explicitly, and tests are excluded), and
+    // deprecated stub packages like @types/minimatch otherwise fail resolution.
+    "types": []
   },
-  "exclude": ["example", "lib"]
+  "exclude": ["example", "src/__tests__"]
 }

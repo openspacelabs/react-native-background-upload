@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 import android.app.Notification
 import android.app.NotificationManager
