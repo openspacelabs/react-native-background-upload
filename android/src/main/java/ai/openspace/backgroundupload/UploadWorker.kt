@@ -1,6 +1,7 @@
 package ai.openspace.backgroundupload
 
 import android.app.Notification
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -24,6 +25,7 @@ import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
 import java.net.UnknownHostException
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 // All workers will start `doWork` immediately but only 1 request is active at a time.
@@ -53,7 +55,18 @@ private enum class Connectivity { NoWifi, NoInternet, Ok }
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
 
-  enum class Input { Params }
+  companion object {
+    /**
+     * Key for the serialized [Upload] in the worker's input data.
+     *
+     * A string literal on purpose. This key is persisted in WorkManager's
+     * database, so the build that runs a job may not be the build that enqueued
+     * it — a key derived from a symbol name (an enum constant, a property) breaks
+     * the moment R8 renames it or someone refactors, and the failure looks like
+     * "No Params" on a job that was queued perfectly well by the previous version.
+     */
+    const val PARAMS_KEY = "params"
+  }
 
   private lateinit var upload: Upload
   private var retries = 0
@@ -65,11 +78,14 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // Retrieve the upload. If this throws errors, error reporting won't work.
     // However, the only way it has errors is the implementation is incorrect,
     // which can be caught in development
-    val paramsJson = inputData.getString(Input.Params.name) ?: throw Throwable("No Params")
+    val paramsJson = inputData.getString(PARAMS_KEY) ?: throw Throwable("No Params")
     upload = Gson().fromJson(paramsJson, Upload::class.java)
 
     // initialization, errors thrown here won't be retried
     try {
+      // The foreground notification needs a channel to exist first, or posting
+      // it silently fails and setForeground can crash on newer Android.
+      ensureNotificationChannel()
       // `setForeground` is recommended for long-running workers.
       // Foreground mode helps prioritize the worker, reducing the risk
       // of it being killed during low memory or Doze/App Standby situations.
@@ -92,17 +108,17 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         // - "delay" should be within the "try" block to account for worker cancellation,
         // which cancels the delay immediately and throws CancellationException.
         // - Linear backoff instead of exponential. One reason for this is we retry on
-        // invalid connections. Exponential will take too long. If the server flakes and
-        // returns 500s, we don't retry but consider the request successful.
-        // This is consistent with iOS behavior. User gets notifications for
-        // these server issues and can manually retry. Since 500s are currently rare,
-        // it's likely ok. If they're too frequent, we can consider adding exponential
-        // backoff for them.
+        // invalid connections. Exponential will take too long.
+        // - We only retry transport failures here (no response). Any HTTP response,
+        // including 4xx/5xx, is terminal at this layer: handleResponse classifies it
+        // (2xx/acceptStatus -> completed, else http error) and the worker returns
+        // without retrying. Response-code-based retry policy is the JS queue's job.
+        // This is consistent with iOS behavior.
         if (isRetried) delay(RETRY_DELAY)
         isRetried = true
 
         val response = upload() ?: continue
-        handleSuccess(response)
+        handleResponse(response)
         return@withContext Result.success()
       } catch (error: Throwable) {
         if (checkAndHandleCancellation()) throw error
@@ -150,14 +166,44 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     notificationManager.notify(upload.notificationId, buildNotification())
   }
 
-  private fun handleSuccess(response: UploadResponse) {
+  // An HTTP response came back. "completed" only for 2xx or a per-request
+  // acceptStatus code (axios validateStatus semantics — a 400 is an error, not a
+  // completion); anything else is a terminal http error carrying the full
+  // response. Either way the request finished, so the worker does not retry.
+  private fun handleResponse(response: UploadResponse) {
     UploadProgress.complete(upload.id)
-    EventReporter.success(upload.id, response)
+    val accepted = UploadOutcome.isAccepted(response.code, upload.acceptStatus)
+    val (body, truncated) = EventJournal.capBody(response.body)
+    journalAndEmit(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = if (accepted) "completed" else "error",
+        timestamp = System.currentTimeMillis(),
+        responseCode = response.code,
+        responseBody = body,
+        responseBodyTruncated = truncated,
+        responseHeaders = response.headers,
+        errorKind = if (accepted) null else "http",
+        error = if (accepted) null else "HTTP ${response.code}",
+      )
+    )
   }
 
   private fun handleError(error: Throwable) {
     UploadProgress.remove(upload.id)
-    EventReporter.error(upload.id, error)
+    // Default fileExists=true so a failed existence probe reads as network, not file.
+    val fileExists = runCatching { File(upload.path).exists() }.getOrDefault(true)
+    journalAndEmit(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = "error",
+        timestamp = System.currentTimeMillis(),
+        error = error.message ?: "Unknown exception",
+        errorKind = UploadOutcome.errorKind(error, fileExists),
+      )
+    )
   }
 
   // Check if cancelled by user or new worker with same ID
@@ -166,8 +212,41 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     if (!isStopped) return false
 
     UploadProgress.remove(upload.id)
-    EventReporter.cancelled(upload.id)
+
+    // Only a user cancel is terminal, so only a user cancel is journaled.
+    //
+    // WorkManager decides whether to reschedule BEFORE it stops the worker, and
+    // it ignores the Result we return. cancelUniqueWork marks the row CANCELLED
+    // first, so a user cancel is genuinely the end. A system stop — a
+    // foreground-service timeout, quota, or memory pressure — leaves the row
+    // RUNNING and WorkManager re-runs this same upload. Journaling a terminal
+    // `cancelled` there would durably tell JS the upload was dead while it was in
+    // fact about to be retried, so the consumer would settle the transfer and the
+    // retry would land as a duplicate on the server.
+    //
+    // Emitting nothing is the honest answer for a system stop: the upload is
+    // still in flight as far as anyone should be concerned. If WorkManager ever
+    // declines to reschedule, `getAllUploads()` is how a consumer notices.
+    if (!UserCancellations.consume(upload.id)) return true
+
+    journalAndEmit(
+      EventJournal.Entry(
+        eventId = UUID.randomUUID().toString(),
+        uploadId = upload.id,
+        type = "cancelled",
+        timestamp = System.currentTimeMillis(),
+        cancelReason = "user",
+      )
+    )
     return true
+  }
+
+  // Journal before emitting: the journal is the durable record (survives JS being
+  // dead); the live emit is best-effort. Both carry the identical payload, so a
+  // consumer can ack a live event by its eventId.
+  private fun journalAndEmit(entry: EventJournal.Entry) {
+    EventJournal.get(context).append(entry)
+    EventReporter.emit(entry)
   }
 
   /** @return whether to retry */
@@ -206,6 +285,21 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // alert connectivity mode
     notificationManager.notify(upload.notificationId, buildNotification())
     return this.connectivity == Connectivity.Ok
+  }
+
+  // Ensures the channel used by the foreground notification exists. Only creates
+  // it when absent, so a channel the consumer registered themselves (with their
+  // own name/importance) always wins; when they pass nothing we fall back to a
+  // default LOW-importance channel and no notifee setup is required.
+  private fun ensureNotificationChannel() {
+    // minSdk is 29, so NotificationChannel (API 26) is always available.
+    if (notificationManager.getNotificationChannel(upload.notificationChannel) != null) return
+    val channel = NotificationChannel(
+      upload.notificationChannel,
+      "Uploads",
+      NotificationManager.IMPORTANCE_LOW,
+    )
+    notificationManager.createNotificationChannel(channel)
   }
 
   // builds the notification required to enable Foreground mode
