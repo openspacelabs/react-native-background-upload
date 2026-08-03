@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call

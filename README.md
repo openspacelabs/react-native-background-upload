@@ -1,26 +1,53 @@
 # react-native-background-upload
 
-OpenSpace home-grown background uploader for React Native. on iOS it uses URLSession, on Android it uses CoroutineWorker and Ktor.
-
-Documentation has been modified to reflect the changes made to this library.
+OpenSpace's background HTTP file uploader for React Native. On iOS it uses a
+background `URLSession`; on Android it uses `WorkManager` (a `CoroutineWorker`)
+with OkHttp. Uploads continue while the app is backgrounded and resume after it
+is killed.
 
 # Installation
 
-## 1. Install package
+**Requires React Native ≥ 0.84 with the New Architecture enabled, and React ≥ 19.**
+This is a codegen TurboModule; it does not support the legacy bridge.
 
-`yarn add react-native-background-upload`
+```
+yarn add react-native-background-upload
+cd ios && pod install && cd ..
+```
 
-Note: if you are installing on React Native < 0.47, use `react-native-background-upload@3.0.0` instead of `react-native-background-upload`
+`pod install` is required after installing — it runs codegen to generate the native
+spec this module implements.
 
-## 2. Native Setup
+> The package ships TypeScript source with no build step, so it resolves through Metro
+> (and `tsc`) but not through plain Node. If you import it from a non-Metro context —
+> a script, or Jest without a transform — add it to your `transformIgnorePatterns`
+> allowlist or mock it.
 
-### iOS
+## iOS: background completion handler (required)
 
-`cd ./ios && pod install && cd ../`
+So uploads that finish while the app is terminated can relaunch it and be
+journaled, add this to your `AppDelegate`:
 
-## 3. Expo
+```objc
+#import <react_native_background_upload/react_native_background_upload-Swift.h>
 
-To use this library with [Expo](https://expo.io) one must first detach (eject) the project and follow [step 2](#2-link-native-code) instructions. Additionally on iOS there is a must to add a Header Search Path to other dependencies which are managed using Pods. To do so one has to add `$(SRCROOT)/../../../ios/Pods/Headers/Public` to Header Search Path in `VydiaRNFileUploader` module using XCode.
+- (void)application:(UIApplication *)application
+handleEventsForBackgroundURLSession:(NSString *)identifier
+  completionHandler:(void (^)(void))completionHandler {
+  [RNBackgroundUpload setBackgroundSessionCompletionHandler:completionHandler
+                                             forIdentifier:identifier];
+}
+```
+
+> The Swift header import name is the pod name with hyphens as underscores. If
+> your app links pods as frameworks, use `@import react_native_background_upload;`
+> instead of the `#import <...-Swift.h>` line.
+
+This hook is load-bearing beyond just calling the completion handler: it is what
+brings the library's background `URLSession` back to life in a process the system
+relaunched with no JS running, so queued completions get journaled. `RNFileUploader`
+is the TurboModule and is deliberately not reachable from plain Objective-C — its
+generated header is Objective-C++ only — so the handler lives on `RNBackgroundUpload`.
 
 # Usage
 
@@ -32,186 +59,110 @@ const options = {
   path: 'file://path/to/file/on/device',
   method: 'POST',
   type: 'raw',
-  headers: {
-    'content-type': 'application/octet-stream', // Customize content-type
-    'my-custom-header': 's3headervalueorwhateveryouneed',
-  },
-  android: {
-    notificationChannel: 'my-channel-id',
-    notificationId: 'my-progress-notification',
-    notificationTitle: 'Uploading...',
-    notificationTitleNoWifi: 'Waiting for Wifi...',
-    notificationTitleNoInternet: 'Waiting for Internet...',
-  },
-  useUtf8Charset: true,
+  headers: { 'content-type': 'application/octet-stream' },
+  // Optional. Treat these non-2xx statuses as success (e.g. an idempotent
+  // create that conflicts). Any other non-2xx is an 'error' with errorKind 'http'.
+  acceptStatus: [409],
+  // Optional on Android — the library supplies notification defaults and creates
+  // its own channel. Override any of these to customize.
+  android: { notificationTitle: 'Uploading…' },
 };
 
-Upload.addListener('progress', uploadId, (data) => {
-  console.log(`Progress: ${data.progress}%`);
-});
-Upload.addListener('error', uploadId, (data) => {
-  console.log(`Error: ${data.error}%`);
-});
-Upload.addListener('cancelled', uploadId, (data) => {
-  console.log(`Cancelled!`);
-});
-Upload.addListener('completed', uploadId, (data) => {
-  // data includes responseCode: number and responseBody: Object
-  console.log('Completed!');
-});
-Upload.android.addNotificationListener(() => {
-  console.log('Progress notification pressed!');
-});
+const uploadId = await Upload.startUpload(options);
 
-Upload.startUpload(options)
-  .then((uploadId) => console.log('Upload started', uploadId))
-  .catch((err) => console.log('Upload error!', err));
+Upload.addListener('progress', uploadId, ({ progress }) => {});
+Upload.addListener('completed', uploadId, ({ responseCode, responseBody }) => {});
+Upload.addListener('error', uploadId, ({ error, errorKind, responseCode }) => {});
+Upload.addListener('cancelled', uploadId, ({ cancelReason }) => {});
 ```
 
-## Multipart Uploads
+# Reliable delivery
 
-**🚧 COMING SOON**
+Terminal events (`completed` / `error` / `cancelled`) are journaled natively
+*before* they are emitted, so they survive app death, JS reloads, and background
+relaunches. Events stay in the journal until you acknowledge them. Drain it on
+every app start:
 
-Just set the `type` option to `multipart` and set the `field` option. Example:
-
-```
-const options = {
-  url: 'https://myservice.com/path/to/post',
-  path: 'file://path/to/file%20on%20device.png',
-  method: 'POST',
-  field: 'uploaded_media',
-  type: 'multipart'
+```js
+const events = await Upload.getUnacknowledgedEvents();
+for (const e of events) {
+  // e: { eventId, id, type, timestamp, responseCode?, responseBody?,
+  //      responseHeaders?, error?, errorKind?, cancelReason? }
+  handleOutcome(e);
 }
+await Upload.ackEvents(events.map((e) => e.eventId));
+
+// Then reconcile anything still in flight:
+const live = await Upload.getAllUploads(); // [{ id, state, ... }]
 ```
 
-Note the `field` property is required for multipart uploads.
+Notes:
+- **`completed` fires only for 2xx** (or a request's `acceptStatus`). Every other
+  HTTP response is an `error` with `errorKind: 'http'` and the response attached —
+  a 400 is an error, not a completion.
+- `errorKind` is `'http' | 'network' | 'file' | 'unknown'`. Retry transport
+  failures; treat client errors as terminal.
+- `cancelReason` distinguishes a user cancel (`'user'`) from a system kill
+  (`'system'`).
+- Duplicate journal entries for one upload id are possible if the process dies at
+  the wrong moment (Android may re-run the worker) — dedupe by `id`, keep latest.
+- Android: `getAllUploads()` reflects only live/recent work (WorkManager prunes
+  finished work after ~a day). The journal is the source of truth for outcomes.
 
 # API
 
-## Top Level Functions
+All methods are on the default export.
 
-All top-level methods are available as named exports or methods on the default export.
+### `startUpload(options): Promise<string>`
+Starts an upload; resolves to its id. Rejects only on a bad option (missing/invalid
+`url` or `path`) — transport failures and HTTP error responses arrive later as
+`error` events, not a rejection.
 
-### startUpload(options)
+| Option | Type | Notes |
+| --- | --- | --- |
+| `url` | string | Required. |
+| `path` | string | Required. Local file path (`file://…`). URIs are not escaped for you. |
+| `type` | `'raw'` | Only `raw` is supported. |
+| `method` | string | Default `POST`. |
+| `headers` | object | HTTP headers. |
+| `customUploadId` | string | Defaults to a generated UUID. |
+| `wifiOnly` | boolean | Wait for wifi before/while uploading. |
+| `acceptStatus` | number[] | Non-2xx statuses to treat as success. |
+| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `maxRetries` (default 5). Sensible defaults + auto-created channel if omitted. |
 
-The primary method you will use, this starts the upload process.
+### `cancelUpload(uploadId): Promise<boolean>`
+Cancels an upload. Fires a `cancelled` event with `cancelReason: 'user'`.
 
-Returns a promise with the string ID of the upload. Will reject if the file doesn't exist or unknown native problems. 
+### `addListener(eventType, uploadId | null, listener): EventSubscription`
+Listen for `'progress' | 'error' | 'completed' | 'cancelled'`. Pass `null` for
+`uploadId` to receive events for all uploads. Call `.remove()` on the result to
+unsubscribe.
 
-`options` is an object with following values:
+### `getUnacknowledgedEvents(): Promise<JournaledEvent[]>`
+Terminal events not yet acknowledged, including ones that fired while JS was dead.
 
-_Note: You must provide valid URIs. react-native-background-upload does not escape the values you provide._
+### `ackEvents(eventIds: string[]): Promise<boolean>`
+Removes journaled events once processed.
 
-| Name             | Type                            | Required                        | Default                                                                                                                                                                                                      | Description                                                                                                                                                                                                                     | Example                                                               |
-| ---------------- | ------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `url`            | string                          | Required                        |                                                                                                                                                                                                              | URL to upload to                                                                                                                                                                                                                | `https://myservice.com/path/to/post`                                  |
-| `path`           | string                          | Required                        |                                                                                                                                                                                                              | File path on device                                                                                                                                                                                                             | `file://something/coming/from%20the%20device.png`                     |
-| `type`           | 'raw' or 'multipart'            | Optional                        | `raw`                                                                                                                                                                                                        | Primary upload type.                                                                                                                                                                                                            |                                                                       |
-| `method`         | string                          | Optional                        | `POST`                                                                                                                                                                                                       | HTTP method                                                                                                                                                                                                                     |                                                                       |
-| `customUploadId` | string                          | Optional                        |                                                                                                                                                                                                              | `startUpload` returns a Promise that includes the upload ID, which can be used for future status checks. By default, the upload ID is automatically generated. This parameter allows a custom ID to use instead of the default. |                                                                       |
-| `headers`        | object                          | Optional                        |                                                                                                                                                                                                              | HTTP headers                                                                                                                                                                                                                    | `{ 'Accept': 'application/json' }`                                    |
-| `field`          | string                          | Required if `type: 'multipart'` |                                                                                                                                                                                                              | The form field name for the file. Only used when `type: 'multipart`                                                                                                                                                             | `uploaded-file`                                                       |
-| `parameters`     | object                          | Optional                        |                                                                                                                                                                                                              | Additional form fields to include in the HTTP request. Only used when `type: 'multipart`                                                                                                                                        |                                                                       |
-| `notification`   | Notification object (see below) | Optional                        |                                                                                                                                                                                                              | Android only.                                                                                                                                                                                                                   | `{ enabled: true, onProgressTitle: "Uploading...", autoClear: true }` |
-| `useUtf8Charset` | boolean                         | Optional                        |                                                                                                                                                                                                              | Android only. Set to true to use `utf-8` as charset.                                                                                                                                                                            |                                                                       |
-| `appGroup`       | string                          | Optional                        | iOS only. App group ID needed for share extensions to be able to properly call the library. See: https://developer.apple.com/documentation/foundation/nsfilemanager/1412643-containerurlforsecurityapplicati |
+### `getAllUploads(): Promise<UploadSnapshot[]>`
+Uploads the OS still knows about, for boot-time reconciliation.
 
-### Notification Object (Android Only)
+### `ios.getUploadStatus(uploadId)`
+iOS-only live task state (`running | suspended | canceling`, plus byte counts), or
+`undefined` if the task isn't active.
 
-Android forces us to display a progress notification to show overall upload progress.
+### `android.addNotificationListener(listener)`
+Fires when the Android progress notification is pressed. No event data.
 
-| Name                          | Type   | Required | Description                                                      | Example                     |
-| ----------------------------- | ------ | -------- | ---------------------------------------------------------------- | --------------------------- |
-| `notificationChannel`         | string | Optional | Sets android notification channel                                | `background-upload-channel` |
-| `notificationId`              | string | Optional | A custom ID for the notification                                 | `upload-progress`           |
-| `notificationTitle`           | string | Optional | Sets the default title for the notification                      | `Uploading...`              |
-| `notificationTitleNoWifi`     | string | Optional | Sets notification title for uploads awaiting wifi                | `Waiting for Wifi...`       |
-| `notificationTitleNoInternet` | string | Optional | Sets notification title for uploads awaiting internet connection | `Waiting for Internet...`   |
+# Events
 
-### cancelUpload(uploadId)
-
-Cancels an upload.
-
-`uploadId` is the result of the Promise returned from `startUpload`
-
-Returns a Promise that resolves to an boolean indicating whether the upload was cancelled.
-
-### addListener(eventType, uploadId, listener)
-
-Adds an event listener, possibly confined to a single upload.
-
-`eventType` Event to listen for. Values: 'progress' | 'error' | 'completed' | 'cancelled'
-
-`uploadId` The upload ID from `startUpload` to filter events for. If null, this will include all uploads.
-
-`listener` Function to call when the event occurs.
-
-Returns an [EventSubscription](https://github.com/facebook/react-native/blob/master/Libraries/vendor/emitter/EmitterSubscription.js). To remove the listener, call `remove()` on the `EventSubscription`.
-
-### android.addNotificationListener(listener)
-
-When the upload progress notification is pressed, it will open the app and fire this event.
-There's no event data for this.
-
-## Events
-
-### progress
-
-Event Data
-
-| Name       | Type   | Required | Description           |
-| ---------- | ------ | -------- | --------------------- |
-| `id`       | string | Required | The ID of the upload. |
-| `progress` | 0-100  | Required | Percentage completed. |
-
-### error
-
-Event Data
-
-| Name    | Type   | Required | Description           |
-| ------- | ------ | -------- | --------------------- |
-| `id`    | string | Required | The ID of the upload. |
-| `error` | string | Required | Error message.        |
-
-### completed
-
-Event Data
-
-| Name              | Type   | Required | Description                     |
-| ----------------- | ------ | -------- | ------------------------------- |
-| `id`              | string | Required | The ID of the upload.           |
-| `responseCode`    | string | Required | HTTP status code received       |
-| `responseBody`    | string | Required | HTTP response body              |
-| `responseHeaders` | string | Required | HTTP response headers (Android) |
-
-### cancelled
-
-Event Data
-
-| Name | Type   | Required | Description           |
-| ---- | ------ | -------- | --------------------- |
-| `id` | string | Required | The ID of the upload. |
-
-# FAQs
-
-Does it support iOS camera roll assets?
-
-> Yes, as of version 4.3.0.
-
-Does it support multiple file uploads?
-
-> Yes and No. It supports multiple concurrent uploads, but only a single upload per request. That should be fine for 90%+ of cases.
-
-Why should I use this file uploader instead of others that I've Googled like [react-native-uploader](https://github.com/aroth/react-native-uploader)?
-
-> This package has two killer features not found anywhere else (as of 12/16/2016). First, it works on both iOS and Android. Others are iOS only. Second, it supports background uploading. This means that users can background your app and the upload will continue. This does not happen with other uploaders.
+| Event | Data |
+| --- | --- |
+| `progress` | `{ id, progress: 0-100 }` |
+| `completed` | `{ id, responseCode, responseBody, responseHeaders?, eventId? }` |
+| `error` | `{ id, error, errorKind?, responseCode?, responseBody?, responseHeaders? }` |
+| `cancelled` | `{ id, cancelReason?: 'user' | 'system' }` |
 
 # Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-# Common Issues
-
-## Gratitude
-
-Many thanks to the [Original Library](https://github.com/Vydia/react-native-background-upload) for the boilerplate and inspiration

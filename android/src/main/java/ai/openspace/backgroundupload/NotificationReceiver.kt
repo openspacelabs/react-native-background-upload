@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package ai.openspace.backgroundupload
 
 import android.content.BroadcastReceiver
 import android.content.Context
