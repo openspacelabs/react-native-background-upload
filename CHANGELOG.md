@@ -1,3 +1,16 @@
+## 8.1.0
+
+Added `android.noNotification`, which uploads a file without posting a progress
+notification. An app that uploads housekeeping payloads alongside user-visible
+ones can now keep the notification shade for the ones a user asked to watch.
+
+The notification doubles as the upload worker's foreground-service notification,
+so a silent upload runs as an ordinary background worker: the OS may defer it, or
+stop it mid-flight for WorkManager to re-run. It suits small payloads a restart
+costs nothing; media files should keep their notification. Default is `false`, so
+existing uploads are unaffected, including jobs enqueued by 8.0.0 and re-run
+after the upgrade.
+
 ## 8.0.0
 
 Reliability release. Terminal outcomes are now durable and accurately typed, the

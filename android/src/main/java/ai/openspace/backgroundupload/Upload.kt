@@ -23,7 +23,23 @@ data class Upload(
   val notificationTitleNoInternet: String,
   val notificationTitleNoWifi: String,
   val notificationChannel: String,
+  /**
+   * Suppresses the progress notification for this upload.
+   *
+   * The notification is not decoration: posting one is what lets the worker run
+   * in foreground mode, which is how a long-running worker survives Doze and
+   * memory pressure. A suppressed upload is an ordinary background worker, so
+   * the OS may defer it or stop it mid-flight for WorkManager to re-run later.
+   * Suppress only payloads small enough that a restart costs nothing.
+   *
+   * An opt-out rather than an opt-in so that absence means "notify": this model
+   * is serialized into WorkManager's database, and a job enqueued by a build
+   * that predates the option can be replayed by a build that has it.
+   */
+  val noNotification: Boolean,
 ) {
+  val showsNotification get() = !noNotification
+
   class MissingOptionException(optionName: String) :
     IllegalArgumentException("Missing '$optionName'")
 
@@ -60,6 +76,8 @@ data class Upload(
         ?: "Waiting for Wi-Fi…",
       notificationChannel = map.getString(Upload::notificationChannel.name)
         ?: DEFAULT_NOTIFICATION_CHANNEL,
+      noNotification = if (map.hasKey(Upload::noNotification.name))
+        map.getBoolean(Upload::noNotification.name) else false,
     )
   }
 }

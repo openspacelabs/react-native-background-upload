@@ -103,6 +103,16 @@ export type AndroidOnlyUploadOptions = {
   // Only retry IO and other unknown issues.
   // Network failure does not count towards retries
   maxRetries?: number;
+  /**
+   * Uploads this file without a progress notification. Default false.
+   *
+   * The notification is what puts the upload's worker in foreground mode, which
+   * is how it survives Doze and memory pressure, so a silent upload is easier
+   * for the OS to defer or stop and re-run. Reserve it for payloads small enough
+   * that a restart costs nothing, and keep it off for anything a user would
+   * expect to see progress for.
+   */
+  noNotification?: boolean;
 };
 
 export type RawUploadOptions = {

@@ -128,7 +128,21 @@ Starts an upload; resolves to its id. Rejects only on a bad option (missing/inva
 | `customUploadId` | string | Defaults to a generated UUID. |
 | `wifiOnly` | boolean | Wait for wifi before/while uploading. |
 | `acceptStatus` | number[] | Non-2xx statuses to treat as success. |
-| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `maxRetries` (default 5). Sensible defaults + auto-created channel if omitted. |
+| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `maxRetries` (default 5), `noNotification` (default false). Sensible defaults + auto-created channel if omitted. |
+
+#### Silent uploads (Android)
+
+`android: { noNotification: true }` uploads a file without posting a progress
+notification, so the shade only shows the uploads a user actually asked to watch.
+
+That notification is also the worker's foreground-service notification, so a
+silent upload runs as an ordinary background worker instead. The OS is then free
+to defer it, or to stop it mid-flight and let WorkManager re-run it later. Keep
+the notification for anything that takes real time to upload; reserve
+`noNotification` for small payloads a restart would cost nothing.
+
+Uploads sharing a `notificationId` share one notification, and its progress bar
+reports every in-flight upload — silent ones included.
 
 ### `cancelUpload(uploadId): Promise<boolean>`
 Cancels an upload. Fires a `cancelled` event with `cancelReason: 'user'`.
