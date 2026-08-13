@@ -83,14 +83,18 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
     // initialization, errors thrown here won't be retried
     try {
-      // The foreground notification needs a channel to exist first, or posting
-      // it silently fails and setForeground can crash on newer Android.
-      ensureNotificationChannel()
-      // `setForeground` is recommended for long-running workers.
-      // Foreground mode helps prioritize the worker, reducing the risk
-      // of it being killed during low memory or Doze/App Standby situations.
-      // ⚠️ This should be called in the foreground
-      setForeground(getForegroundInfo())
+      // An upload that suppresses its notification cannot enter foreground mode,
+      // since the notification is the foreground service's own notification.
+      if (upload.showsNotification) {
+        // The foreground notification needs a channel to exist first, or posting
+        // it silently fails and setForeground can crash on newer Android.
+        ensureNotificationChannel()
+        // `setForeground` is recommended for long-running workers.
+        // Foreground mode helps prioritize the worker, reducing the risk
+        // of it being killed during low memory or Doze/App Standby situations.
+        // ⚠️ This should be called in the foreground
+        setForeground(getForegroundInfo())
+      }
     } catch (error: Throwable) {
       if (!checkAndHandleCancellation()) handleError(error)
       throw error
@@ -163,6 +167,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun handleProgress(bytesSentTotal: Long, fileSize: Long) {
     UploadProgress.set(upload.id, bytesSentTotal)
     EventReporter.progress(upload.id, bytesSentTotal, fileSize)
+    updateNotification()
+  }
+
+  // Redraws the progress notification. A no-op for a suppressed upload — the
+  // worker never posted one, and `notify` would create it outside foreground mode.
+  private fun updateNotification() {
+    if (!upload.showsNotification) return
     notificationManager.notify(upload.notificationId, buildNotification())
   }
 
@@ -283,7 +294,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   private fun validateAndReportConnectivity(): Boolean {
     this.connectivity = validateConnectivity(context, upload.wifiOnly)
     // alert connectivity mode
-    notificationManager.notify(upload.notificationId, buildNotification())
+    updateNotification()
     return this.connectivity == Connectivity.Ok
   }
 
