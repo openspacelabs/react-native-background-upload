@@ -79,6 +79,13 @@
   [RNBackgroundUpload.shared startUpload:options resolve:resolve reject:reject];
 }
 
+- (void)startChunkedUpload:(NSDictionary *)options
+                   resolve:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared startChunkedUpload:options resolve:resolve reject:reject];
+}
+
 - (void)cancelUpload:(NSString *)id
              resolve:(RCTPromiseResolveBlock)resolve
               reject:(RCTPromiseRejectBlock)reject
@@ -86,20 +93,11 @@
   [RNBackgroundUpload.shared cancelUpload:id resolve:resolve reject:reject];
 }
 
-// Chunked transport lands in the iOS engine change; until then the spec
-// contract is met by rejecting.
-- (void)startChunkedUpload:(NSDictionary *)options
-                   resolve:(RCTPromiseResolveBlock)resolve
-                    reject:(RCTPromiseRejectBlock)reject
-{
-  reject(@"E_NOT_IMPLEMENTED", @"Chunked uploads are not implemented in this build", nil);
-}
-
 - (void)removeUpload:(NSString *)id
              resolve:(RCTPromiseResolveBlock)resolve
               reject:(RCTPromiseRejectBlock)reject
 {
-  reject(@"E_NOT_IMPLEMENTED", @"removeUpload is not implemented in this build", nil);
+  [RNBackgroundUpload.shared removeUpload:id resolve:resolve reject:reject];
 }
 
 - (void)getUnacknowledgedEvents:(RCTPromiseResolveBlock)resolve
