@@ -1,35 +1,19 @@
 package ai.openspace.backgroundupload
 
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
-import android.net.NetworkCapabilities.TRANSPORT_WIFI
-import android.os.Build
-import android.widget.RemoteViews
-import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.io.File
 import java.io.IOException
 import java.net.UnknownHostException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-
-// All workers will start `doWork` immediately but only 1 request is active at a time.
-private const val MAX_CONCURRENCY = 1
 
 // Retry delay
 private val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
@@ -38,24 +22,6 @@ private val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
 // or flaky-network IO resets the budget. The retry policy is internal to the
 // library. It is not an option.
 private const val MAX_RETRIES = 5
-
-// Max total time for a single request to complete
-// This is 24hrs so plenty of time for large uploads
-// Worst case is the time maxes out and the upload gets restarted.
-// Not using unlimited time to prevent unexpected behaviors.
-private const val REQUEST_TIMEOUT = 24L
-private val REQUEST_TIMEOUT_UNIT = TimeUnit.HOURS
-
-// Control max concurrent requests using semaphore to instead of using
-// `maxConnectionsCount` in HttpClient as the latter introduces a delay between requests
-private val semaphore = Semaphore(MAX_CONCURRENCY)
-
-// Use Okhttp as it provides the most standard behaviors even though it's not coroutine friendly
-private val client = OkHttpClient.Builder()
-  .callTimeout(REQUEST_TIMEOUT, REQUEST_TIMEOUT_UNIT)
-  .build()
-
-private enum class Connectivity { NoWifi, NoInternet, Ok }
 
 class UploadWorker(private val context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -88,7 +54,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     // However, the only way it has errors is the implementation is incorrect,
     // which can be caught in development
     val paramsJson = inputData.getString(PARAMS_KEY) ?: throw Throwable("No Params")
-    upload = Gson().fromJson(paramsJson, Upload::class.java)
+    // normalized(): an older build can have enqueued this job, and its JSON
+    // shape can make non-null fields null (Gson does not use the constructor).
+    // See Upload.normalized.
+    upload = Gson().fromJson(paramsJson, Upload::class.java).normalized()
 
     // initialization, errors thrown here won't be retried
     try {
@@ -97,7 +66,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       if (upload.showsNotification) {
         // The foreground notification needs a channel to exist first, or posting
         // it silently fails and setForeground can crash on newer Android.
-        ensureNotificationChannel()
+        ensureNotificationChannel(notificationManager, config)
         // `setForeground` is recommended for long-running workers.
         // Foreground mode helps prioritize the worker, reducing the risk
         // of it being killed during low memory or Doze/App Standby situations.
@@ -105,8 +74,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         setForeground(getForegroundInfo())
       }
     } catch (error: Throwable) {
-      if (!checkAndHandleCancellation()) handleError(error)
-      throw error
+      if (!isForegroundStartDenied(error)) {
+        if (!checkAndHandleCancellation()) handleError(error)
+        throw error
+      }
+      // The app is in the background on API 31+ (see isForegroundStartDenied).
+      // Continue the upload without foreground priority. Do not fail an upload
+      // that can run.
     }
 
 
@@ -122,11 +96,12 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
         // which cancels the delay immediately and throws CancellationException.
         // - Linear backoff instead of exponential. One reason for this is we retry on
         // invalid connections. Exponential will take too long.
-        // - We only retry transport failures here (no response). Any HTTP response,
-        // including 4xx/5xx, is terminal at this layer: handleResponse classifies it
-        // (2xx/acceptStatus -> completed, else http error) and the worker returns
-        // without retrying. Response-code-based retry policy is the JS queue's job.
-        // This is consistent with iOS behavior.
+        // - We retry only transport failures here (no response). An HTTP
+        // response, 4xx and 5xx included, is terminal at this layer.
+        // handleResponse classifies it (a 2xx or an accept rule -> completed,
+        // else an http error), and the worker returns without a retry. A
+        // response-code retry policy is the JS queue's job. This matches the
+        // iOS behavior.
         if (isRetried) delay(RETRY_DELAY)
         isRetried = true
 
@@ -157,10 +132,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     if (!validateAndReportConnectivity()) return null
 
     // wait for its turn to run
-    semaphore.acquire()
+    transferSemaphore.acquire()
 
     try {
-      return okhttpUpload(client, upload, file) { progress ->
+      return okhttpUpload(uploadHttpClient, upload, file) { progress ->
         handleProgress(progress, size)
       }
     } catch (error: Throwable) {
@@ -169,7 +144,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
       // pass the error to upper layer for retry decision
       throw error
     } finally {
-      semaphore.release()
+      transferSemaphore.release()
     }
   }
 
@@ -183,16 +158,20 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   // worker never posted one, and `notify` would create it outside foreground mode.
   private fun updateNotification() {
     if (!upload.showsNotification) return
-    notificationManager.notify(config.systemNotificationId, buildNotification())
+    notificationManager.notify(
+      config.systemNotificationId,
+      buildUploadNotification(context, config, connectivity),
+    )
   }
 
-  // An HTTP response came back. "completed" only for 2xx or a per-request
-  // acceptStatus code (axios validateStatus semantics — a 400 is an error, not a
-  // completion); anything else is a terminal http error carrying the full
-  // response. Either way the request finished, so the worker does not retry.
+  // An HTTP response came back. It is "completed" only for a 2xx or a matching
+  // accept rule (axios validateStatus semantics: a 400 is an error, not a
+  // completion). Every other response is a terminal http error that carries the
+  // full response. In both cases the request finished, so the worker does not
+  // retry.
   private fun handleResponse(response: UploadResponse) {
     UploadProgress.complete(upload.id)
-    val accepted = UploadOutcome.isAccepted(response.code, upload.acceptStatus)
+    val accepted = UploadOutcome.isAccepted(response.code, response.body, upload.accept)
     val (body, truncated) = EventJournal.capBody(response.body)
     journalAndEmit(
       EventJournal.Entry(
@@ -261,13 +240,8 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return true
   }
 
-  // Journal before emitting: the journal is the durable record (survives JS being
-  // dead); the live emit is best-effort. Both carry the identical payload, so a
-  // consumer can ack a live event by its eventId.
-  private fun journalAndEmit(entry: EventJournal.Entry) {
-    EventJournal.get(context).append(entry)
-    EventReporter.emit(entry)
-  }
+  private fun journalAndEmit(entry: EventJournal.Entry) =
+    EventReporter.journalAndEmit(context, entry)
 
   /** @return whether to retry */
   private fun checkRetry(error: Throwable): Boolean {
@@ -307,94 +281,6 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return this.connectivity == Connectivity.Ok
   }
 
-  // Makes sure that the channel for the foreground notification exists. It
-  // makes the channel only when the channel is absent. Thus a channel that the
-  // consumer registered, with their own name and importance, always wins. When
-  // configure() never set a channel, we use a default LOW-importance channel,
-  // and no notifee setup is necessary.
-  private fun ensureNotificationChannel() {
-    // minSdk is 29, so NotificationChannel (API 26) is always available.
-    if (notificationManager.getNotificationChannel(config.notificationChannel) != null) return
-    val channel = NotificationChannel(
-      config.notificationChannel,
-      "Uploads",
-      NotificationManager.IMPORTANCE_LOW,
-    )
-    notificationManager.createNotificationChannel(channel)
-  }
-
-  // builds the notification required to enable Foreground mode
-  fun buildNotification(): Notification {
-    val channel = config.notificationChannel
-    val progress = UploadProgress.total()
-    val progress2Decimals = "%.2f".format(progress)
-    val title = when (connectivity) {
-      Connectivity.NoWifi -> config.notificationTitleNoWifi
-      Connectivity.NoInternet -> config.notificationTitleNoInternet
-      Connectivity.Ok -> config.notificationTitle
-    }
-
-    // Custom layout for progress notification.
-    // The default hides the % text. This one shows it on the right,
-    // like most examples in various docs.
-    val content = RemoteViews(context.packageName, R.layout.notification)
-    content.setTextViewText(R.id.notification_title, title)
-    content.setTextViewText(R.id.notification_progress, "${progress2Decimals}%")
-    content.setProgressBar(R.id.notification_progress_bar, 100, progress.toInt(), false)
-
-    return NotificationCompat.Builder(context, channel).run {
-      // Starting Android 12, the notification shows up with a confusing delay of 10s.
-      // This fixes that delay.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-        foregroundServiceBehavior = Notification.FOREGROUND_SERVICE_IMMEDIATE
-
-      // Required by android. Here we use the system's default upload icon
-      setSmallIcon(android.R.drawable.stat_sys_upload)
-      // These prevent the notification from being force-dismissed or dismissed when pressed
-      setOngoing(true)
-      setAutoCancel(false)
-      // These help show the same custom content when the notification collapses and expands
-      setCustomContentView(content)
-      setCustomBigContentView(content)
-      // opens the app when the notification is pressed
-      setContentIntent(openAppIntent(context))
-      build()
-    }
-  }
-
-  override suspend fun getForegroundInfo(): ForegroundInfo {
-    val notification = buildNotification()
-    val id = config.systemNotificationId
-    // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
-    return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
-      ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    else
-      ForegroundInfo(id, notification)
-  }
-}
-
-// This is outside and synchronized to ensure consistent status across workers
-@Synchronized
-private fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
-  val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-  val network = manager.activeNetwork
-  val capabilities = manager.getNetworkCapabilities(network)
-
-  val hasInternet = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true
-
-  // not wifiOnly, return early
-  if (!wifiOnly) return if (hasInternet) Connectivity.Ok else Connectivity.NoInternet
-
-  // handle wifiOnly
-  return if (hasInternet && capabilities?.hasTransport(TRANSPORT_WIFI) == true)
-    Connectivity.Ok
-  else
-    Connectivity.NoWifi // don't return NoInternet here, more direct to request to join wifi
-}
-
-
-private fun openAppIntent(context: Context): PendingIntent? {
-  val intent = Intent(context, NotificationReceiver::class.java)
-  val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-  return PendingIntent.getBroadcast(context, "RNFileUpload-notification".hashCode(), intent, flags)
+  override suspend fun getForegroundInfo(): ForegroundInfo =
+    uploadForegroundInfo(config, buildUploadNotification(context, config, connectivity))
 }

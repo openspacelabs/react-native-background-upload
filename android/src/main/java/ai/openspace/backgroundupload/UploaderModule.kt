@@ -13,6 +13,9 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.google.gson.Gson
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 
@@ -114,7 +117,19 @@ class UploaderModule(context: ReactApplicationContext) :
   override fun ackEvents(ids: ReadableArray, promise: Promise) {
     try {
       val eventIds = (0 until ids.size()).mapNotNull { ids.getString(it) }
-      EventJournal.get(reactApplicationContext).ack(eventIds)
+      val journal = EventJournal.get(reactApplicationContext)
+      // An acknowledged 'completed' is the ONE moment when a chunked upload's
+      // manifest and moved bytes may be deleted. Every other terminal keeps
+      // them for a resume. Resolve which uploads those are before the entries
+      // are removed.
+      val completedUploadIds = journal.unacknowledged()
+        .filter { it.type == "completed" && eventIds.contains(it.eventId) }
+        .map { it.uploadId }
+      journal.ack(eventIds)
+      releaseAckedCompletions(
+        completedUploadIds,
+        ChunkedManifestStore.get(reactApplicationContext),
+      ) { id -> workManager.cancelUniqueWork(id) }
       promise.resolve(true)
     } catch (exc: Throwable) {
       Log.e(TAG, exc.message, exc)
@@ -124,30 +139,51 @@ class UploaderModule(context: ReactApplicationContext) :
 
 
   /**
-   * Enumerates uploads WorkManager still knows about, as [{ id, state }].
-   * WorkManager auto-prunes finished work after roughly a day, so this is for
-   * reconciling live/recent uploads — terminal outcomes must be read from
-   * getUnacknowledgedEvents, which is durable until acknowledged.
+   * Enumerates the uploads that WorkManager still knows about, as
+   * [{ id, state }]. Chunked uploads also carry the aggregate
+   * { bytesSent, totalBytes }, and they are listed from their durable
+   * manifests, even after WorkManager prunes finished work (in roughly a day).
+   * Terminal outcomes must be read from getUnacknowledgedEvents, which is
+   * durable until acknowledged.
    */
   override fun getAllUploads(promise: Promise) {
     try {
-      val infos = workManager.getWorkInfosByTag(WORKER_TAG).get()
+      val manifests = ChunkedManifestStore.get(reactApplicationContext).all()
+        .associateBy { it.id }
+      // Several WorkInfo rows can exist for one upload id. Finished chains
+      // linger until they are pruned (in roughly a day), and APPEND_OR_REPLACE
+      // resumes add rows. Thus the rows are grouped, and each id gets exactly
+      // ONE entry, like iOS (one row per upload, with the same state
+      // vocabulary).
+      val statesById = workManager.getWorkInfosByTag(WORKER_TAG).get()
+        .groupBy(
+          { info ->
+            info.tags.firstOrNull { it.startsWith(ID_TAG_PREFIX) }
+              ?.removePrefix(ID_TAG_PREFIX)
+          },
+          { it.state },
+        )
       val arr = Arguments.createArray()
-      for (info in infos) {
-        val id = info.tags.firstOrNull { it.startsWith(ID_TAG_PREFIX) }
-          ?.removePrefix(ID_TAG_PREFIX) ?: continue
+      for ((id, states) in statesById) {
+        if (id == null || id in manifests) continue
         arr.pushMap(Arguments.createMap().apply {
           putString("id", id)
+          putString("state", simpleUploadState(states))
+        })
+      }
+      // Chunked uploads are listed from their durable manifests, which outlive
+      // the WorkManager rows. Only a live row contributes (running or pending).
+      // A lingering finished row never speaks for a manifest that is really
+      // "finished, awaiting its ack" or "stalled, awaiting a startUpload
+      // resume".
+      for (manifest in manifests.values) {
+        arr.pushMap(Arguments.createMap().apply {
+          putString("id", manifest.id)
           putString(
             "state",
-            when (info.state) {
-              WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "pending"
-              WorkInfo.State.RUNNING -> "running"
-              WorkInfo.State.SUCCEEDED -> "completed"
-              WorkInfo.State.FAILED -> "error"
-              WorkInfo.State.CANCELLED -> "cancelled"
-            },
+            chunkedUploadState(statesById[manifest.id].orEmpty(), manifest.allAccepted),
           )
+          putChunkedBytes(manifest)
         })
       }
       promise.resolve(arr)
@@ -217,6 +253,138 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
 
+  /**
+   * Starts, or resumes, a chunked upload. It is idempotent against the durable
+   * [ChunkedManifest]. A first call takes ownership of the source file (an
+   * O(1) rename into the library's directory) and persists the manifest. A
+   * re-call with the same id reconciles instead: identical parts are required,
+   * the stored headers are replaced, and the accepted parts are skipped. Crash
+   * recovery, a resume after a stop, and a resume with fresh auth are all this
+   * same call.
+   */
+  override fun startChunkedUpload(options: ReadableMap, promise: Promise) {
+    try {
+      promise.resolve(enqueueChunkedUpload(options))
+    } catch (exc: Throwable) {
+      if (exc !is IllegalArgumentException) {
+        exc.printStackTrace()
+        Log.e(TAG, exc.message, exc)
+      }
+      promise.reject(exc)
+    }
+  }
+
+  private fun enqueueChunkedUpload(options: ReadableMap): String {
+    val store = ChunkedManifestStore.get(reactApplicationContext)
+    val id = options.getString("id")
+      ?: throw Upload.MissingOptionException("id")
+    val blob = store.blobFile(id)
+    val incoming = ChunkedManifest.fromReadableMap(
+      options,
+      sourcePath = blob.absolutePath,
+      createdAt = System.currentTimeMillis(),
+    )
+
+    // One atomic store operation, persisted BEFORE the work is enqueued. The
+    // manifest is what a worker relaunched with no JS runs from. The store
+    // lock spans load, reconcile, and save. Thus a running worker's
+    // markAccepted can never land between them and be erased. The running flag
+    // inside the lock is race-free too. A worker acquires ChunkedWorkerGate
+    // before its first manifest read. Thus it either registers first (and the
+    // recreate is rejected), or it reads the manifest that this call saved.
+    store.compute(id) { existing ->
+      if (existing == null) {
+        val path = options.getString("path") ?: throw Upload.MissingOptionException("path")
+        takeOwnership(File(path), blob)
+        incoming
+      } else {
+        // `path` is deliberately ignored here. When a manifest exists, the
+        // owned bytes are the source of truth.
+        existing.reconcile(
+          incoming,
+          running = ChunkedWorkerGate.isRunning(id),
+          blobSize = File(existing.sourcePath).length(),
+        )
+      }
+    }
+
+    // The stale-mark reasoning is the same as in enqueueUpload.
+    UserCancellations.consume(id)
+
+    // A queued successor (an unfinished row that is not RUNNING) already
+    // guarantees a run after the current one finishes. An appended second run
+    // would only stack duplicate no-op runs. The manifest reconcile above
+    // still landed. That is how this call's fresh headers reach the queued
+    // run.
+    val states = workManager.getWorkInfosForUniqueWork(id).get().map { it.state }
+    if (hasQueuedSuccessor(states)) return id
+
+    val request = OneTimeWorkRequestBuilder<ChunkedUploadWorker>()
+      .addTag(WORKER_TAG)
+      .addTag(ID_TAG_PREFIX + id)
+      .setInputData(workDataOf(ChunkedUploadWorker.ID_KEY to id))
+      .build()
+
+    // APPEND_OR_REPLACE, not KEEP. A worker journals its terminal error before
+    // doWork returns. Thus a consumer that resumes from the error handler can
+    // arrive while that run's row is still RUNNING. KEEP would silently drop
+    // the resume, and nothing would ever run it. An append keeps the runs
+    // strictly sequential, and a trailing run over an already-settled manifest
+    // is a clean no-op (see ChunkedEngine.startAction). Appended work is a
+    // chain DEPENDENT: WorkManager marks the dependents of a failed
+    // prerequisite FAILED without a run. That is why ChunkedUploadWorker
+    // always returns Result.success(), even after it journals a terminal error
+    // (see terminalErrorResult). The OR_REPLACE half only rescues enqueues
+    // that arrive AFTER the chain already settled failed or cancelled: it
+    // starts a fresh sequence. A re-call while the worker runs still never
+    // restarts it. The running worker re-reads the stored manifest before
+    // every part attempt, so a resume's fresh headers reach it.
+    workManager
+      .beginUniqueWork(id, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+      .enqueue()
+
+    return id
+  }
+
+  private fun takeOwnership(source: File, blob: File) {
+    if (!source.exists()) {
+      // A crash between the rename and the manifest save leaves the bytes at
+      // the blob path with no manifest. Adopt them. Do not fail the retry.
+      if (blob.exists()) return
+      throw IllegalArgumentException("chunked source file does not exist: ${source.path}")
+    }
+    blob.parentFile?.mkdirs()
+    if (blob.exists()) blob.delete()
+    if (source.renameTo(blob)) return
+    // renameTo cannot cross filesystems. Files.move falls back to copy+delete.
+    Files.move(source.toPath(), blob.toPath(), StandardCopyOption.REPLACE_EXISTING)
+  }
+
+
+  /**
+   * Releases an upload's stored state. It cancels the scheduled or running
+   * work, then deletes the chunked manifest and the moved bytes. It is safe on
+   * any id. A simple upload has nothing stored, so the call reduces to the
+   * work cancel. There is deliberately no 'cancelled' event. This is an
+   * explicit release by the consumer, not an outcome that the consumer awaits.
+   */
+  override fun removeUpload(id: String, promise: Promise) {
+    try {
+      workManager.cancelUniqueWork(id)
+      // No user-cancel mark was set, so a running worker's stop handler
+      // reports nothing. The consume call clears a stale mark from a prior
+      // life.
+      UserCancellations.consume(id)
+      ChunkedManifestStore.get(reactApplicationContext).remove(id)
+      promise.resolve(null)
+    } catch (exc: Throwable) {
+      exc.printStackTrace()
+      Log.e(TAG, exc.message, exc)
+      promise.reject(exc)
+    }
+  }
+
+
   /*
    * Cancels file upload
    * Accepts upload ID as a first argument, this upload will be cancelled
@@ -224,10 +392,11 @@ class UploaderModule(context: ReactApplicationContext) :
    */
   override fun cancelUpload(id: String, promise: Promise) {
     try {
-      val active = workManager.getWorkInfosForUniqueWork(id).get()
-        .firstOrNull { !it.state.isFinished }
+      val activeStates = workManager.getWorkInfosForUniqueWork(id).get()
+        .map { it.state }
+        .filter { !it.isFinished }
 
-      if (active == null) {
+      if (activeStates.isEmpty()) {
         // Nothing to cancel. Drop any mark so a later upload reusing this id
         // can't be misreported as a user cancel.
         UserCancellations.consume(id)
@@ -236,26 +405,29 @@ class UploaderModule(context: ReactApplicationContext) :
         return
       }
 
-      // Record intent BEFORE cancelling so the worker's stop handler can tell
-      // this apart from a system stop and report cancelReason 'user'.
+      // Record the intent BEFORE the cancel. Then a running worker's stop
+      // handler can tell this apart from a system stop, and it reports
+      // cancelReason 'user'.
       UserCancellations.mark(id)
       workManager.cancelUniqueWork(id)
 
-      if (active.state == WorkInfo.State.ENQUEUED) {
-        // The worker never started, so it will never run its own stop handler and
-        // nothing else would ever report this cancellation — leaving a consumer
-        // awaiting this upload's outcome forever. Report it here instead, and
-        // consume the mark so it cannot leak.
+      if (cancelReportsFromModule(activeStates)) {
+        // No worker ever started: the rows are only ENQUEUED, or BLOCKED
+        // behind an appended chain. Thus no stop handler will ever run, and
+        // nothing else would ever report this cancellation. A consumer would
+        // then await this upload's outcome forever. Report it here instead,
+        // and consume the mark so it cannot leak.
         UserCancellations.consume(id)
-        val entry = EventJournal.Entry(
-          eventId = UUID.randomUUID().toString(),
-          uploadId = id,
-          type = "cancelled",
-          timestamp = System.currentTimeMillis(),
-          cancelReason = "user",
+        EventReporter.journalAndEmit(
+          reactApplicationContext,
+          EventJournal.Entry(
+            eventId = UUID.randomUUID().toString(),
+            uploadId = id,
+            type = "cancelled",
+            timestamp = System.currentTimeMillis(),
+            cancelReason = "user",
+          ),
         )
-        EventJournal.get(reactApplicationContext).append(entry)
-        EventReporter.emit(entry)
       }
 
       promise.resolve(true)
@@ -265,14 +437,82 @@ class UploaderModule(context: ReactApplicationContext) :
       promise.reject(exc)
     }
   }
+}
 
-  // The chunked transport arrives in the platform changes that follow this
-  // spec change. Until then, a rejection satisfies the codegen contract.
-  override fun startChunkedUpload(options: ReadableMap, promise: Promise) {
-    promise.reject("E_NOT_IMPLEMENTED", "Chunked uploads are not implemented in this build")
-  }
-
-  override fun removeUpload(id: String, promise: Promise) {
-    promise.reject("E_NOT_IMPLEMENTED", "removeUpload is not implemented in this build")
+/**
+ * Releases the uploads whose 'completed' events were just acknowledged. That
+ * is the ONE moment when a chunked upload's manifest and moved bytes may be
+ * deleted. The allAccepted guard protects a recreate: the id may have been
+ * RECREATED (a different parts array under the same id) and run again over
+ * these bytes. An ack of the old life's completion must not cancel that work,
+ * and it must not delete the blob under it. Simple uploads have no manifest
+ * and fall through untouched. A cancel of their unique work could kill an
+ * unrelated new upload that reuses the id.
+ */
+internal fun releaseAckedCompletions(
+  uploadIds: List<String>,
+  store: ChunkedManifestStore,
+  cancelWork: (String) -> Unit,
+) {
+  uploadIds.forEach { id ->
+    val manifest = store.load(id) ?: return@forEach
+    if (!manifest.allAccepted) return@forEach
+    // Cancel a still-enqueued trailing run BEFORE the delete. A worker that
+    // starts after the delete finds nothing. It exits silently, but there is
+    // no reason to run it at all.
+    cancelWork(id)
+    store.remove(id)
   }
 }
+
+/**
+ * Whether cancelUpload must journal and emit the 'cancelled' event itself.
+ * That is the case only when NO row is RUNNING. A never-started row (ENQUEUED,
+ * or BLOCKED as an appended chain's dependent) has no worker to run a stop
+ * handler. A RUNNING worker's stop handler owns the report, including a worker
+ * that still waits on the ChunkedWorkerGate.
+ */
+internal fun cancelReportsFromModule(unfinishedStates: List<WorkInfo.State>): Boolean =
+  unfinishedStates.isNotEmpty() && unfinishedStates.none { it == WorkInfo.State.RUNNING }
+
+/** An unfinished row that is not RUNNING: a queued run that did not start yet. */
+internal fun hasQueuedSuccessor(states: List<WorkInfo.State>): Boolean =
+  states.any { !it.isFinished && it != WorkInfo.State.RUNNING }
+
+// The aggregate byte fields for a chunked upload's snapshot. bytesSent counts
+// accepted parts only. That is the durable number, and it has meaning even in
+// a process where the worker does not run.
+private fun WritableMap.putChunkedBytes(manifest: ChunkedManifest) {
+  putDouble("bytesSent", manifest.acceptedBytes.toDouble())
+  putDouble("totalBytes", manifest.totalBytes.toDouble())
+}
+
+/**
+ * One state for a chunked upload id, from all its WorkInfo rows plus the
+ * durable manifest. A live row wins. With no live row, the manifest speaks.
+ * The state is never "cancelled". iOS getAllUploads has no lingering cancelled
+ * rows (a cancelled task leaves the session). And on Android, a cancelled
+ * chunked upload keeps its manifest. Its truthful state is
+ * stalled-awaiting-resume, that is, "error".
+ */
+internal fun chunkedUploadState(states: List<WorkInfo.State>, allAccepted: Boolean): String =
+  when {
+    WorkInfo.State.RUNNING in states -> "running"
+    states.any { !it.isFinished } -> "pending"
+    allAccepted -> "completed"
+    else -> "error"
+  }
+
+/**
+ * One state for a simple upload id, from all its WorkInfo rows. An id can have
+ * a lingering finished chain next to a live one. A live row wins. Otherwise
+ * the most conclusive finished state wins.
+ */
+internal fun simpleUploadState(states: List<WorkInfo.State>): String =
+  when {
+    WorkInfo.State.RUNNING in states -> "running"
+    states.any { !it.isFinished } -> "pending"
+    WorkInfo.State.SUCCEEDED in states -> "completed"
+    WorkInfo.State.FAILED in states -> "error"
+    else -> "cancelled"
+  }
