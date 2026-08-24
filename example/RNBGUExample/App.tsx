@@ -17,7 +17,6 @@ import {
   Button,
 } from 'react-native';
 import notifee, {AndroidImportance} from '@notifee/react-native';
-import {Colors} from 'react-native/Libraries/NewAppScreen';
 
 import Upload, {
   ChunkedUploadOptions,
@@ -261,6 +260,16 @@ const App = () => {
       </SafeAreaView>
     </>
   );
+};
+
+// The NewAppScreen template palette, inlined: the deep import
+// ('react-native/Libraries/NewAppScreen') is deprecated and unresolvable under
+// the RN typescript config's bundler moduleResolution.
+const Colors = {
+  lighter: '#F3F3F3',
+  white: '#FFF',
+  dark: '#444',
+  black: '#000',
 };
 
 const styles = StyleSheet.create({
