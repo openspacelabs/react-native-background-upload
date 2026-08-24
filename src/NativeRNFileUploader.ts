@@ -13,7 +13,16 @@ export interface Spec extends TurboModule {
   // iOS has no library notification.
   configure(options: CodegenTypes.UnsafeObject): void;
   startUpload(options: CodegenTypes.UnsafeObject): Promise<string>;
+  // Chunked uploads get their own entry point for two reasons. Codegen cannot
+  // model the raw/chunked discriminated union. And the native implementations
+  // share no parsing: startUpload dispatches one request, while
+  // startChunkedUpload creates or reconciles a durable part manifest. index.ts
+  // keeps the single public startUpload and routes on options.type.
+  startChunkedUpload(options: CodegenTypes.UnsafeObject): Promise<string>;
   cancelUpload(id: string): Promise<boolean>;
+  // Releases the manifest and the bytes of a non-completed upload. A completed
+  // upload releases itself when you acknowledge its terminal event.
+  removeUpload(id: string): Promise<void>;
   getUnacknowledgedEvents(): Promise<CodegenTypes.UnsafeObject[]>;
   ackEvents(ids: string[]): Promise<boolean>;
   getAllUploads(): Promise<CodegenTypes.UnsafeObject[]>;

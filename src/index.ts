@@ -6,14 +6,17 @@ import type { EventSubscription } from 'react-native';
 import NativeRNFileUploader from './NativeRNFileUploader';
 import {
   AddListener,
+  ChunkedUploadOptions,
   ConfigureOptions,
   JournaledEvent,
+  StartUploadOptions,
   UploadId,
-  UploadOptions,
   UploadSnapshot,
 } from './types';
+import { chunkPlan } from './chunkPlan';
 
 export * from './types';
+export * from './chunkPlan';
 
 const fileURIPrefix = 'file://';
 
@@ -29,28 +32,114 @@ const configure = ({ android }: ConfigureOptions): void => {
   NativeRNFileUploader.configure({ ...android });
 };
 
-/**
- * Starts uploading a file to an HTTP endpoint. See UploadOptions for the full
- * option set (url, path, method, headers, wifiOnly, acceptStatus, android).
- * Returns a promise resolving to the upload's string id. Rejects only on a bad
- * option (e.g. missing/invalid url or path); transport failures and HTTP error
- * responses surface later as 'error' events, not a rejection here.
- */
-const startUpload = ({
-  path,
-  android,
-  ...options
-}: UploadOptions): Promise<UploadId> => {
+const normalizePath = (path: string): string => {
   if (!path.startsWith(fileURIPrefix)) {
     path = fileURIPrefix + path;
   }
+  // Android native takes a plain filesystem path. iOS takes a file:// URL.
+  return Platform.OS === 'android' ? path.replace(fileURIPrefix, '') : path;
+};
 
-  if (Platform.OS === 'android') {
-    path = path.replace(fileURIPrefix, '');
+// Reject malformed chunked input before it crosses the bridge. Then native
+// never creates a manifest for an upload that cannot complete.
+const validateChunkedOptions = (options: ChunkedUploadOptions): void => {
+  if (!options.id) {
+    throw new Error('startUpload: a chunked upload requires a non-empty id');
+  }
+  if (!Array.isArray(options.parts) || options.parts.length === 0) {
+    throw new Error('startUpload: parts must be a non-empty array');
+  }
+  // The parts must tile the file from byte 0. They must be sorted in
+  // ascending order, with no gaps and no overlaps. Each plan from chunkPlan
+  // obeys this by construction.
+  let expectedStart = 0;
+  options.parts.forEach(({ url, headers, range }, i) => {
+    if (typeof url !== 'string' || url.length === 0) {
+      throw new Error(`startUpload: parts[${i}].url must be a non-empty string`);
+    }
+    if (
+      headers !== undefined &&
+      (typeof headers !== 'object' ||
+        headers === null ||
+        Array.isArray(headers))
+    ) {
+      throw new Error(
+        `startUpload: parts[${i}].headers must be a plain object when present`,
+      );
+    }
+    if (
+      !range ||
+      !Number.isInteger(range.start) ||
+      !Number.isInteger(range.end) ||
+      range.start < 0 ||
+      range.start >= range.end
+    ) {
+      throw new Error(
+        `startUpload: parts[${i}].range must satisfy 0 <= start < end, got ${JSON.stringify(
+          range,
+        )}`,
+      );
+    }
+    if (range.start !== expectedStart) {
+      throw new Error(
+        i === 0
+          ? `startUpload: parts[0].range.start must be 0, got ${range.start}`
+          : `startUpload: parts must be sorted ascending and tile the file with no gaps or overlaps — parts[${i}].range.start is ${range.start} but parts[${i - 1}].range.end is ${expectedStart}`,
+      );
+    }
+    expectedStart = range.end;
+  });
+  if (!Number.isFinite(options.expiresAt) || options.expiresAt <= 0) {
+    throw new Error(
+      `startUpload: expiresAt must be a finite epoch-ms timestamp, got ${options.expiresAt}`,
+    );
+  }
+};
+
+/**
+ * Starts an upload to an HTTP endpoint. The behavior depends on options.type.
+ * 'raw' sends the whole file as one request body. 'chunked' sends the parts
+ * that the consumer authored (see ChunkedUploadOptions). Returns a promise
+ * that resolves to the upload's string id. Malformed chunked input throws
+ * synchronously. Other bad options (for example, a missing or invalid url or
+ * path) reject. Transport failures and HTTP error responses arrive later as
+ * 'error' events.
+ *
+ * A new call with the same id and identical parts is never an error, at any
+ * time. The library reconciles: it skips the parts that the server accepted,
+ * and the other parts continue with the new call's headers. A call with a
+ * different parts array is a recreate. The library accepts a recreate when
+ * the upload is stopped, and replaces the bytes. It rejects a recreate while
+ * the upload runs.
+ */
+const startUpload = (options: StartUploadOptions): Promise<UploadId> => {
+  if (options.type === 'chunked') {
+    validateChunkedOptions(options);
+    const { path, android, ...rest } = options;
+    return NativeRNFileUploader.startChunkedUpload({
+      ...rest,
+      ...android,
+      path: normalizePath(path),
+    });
   }
 
-  return NativeRNFileUploader.startUpload({ ...options, ...android, path });
+  const { path, android, ...rest } = options;
+  return NativeRNFileUploader.startUpload({
+    ...rest,
+    ...android,
+    path: normalizePath(path),
+  });
 };
+
+/**
+ * Releases an upload's native manifest and bytes. Each terminal outcome other
+ * than an acknowledged 'completed' (expired, error, cancelled) keeps both.
+ * This lets the consumer resume or recreate the upload. Call this function
+ * when you want neither. On a raw upload id, it cancels the in-flight request
+ * and deliberately emits no terminal event.
+ */
+const removeUpload = (uploadId: string): Promise<void> =>
+  NativeRNFileUploader.removeUpload(uploadId);
 
 /**
  * Cancels active upload by string ID of the upload.
@@ -101,7 +190,7 @@ const addListener = ((
  * startup, process each, then acknowledge — unacknowledged events are re-delivered
  * here on every call until you ack them.
  *
- * Note: `completed` fires only for 2xx (or a request's `acceptStatus`); other HTTP
+ * Note: `completed` fires only for 2xx (or a request's `accept` rules); other HTTP
  * responses arrive as `error` with `errorKind: 'http'` and the response attached.
  */
 const getUnacknowledgedEvents = async (): Promise<JournaledEvent[]> =>
@@ -134,9 +223,11 @@ export default {
   configure,
   startUpload,
   cancelUpload,
+  removeUpload,
   addListener,
   getUnacknowledgedEvents,
   ackEvents,
   getAllUploads,
+  chunkPlan,
   android,
 };
