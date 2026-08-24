@@ -13,7 +13,6 @@ class UploadTest {
     url = "https://example.com/upload",
     path = "/tmp/file",
     method = "POST",
-    maxRetries = 5,
     wifiOnly = false,
     acceptStatus = listOf(),
     headers = mapOf(),

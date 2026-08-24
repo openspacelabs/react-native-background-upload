@@ -70,10 +70,10 @@ const options = {
 
 const uploadId = await Upload.startUpload(options);
 
-Upload.addListener('progress', uploadId, ({ progress }) => {});
-Upload.addListener('completed', uploadId, ({ responseCode, responseBody }) => {});
-Upload.addListener('error', uploadId, ({ error, errorKind, responseCode }) => {});
-Upload.addListener('cancelled', uploadId, ({ cancelReason }) => {});
+Upload.addListener('progress', ({ id, progress }) => {});
+Upload.addListener('completed', ({ id, responseCode, responseBody }) => {});
+Upload.addListener('error', ({ id, error, errorKind, responseCode }) => {});
+Upload.addListener('cancelled', ({ id, cancelReason }) => {});
 ```
 
 # Reliable delivery
@@ -116,7 +116,9 @@ All methods are on the default export.
 ### `startUpload(options): Promise<string>`
 Starts an upload; resolves to its id. Rejects only on a bad option (missing/invalid
 `url` or `path`) — transport failures and HTTP error responses arrive later as
-`error` events, not a rejection.
+`error` events, not a rejection. Idempotent for a given `id`: calling
+it again while that upload is pending or running resolves with the same id instead
+of starting a duplicate.
 
 | Option | Type | Notes |
 | --- | --- | --- |
@@ -125,10 +127,10 @@ Starts an upload; resolves to its id. Rejects only on a bad option (missing/inva
 | `type` | `'raw'` | Only `raw` is supported. |
 | `method` | string | Default `POST`. |
 | `headers` | object | HTTP headers. |
-| `customUploadId` | string | Defaults to a generated UUID. |
+| `id` | string | Defaults to a generated UUID. |
 | `wifiOnly` | boolean | Wait for wifi before/while uploading. |
 | `acceptStatus` | number[] | Non-2xx statuses to treat as success. |
-| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `maxRetries` (default 5), `noNotification` (default false). Sensible defaults + auto-created channel if omitted. |
+| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `noNotification` (default false). Sensible defaults + auto-created channel if omitted. |
 
 #### Silent uploads (Android)
 
@@ -147,9 +149,9 @@ reports every in-flight upload — silent ones included.
 ### `cancelUpload(uploadId): Promise<boolean>`
 Cancels an upload. Fires a `cancelled` event with `cancelReason: 'user'`.
 
-### `addListener(eventType, uploadId | null, listener): EventSubscription`
-Listen for `'progress' | 'error' | 'completed' | 'cancelled'`. Pass `null` for
-`uploadId` to receive events for all uploads. Call `.remove()` on the result to
+### `addListener(eventType, listener): EventSubscription`
+Listen for `'progress' | 'error' | 'completed' | 'cancelled'` across all uploads;
+every event carries the upload's `id`. Call `.remove()` on the result to
 unsubscribe.
 
 ### `getUnacknowledgedEvents(): Promise<JournaledEvent[]>`
@@ -160,10 +162,6 @@ Removes journaled events once processed.
 
 ### `getAllUploads(): Promise<UploadSnapshot[]>`
 Uploads the OS still knows about, for boot-time reconciliation.
-
-### `ios.getUploadStatus(uploadId)`
-iOS-only live task state (`running | suspended | canceling`, plus byte counts), or
-`undefined` if the task isn't active.
 
 ### `android.addNotificationListener(listener)`
 Fires when the Android progress notification is pressed. No event data.

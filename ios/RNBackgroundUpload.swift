@@ -183,16 +183,47 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // RN bridges a JS number[] to NSArray<NSNumber>; map explicitly rather than
     // rely on an [Int] bridging cast that can yield nil and silently drop it.
     let acceptStatus = (options["acceptStatus"] as? [NSNumber])?.map { $0.intValue } ?? []
-    let uploadId = (options["customUploadId"] as? String) ?? UUID().uuidString
+    let uploadId = (options["id"] as? String) ?? UUID().uuidString
     let fileURL = URL(string: path) ?? URL(fileURLWithPath: path)
 
     let session = self.session(wifiOnly: wifiOnly)
-    let task = session.uploadTask(with: request, fromFile: fileURL)
-    task.taskDescription = uploadId
-    TaskMap.set(TaskMap.Meta(id: uploadId, acceptStatus: acceptStatus),
-                forKey: taskMapKey(session, task))
-    task.resume()
-    resolve(uploadId)
+    let startNew = {
+      let task = session.uploadTask(with: request, fromFile: fileURL)
+      task.taskDescription = uploadId
+      TaskMap.set(TaskMap.Meta(id: uploadId, acceptStatus: acceptStatus),
+                  forKey: self.taskMapKey(session, task))
+      task.resume()
+      resolve(uploadId)
+    }
+
+    // A consumer-supplied id makes startUpload idempotent. This is the same
+    // behavior as Android's ExistingWorkPolicy.KEEP. If a task with this id is
+    // already pending or running, we resolve with that id. We do not enqueue a
+    // second task. We examine both sessions, because a new call can set a
+    // different wifiOnly value while the first task continues in its first
+    // session. A generated id cannot collide, so that path does not do the
+    // (asynchronous) task enumeration.
+    guard options["id"] != nil else { startNew(); return }
+
+    let group = DispatchGroup()
+    let foundLock = NSLock()
+    var exists = false
+    for s in activeSessions {
+      group.enter()
+      s.getAllTasks { tasks in
+        for task in tasks
+        where self.uploadId(s, task) == uploadId
+          && (task.state == .running || task.state == .suspended) {
+          foundLock.lock()
+          exists = true
+          foundLock.unlock()
+        }
+        group.leave()
+      }
+    }
+    group.notify(queue: .main) {
+      if exists { resolve(uploadId) } else { startNew() }
+    }
   }
 
   @objc(cancelUpload:resolve:reject:)
@@ -228,39 +259,13 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       foundLock.unlock()
       if !matched {
         // Nothing to cancel: drop the intent again so a later upload reusing this
-        // customUploadId isn't misattributed as a user cancel.
+        // id isn't misattributed as a user cancel.
         RNBackgroundUpload.lock.lock()
         RNBackgroundUpload.userCancelledIds.remove(cancelUploadId)
         RNBackgroundUpload.lock.unlock()
       }
       resolve(matched)
     }
-  }
-
-  @objc(getUploadStatus:resolve:reject:)
-  public func getUploadStatus(_ uploadId: String,
-                              resolve: @escaping RCTPromiseResolveBlock,
-                              reject: @escaping RCTPromiseRejectBlock) {
-    let sessions = activeSessions
-    let group = DispatchGroup()
-    let lock = NSLock()
-    var result: [String: Any]?
-    for session in sessions {
-      group.enter()
-      session.getAllTasks { tasks in
-        for task in tasks where self.uploadId(session, task) == uploadId {
-          lock.lock()
-          if result == nil {
-            result = ["state": self.stateString(task.state),
-                      "bytesSent": task.countOfBytesSent,
-                      "totalBytes": task.countOfBytesExpectedToSend]
-          }
-          lock.unlock()
-        }
-        group.leave()
-      }
-    }
-    group.notify(queue: .main) { resolve(result) }
   }
 
   @objc(getUnacknowledgedEvents:reject:)
@@ -388,7 +393,7 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // Consume the user-cancel intent on EVERY terminal outcome, not only the
     // cancelled branch. If cancelUpload lost the race with completion, the id
     // would otherwise linger for the life of the process and a later upload
-    // reusing that customUploadId would report a system cancel as a user cancel.
+    // reusing that id would report a system cancel as a user cancel.
     let userCancelled = RNBackgroundUpload.userCancelledIds.remove(id) != nil
     RNBackgroundUpload.lock.unlock()
 
@@ -466,16 +471,6 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       return "network"
     default:
       return "unknown"
-    }
-  }
-
-  private func stateString(_ state: URLSessionTask.State) -> String {
-    switch state {
-    case .running: return "running"
-    case .suspended: return "suspended"
-    case .canceling: return "canceling"
-    case .completed: return "completed"
-    @unknown default: return "running"
     }
   }
 }

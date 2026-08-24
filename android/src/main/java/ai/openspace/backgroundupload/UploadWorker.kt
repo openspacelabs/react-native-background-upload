@@ -34,6 +34,11 @@ private const val MAX_CONCURRENCY = 1
 // Retry delay
 private val RETRY_DELAY = TimeUnit.SECONDS.toMillis(10L)
 
+// The retry budget for errors that count (see checkRetry). A connectivity gap
+// or flaky-network IO resets the budget. The retry policy is internal to the
+// library. It is not an option.
+private const val MAX_RETRIES = 5
+
 // Max total time for a single request to complete
 // This is 24hrs so plenty of time for large uploads
 // Worst case is the time maxes out and the upload gets restarted.
@@ -287,7 +292,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     }
 
     retries = if (unlimitedRetry) 0 else retries + 1
-    return retries <= upload.maxRetries
+    return retries <= MAX_RETRIES
   }
 
   // Checks connection and alerts connection issues

@@ -8,7 +8,6 @@ jest.mock('react-native', () => {
   const nativeModule = {
     startUpload: jest.fn(async () => 'id-1'),
     cancelUpload: jest.fn(async () => true),
-    getUploadStatus: jest.fn(async () => null),
     getUnacknowledgedEvents: jest.fn(async () => [
       {
         eventId: 'e1',
@@ -58,10 +57,6 @@ describe('journal + query API', () => {
     const uploads = await Upload.getAllUploads();
     expect(uploads[0]).toEqual({ id: 'u1', state: 'running' });
   });
-
-  it('getUploadStatus maps a null result to undefined', async () => {
-    await expect(Upload.ios.getUploadStatus('u1')).resolves.toBeUndefined();
-  });
 });
 
 describe('startUpload', () => {
@@ -85,18 +80,18 @@ describe('startUpload', () => {
 
 describe('addListener', () => {
   it('subscribes to the matching codegen emitter', () => {
-    Upload.addListener('progress', null, jest.fn());
+    Upload.addListener('progress', jest.fn());
     expect(native.onProgress).toHaveBeenCalled();
   });
 
-  it('only invokes the listener for the matching upload id', () => {
+  it('delivers events for every upload', () => {
     const cb = jest.fn();
-    Upload.addListener('completed', 'u1', cb);
+    Upload.addListener('completed', cb);
     const handler = native.onCompleted.mock.calls.at(-1)![0] as (
       data: unknown,
     ) => void;
     handler({ id: 'u1', responseCode: 200 });
     handler({ id: 'someone-else', responseCode: 200 });
-    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb).toHaveBeenCalledTimes(2);
   });
 });
