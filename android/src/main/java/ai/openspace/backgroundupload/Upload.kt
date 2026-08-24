@@ -17,11 +17,6 @@ data class Upload(
   // terminal http error. Empty by default.
   val acceptStatus: List<Int>,
   val headers: Map<String, String>,
-  val notificationId: Int,
-  val notificationTitle: String,
-  val notificationTitleNoInternet: String,
-  val notificationTitleNoWifi: String,
-  val notificationChannel: String,
   /**
    * Suppresses the progress notification for this upload.
    *
@@ -43,8 +38,6 @@ data class Upload(
     IllegalArgumentException("Missing '$optionName'")
 
   companion object {
-    const val DEFAULT_NOTIFICATION_CHANNEL = "background-upload"
-
     fun fromReadableMap(map: ReadableMap) = Upload(
       id = map.getString(Upload::id.name) ?: UUID.randomUUID().toString(),
       url = map.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
@@ -62,18 +55,8 @@ data class Upload(
         }
         return@let map
       },
-      // Notification options are optional: the library supplies sensible defaults
-      // and creates its own channel, so consumers don't need any notifee plumbing.
-      notificationId = (map.getString(Upload::notificationId.name)
-        ?: DEFAULT_NOTIFICATION_CHANNEL).hashCode(),
-      notificationTitle = map.getString(Upload::notificationTitle.name)
-        ?: "Uploading…",
-      notificationTitleNoInternet = map.getString(Upload::notificationTitleNoInternet.name)
-        ?: "Waiting for connection…",
-      notificationTitleNoWifi = map.getString(Upload::notificationTitleNoWifi.name)
-        ?: "Waiting for Wi-Fi…",
-      notificationChannel = map.getString(Upload::notificationChannel.name)
-        ?: DEFAULT_NOTIFICATION_CHANNEL,
+      // The notification text and identity are not per-upload options. The
+      // worker reads them from the NotificationConfig that configure() saved.
       noNotification = if (map.hasKey(Upload::noNotification.name))
         map.getBoolean(Upload::noNotification.name) else false,
     )

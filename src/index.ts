@@ -6,6 +6,7 @@ import type { EventSubscription } from 'react-native';
 import NativeRNFileUploader from './NativeRNFileUploader';
 import {
   AddListener,
+  ConfigureOptions,
   JournaledEvent,
   UploadId,
   UploadOptions,
@@ -15,6 +16,18 @@ import {
 export * from './types';
 
 const fileURIPrefix = 'file://';
+
+/**
+ * One-time library configuration. Call it at app startup, before an upload
+ * starts. Android keeps the notification configuration in native storage. Thus
+ * a worker that WorkManager relaunches with no JS shows the same notification
+ * text. The call is optional: a field that you do not configure keeps the
+ * library default. Each call replaces the full configuration. The call does
+ * nothing on iOS, because iOS has no library notification.
+ */
+const configure = ({ android }: ConfigureOptions): void => {
+  NativeRNFileUploader.configure({ ...android });
+};
 
 /**
  * Starts uploading a file to an HTTP endpoint. See UploadOptions for the full
@@ -118,6 +131,7 @@ const android = {
 };
 
 export default {
+  configure,
   startUpload,
   cancelUpload,
   addListener,

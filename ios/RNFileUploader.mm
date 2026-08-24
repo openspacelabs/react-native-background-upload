@@ -66,6 +66,12 @@
 
 #pragma mark - Exported methods
 
+// configure() carries the Android notification configuration. iOS background
+// uploads have no library-owned notification. Thus there is nothing to save.
+- (void)configure:(NSDictionary *)options
+{
+}
+
 - (void)startUpload:(NSDictionary *)options
             resolve:(RCTPromiseResolveBlock)resolve
              reject:(RCTPromiseRejectBlock)reject

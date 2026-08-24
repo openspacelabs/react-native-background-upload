@@ -27,6 +27,7 @@ const TEST_FILE = `${RNFS.DocumentDirectoryPath}/1MB.bin`;
 const TEST_FILE_URL =
   'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
 const UPLOAD_URL = 'https://httpbin.org/post';
+const NOTIFICATION_CHANNEL = 'RNBGUExample';
 
 const App = () => {
   const [uploadId, setUploadId] = useState<string>();
@@ -34,6 +35,21 @@ const App = () => {
   const [testFileDownload, setTestFileDownload] = useState<
     'downloading' | 'downloaded'
   >();
+
+  useEffect(() => {
+    // One-time notification configuration. The library keeps it in native
+    // storage. Thus a headless WorkManager relaunch shows the same text. The
+    // call does nothing on iOS.
+    Upload.configure({
+      android: {
+        notificationId: NOTIFICATION_CHANNEL,
+        notificationTitle: NOTIFICATION_CHANNEL,
+        notificationTitleNoWifi: 'No wifi',
+        notificationTitleNoInternet: 'No internet',
+        notificationChannel: NOTIFICATION_CHANNEL,
+      },
+    });
+  }, []);
 
   useEffect(() => {
     Upload.addListener('progress', data => {
@@ -65,21 +81,13 @@ const App = () => {
   const onPressUpload = async () => {
     await notifee.requestPermission({alert: true, sound: true});
 
-    const channelId = 'RNBGUExample';
     await notifee.createChannel({
-      id: channelId,
-      name: channelId,
+      id: NOTIFICATION_CHANNEL,
+      name: NOTIFICATION_CHANNEL,
       importance: AndroidImportance.LOW,
     });
 
     const uploadOpts: UploadOptions = {
-      android: {
-        notificationId: channelId,
-        notificationTitle: channelId,
-        notificationTitleNoWifi: 'No wifi',
-        notificationTitleNoInternet: 'No internet',
-        notificationChannel: channelId,
-      },
       type: 'raw',
       url: UPLOAD_URL,
       path: TEST_FILE,

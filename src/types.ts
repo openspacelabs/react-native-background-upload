@@ -89,16 +89,12 @@ export type UploadOptions = {
   // duplicate-create conflicts are expected). Anything else non-2xx emits an
   // 'error' event with errorKind 'http'.
   acceptStatus?: number[];
-  // Optional: the library supplies notification defaults and creates its own channel.
+  // Android options that change behavior. Notification text is not a
+  // per-upload option. Set it one time with configure().
   android?: Partial<AndroidOnlyUploadOptions>;
 } & RawUploadOptions;
 
 export type AndroidOnlyUploadOptions = {
-  notificationId: string;
-  notificationTitle: string;
-  notificationTitleNoWifi: string;
-  notificationTitleNoInternet: string;
-  notificationChannel: string;
   /**
    * Uploads this file without a progress notification. Default false.
    *
@@ -113,6 +109,25 @@ export type AndroidOnlyUploadOptions = {
 
 export type RawUploadOptions = {
   type: 'raw';
+};
+
+/**
+ * The text and the identity of the Android upload progress notification. Set
+ * it one time with `configure()`. The library keeps it in native storage. Thus
+ * a worker that WorkManager relaunches with no JS shows the same text. A field
+ * that you omit keeps the library default.
+ */
+export type AndroidNotificationConfig = {
+  /** All uploads share one notification. Its progress bar is the total. */
+  notificationId: string;
+  notificationTitle: string;
+  notificationTitleNoWifi: string;
+  notificationTitleNoInternet: string;
+  notificationChannel: string;
+};
+
+export type ConfigureOptions = {
+  android?: Partial<AndroidNotificationConfig>;
 };
 
 export interface AddListener {

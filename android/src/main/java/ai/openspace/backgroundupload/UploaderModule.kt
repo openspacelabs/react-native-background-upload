@@ -158,6 +158,17 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
 
+  /**
+   * Saves the notification configuration (see [NotificationConfig]). Thus a
+   * worker that WorkManager relaunches with no JS can read it. Each call
+   * replaces the full configuration. An omitted field goes back to the library
+   * default.
+   */
+  override fun configure(options: ReadableMap) {
+    NotificationConfig.save(reactApplicationContext, NotificationConfig.fromReadableMap(options))
+  }
+
+
   /*
    * Starts a file upload.
    * Returns a promise with the string ID of the upload.

@@ -6,6 +6,7 @@
 jest.mock('react-native', () => {
   const subscription = { remove: jest.fn() };
   const nativeModule = {
+    configure: jest.fn(),
     startUpload: jest.fn(async () => 'id-1'),
     cancelUpload: jest.fn(async () => true),
     getUnacknowledgedEvents: jest.fn(async () => [
@@ -59,6 +60,18 @@ describe('journal + query API', () => {
   });
 });
 
+describe('configure', () => {
+  it('forwards the android notification config to native, flattened', () => {
+    Upload.configure({
+      android: { notificationTitle: 'Backing up…', notificationChannel: 'ch' },
+    });
+    expect(native.configure).toHaveBeenCalledWith({
+      notificationTitle: 'Backing up…',
+      notificationChannel: 'ch',
+    });
+  });
+});
+
 describe('startUpload', () => {
   it('prefixes the file path on iOS and forwards options', async () => {
     await Upload.startUpload({
@@ -75,6 +88,21 @@ describe('startUpload', () => {
         acceptStatus: [409],
       }),
     );
+  });
+
+  it('forwards android.noNotification but no notification text', async () => {
+    await Upload.startUpload({
+      url: 'https://example.com/up',
+      path: '/tmp/f.bin',
+      method: 'POST',
+      type: 'raw',
+      android: { noNotification: true },
+    });
+    const options = native.startUpload.mock.calls.at(-1)![0];
+    expect(options.noNotification).toBe(true);
+    // configure() owns the notification text. startUpload never carries it.
+    expect(options).not.toHaveProperty('notificationTitle');
+    expect(options).not.toHaveProperty('notificationId');
   });
 });
 
