@@ -80,13 +80,6 @@
   [RNBackgroundUpload.shared cancelUpload:id resolve:resolve reject:reject];
 }
 
-- (void)getUploadStatus:(NSString *)id
-                resolve:(RCTPromiseResolveBlock)resolve
-                 reject:(RCTPromiseRejectBlock)reject
-{
-  [RNBackgroundUpload.shared getUploadStatus:id resolve:resolve reject:reject];
-}
-
 - (void)getUnacknowledgedEvents:(RCTPromiseResolveBlock)resolve
                          reject:(RCTPromiseRejectBlock)reject
 {

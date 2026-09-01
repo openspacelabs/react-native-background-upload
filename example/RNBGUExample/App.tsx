@@ -36,16 +36,16 @@ const App = () => {
   >();
 
   useEffect(() => {
-    Upload.addListener('progress', null, data => {
+    Upload.addListener('progress', data => {
       setProgress(data.progress);
     });
-    Upload.addListener('error', null, data => {
+    Upload.addListener('error', data => {
       console.log('Error!', JSON.stringify(data));
     });
-    Upload.addListener('completed', null, data => {
+    Upload.addListener('completed', data => {
       console.log('Completed!', JSON.stringify(data));
     });
-    Upload.addListener('cancelled', null, data => {
+    Upload.addListener('cancelled', data => {
       console.log('Cancelled!', JSON.stringify(data));
     });
   }, []);

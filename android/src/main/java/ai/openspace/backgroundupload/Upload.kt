@@ -11,7 +11,6 @@ data class Upload(
   val url: String,
   val path: String,
   val method: String,
-  val maxRetries: Int,
   val wifiOnly: Boolean,
   // Non-2xx statuses to treat as a successful completion (e.g. [409] when
   // duplicate-create conflicts are expected). Everything else non-2xx is a
@@ -47,11 +46,10 @@ data class Upload(
     const val DEFAULT_NOTIFICATION_CHANNEL = "background-upload"
 
     fun fromReadableMap(map: ReadableMap) = Upload(
-      id = map.getString("customUploadId") ?: UUID.randomUUID().toString(),
+      id = map.getString(Upload::id.name) ?: UUID.randomUUID().toString(),
       url = map.getString(Upload::url.name) ?: throw MissingOptionException(Upload::url.name),
       path = map.getString(Upload::path.name) ?: throw MissingOptionException(Upload::path.name),
       method = map.getString(Upload::method.name) ?: "POST",
-      maxRetries = if (map.hasKey(Upload::maxRetries.name)) map.getInt(Upload::maxRetries.name) else 5,
       wifiOnly = if (map.hasKey(Upload::wifiOnly.name)) map.getBoolean(Upload::wifiOnly.name) else false,
       acceptStatus = map.getArray(Upload::acceptStatus.name)?.let { arr ->
         (0 until arr.size()).map { i -> arr.getInt(i) }

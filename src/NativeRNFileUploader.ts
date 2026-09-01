@@ -10,8 +10,6 @@ import { TurboModuleRegistry } from 'react-native';
 export interface Spec extends TurboModule {
   startUpload(options: CodegenTypes.UnsafeObject): Promise<string>;
   cancelUpload(id: string): Promise<boolean>;
-  // iOS returns { state, bytesSent, totalBytes }; Android returns null.
-  getUploadStatus(id: string): Promise<CodegenTypes.UnsafeObject | null>;
   getUnacknowledgedEvents(): Promise<CodegenTypes.UnsafeObject[]>;
   ackEvents(ids: string[]): Promise<boolean>;
   getAllUploads(): Promise<CodegenTypes.UnsafeObject[]>;

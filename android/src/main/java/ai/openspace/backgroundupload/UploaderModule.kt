@@ -158,16 +158,6 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
 
-  /**
-   * iOS-only: there is no per-task byte counter to read on Android, where uploads
-   * are WorkManager jobs rather than URLSession tasks. Use getAllUploads for
-   * liveness and the progress event for bytes.
-   */
-  override fun getUploadStatus(id: String, promise: Promise) {
-    promise.resolve(null)
-  }
-
-
   /*
    * Starts a file upload.
    * Returns a promise with the string ID of the upload.
@@ -192,7 +182,7 @@ class UploaderModule(context: ReactApplicationContext) :
     val upload = Upload.fromReadableMap(options)
     val data = Gson().toJson(upload)
 
-    // Clear any stale user-cancel mark for this (possibly reused customUploadId)
+    // Clear any stale user-cancel mark for this (possibly reused) id
     // from a prior life, so a later system stop of this fresh upload isn't
     // misreported as a user cancel. Done here (before enqueue), never in the
     // worker, so a real cancel arriving as the worker starts can't be erased.
@@ -227,8 +217,8 @@ class UploaderModule(context: ReactApplicationContext) :
         .firstOrNull { !it.state.isFinished }
 
       if (active == null) {
-        // Nothing to cancel. Drop any mark so a later upload reusing this
-        // customUploadId can't be misreported as a user cancel.
+        // Nothing to cancel. Drop any mark so a later upload reusing this id
+        // can't be misreported as a user cancel.
         UserCancellations.consume(id)
         promise.resolve(false)
 

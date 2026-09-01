@@ -53,8 +53,8 @@ const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
   NativeRNFileUploader.cancelUpload(cancelUploadId);
 
 /**
- * Listens for the given event on the given upload ID (resolved from startUpload).
- * If you don't supply a value for uploadId, the event will fire for all uploads.
+ * Listens for one event type across all uploads. Use `data.id` to identify
+ * the upload.
  * Events (id is always the upload ID):
  * progress - { id, progress: 0-100 }
  * error - { id, error, errorKind?, responseCode?, responseBody?, responseHeaders? }
@@ -63,30 +63,20 @@ const cancelUpload = (cancelUploadId: string): Promise<boolean> =>
  */
 const addListener = ((
   eventType: 'progress' | 'error' | 'completed' | 'cancelled',
-  uploadId: UploadId | null,
   // The payload shape varies per event; the public AddListener overloads carry
   // the precise contract, so the internal forwarder stays untyped.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   listener: (data: any) => void,
 ): EventSubscription => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const forMatchingUpload = (data: any) => {
-    // A scoped subscription drops anything it can't attribute, rather than
-    // failing open and delivering another upload's (or an unidentified) event.
-    if (!uploadId || data?.id === uploadId) {
-      listener(data);
-    }
-  };
-
   switch (eventType) {
     case 'progress':
-      return NativeRNFileUploader.onProgress(forMatchingUpload);
+      return NativeRNFileUploader.onProgress(listener);
     case 'error':
-      return NativeRNFileUploader.onError(forMatchingUpload);
+      return NativeRNFileUploader.onError(listener);
     case 'cancelled':
-      return NativeRNFileUploader.onCancelled(forMatchingUpload);
+      return NativeRNFileUploader.onCancelled(listener);
     case 'completed':
-      return NativeRNFileUploader.onCompleted(forMatchingUpload);
+      return NativeRNFileUploader.onCompleted(listener);
     default:
       throw new Error(`Unknown upload event: ${eventType}`);
   }
@@ -117,34 +107,6 @@ const ackEvents = (eventIds: string[]): Promise<boolean> =>
 const getAllUploads = async (): Promise<UploadSnapshot[]> =>
   (await NativeRNFileUploader.getAllUploads()) as UploadSnapshot[];
 
-const ios = {
-  /**
-   * Directly check the state of a single upload task without using event listeners.
-   * Note that this method has no way of distinguishing between a task being completed, errored, or non-existent.
-   * They're all `undefined`. You will need to either rely on the listeners or
-   * check with the API service you're using to upload.
-   *
-   * Android always resolves `undefined`.
-   */
-  getUploadStatus: async (
-    jobId: string,
-  ): Promise<
-    | {
-        state: 'running' | 'suspended' | 'canceling' | 'completed';
-        bytesSent: number;
-        totalBytes: number;
-      }
-    | undefined
-  > =>
-    ((await NativeRNFileUploader.getUploadStatus(jobId)) as
-      | {
-          state: 'running' | 'suspended' | 'canceling' | 'completed';
-          bytesSent: number;
-          totalBytes: number;
-        }
-      | null) ?? undefined,
-};
-
 const android = {
   /**
    * When the upload progress notification is pressed, it will open the app and fire this event.
@@ -162,6 +124,5 @@ export default {
   getUnacknowledgedEvents,
   ackEvents,
   getAllUploads,
-  ios,
   android,
 };

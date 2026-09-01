@@ -79,7 +79,7 @@ export type UploadOptions = {
   url: string;
   path: string;
   method: 'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE';
-  customUploadId?: string;
+  id?: string;
   headers?: {
     [index: string]: string;
   };
@@ -99,10 +99,6 @@ export type AndroidOnlyUploadOptions = {
   notificationTitleNoWifi: string;
   notificationTitleNoInternet: string;
   notificationChannel: string;
-  // Does not retry based on http code.
-  // Only retry IO and other unknown issues.
-  // Network failure does not count towards retries
-  maxRetries?: number;
   /**
    * Uploads this file without a progress notification. Default false.
    *
@@ -119,37 +115,21 @@ export type RawUploadOptions = {
   type: 'raw';
 };
 
-// TODO support this to replace netq
-// type MultipartUploadOptions = {
-//   type: 'multipart';
-//   field: string;
-//   parameters?: {
-//     [index: string]: string;
-//   };
-// };
-
 export interface AddListener {
   (
     event: 'progress',
-    uploadId: UploadId | null,
     callback: (data: ProgressData) => void,
   ): EventSubscription;
 
-  (
-    event: 'error',
-    uploadId: UploadId | null,
-    callback: (data: ErrorData) => void,
-  ): EventSubscription;
+  (event: 'error', callback: (data: ErrorData) => void): EventSubscription;
 
   (
     event: 'completed',
-    uploadId: UploadId | null,
     callback: (data: CompletedData) => void,
   ): EventSubscription;
 
   (
     event: 'cancelled',
-    uploadId: UploadId | null,
     callback: (data: CancelledData) => void,
   ): EventSubscription;
 }
