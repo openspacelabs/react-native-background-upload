@@ -8,6 +8,10 @@ import { TurboModuleRegistry } from 'react-native';
 // as UnsafeObject because codegen can't model index signatures, Partial<>, or
 // intersections. index.ts casts them back to the precise ./types shapes.
 export interface Spec extends TurboModule {
+  // One-time notification configuration. Android persists it, so a headless
+  // WorkManager relaunch (no JS) can read it. It does nothing on iOS, because
+  // iOS has no library notification.
+  configure(options: CodegenTypes.UnsafeObject): void;
   startUpload(options: CodegenTypes.UnsafeObject): Promise<string>;
   cancelUpload(id: string): Promise<boolean>;
   getUnacknowledgedEvents(): Promise<CodegenTypes.UnsafeObject[]>;

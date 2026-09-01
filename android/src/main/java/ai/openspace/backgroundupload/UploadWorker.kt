@@ -74,6 +74,10 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   }
 
   private lateinit var upload: Upload
+  // configure() saved this. The worker can read it when WorkManager relaunched
+  // the worker with no JS. It is lazy, so the SharedPreferences read occurs on
+  // the worker's IO dispatcher, not at construction.
+  private val config by lazy { NotificationConfig.load(context) }
   private var retries = 0
   private var connectivity = Connectivity.Ok
   private val notificationManager =
@@ -179,7 +183,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
   // worker never posted one, and `notify` would create it outside foreground mode.
   private fun updateNotification() {
     if (!upload.showsNotification) return
-    notificationManager.notify(upload.notificationId, buildNotification())
+    notificationManager.notify(config.systemNotificationId, buildNotification())
   }
 
   // An HTTP response came back. "completed" only for 2xx or a per-request
@@ -303,15 +307,16 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
     return this.connectivity == Connectivity.Ok
   }
 
-  // Ensures the channel used by the foreground notification exists. Only creates
-  // it when absent, so a channel the consumer registered themselves (with their
-  // own name/importance) always wins; when they pass nothing we fall back to a
-  // default LOW-importance channel and no notifee setup is required.
+  // Makes sure that the channel for the foreground notification exists. It
+  // makes the channel only when the channel is absent. Thus a channel that the
+  // consumer registered, with their own name and importance, always wins. When
+  // configure() never set a channel, we use a default LOW-importance channel,
+  // and no notifee setup is necessary.
   private fun ensureNotificationChannel() {
     // minSdk is 29, so NotificationChannel (API 26) is always available.
-    if (notificationManager.getNotificationChannel(upload.notificationChannel) != null) return
+    if (notificationManager.getNotificationChannel(config.notificationChannel) != null) return
     val channel = NotificationChannel(
-      upload.notificationChannel,
+      config.notificationChannel,
       "Uploads",
       NotificationManager.IMPORTANCE_LOW,
     )
@@ -320,13 +325,13 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   // builds the notification required to enable Foreground mode
   fun buildNotification(): Notification {
-    val channel = upload.notificationChannel
+    val channel = config.notificationChannel
     val progress = UploadProgress.total()
     val progress2Decimals = "%.2f".format(progress)
     val title = when (connectivity) {
-      Connectivity.NoWifi -> upload.notificationTitleNoWifi
-      Connectivity.NoInternet -> upload.notificationTitleNoInternet
-      Connectivity.Ok -> upload.notificationTitle
+      Connectivity.NoWifi -> config.notificationTitleNoWifi
+      Connectivity.NoInternet -> config.notificationTitleNoInternet
+      Connectivity.Ok -> config.notificationTitle
     }
 
     // Custom layout for progress notification.
@@ -359,7 +364,7 @@ class UploadWorker(private val context: Context, params: WorkerParameters) :
 
   override suspend fun getForegroundInfo(): ForegroundInfo {
     val notification = buildNotification()
-    val id = upload.notificationId
+    val id = config.systemNotificationId
     // Starting Android 14, FOREGROUND_SERVICE_TYPE_DATA_SYNC is mandatory, otherwise app will crash
     return if (Build.VERSION.SDK_INT > Build.VERSION_CODES.TIRAMISU)
       ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)

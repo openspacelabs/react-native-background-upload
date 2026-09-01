@@ -16,11 +16,6 @@ class UploadTest {
     wifiOnly = false,
     acceptStatus = listOf(),
     headers = mapOf(),
-    notificationId = 1,
-    notificationTitle = "Uploading…",
-    notificationTitleNoInternet = "Waiting for connection…",
-    notificationTitleNoWifi = "Waiting for Wi-Fi…",
-    notificationChannel = "background-upload",
     noNotification = noNotification,
   )
 

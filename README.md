@@ -63,10 +63,13 @@ const options = {
   // Optional. Treat these non-2xx statuses as success (e.g. an idempotent
   // create that conflicts). Any other non-2xx is an 'error' with errorKind 'http'.
   acceptStatus: [409],
-  // Optional on Android — the library supplies notification defaults and creates
-  // its own channel. Override any of these to customize.
-  android: { notificationTitle: 'Uploading…' },
 };
+
+// Optional. Call one time at app startup to set the Android notification text.
+// The library keeps the text in native storage. Thus a worker relaunched with
+// no JS shows the same text. If you do not call configure(), the library uses
+// default text and makes its own channel. The call does nothing on iOS.
+Upload.configure({ android: { notificationTitle: 'Uploading…' } });
 
 const uploadId = await Upload.startUpload(options);
 
@@ -113,6 +116,15 @@ Notes:
 
 All methods are on the default export.
 
+### `configure(options): void`
+One-time setup — call at app startup. `options.android` sets the upload
+notification's text and identity:
+`notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. The config is
+persisted natively, so a worker relaunched by WorkManager with no JS running
+shows the same text. Optional: omitted fields keep the library defaults (each
+call replaces the whole config). A no-op on iOS, which has no library
+notification.
+
 ### `startUpload(options): Promise<string>`
 Starts an upload; resolves to its id. Rejects only on a bad option (missing/invalid
 `url` or `path`) — transport failures and HTTP error responses arrive later as
@@ -130,7 +142,7 @@ of starting a duplicate.
 | `id` | string | Defaults to a generated UUID. |
 | `wifiOnly` | boolean | Wait for wifi before/while uploading. |
 | `acceptStatus` | number[] | Non-2xx statuses to treat as success. |
-| `android` | object | Optional. `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`, `noNotification` (default false). Sensible defaults + auto-created channel if omitted. |
+| `android` | object | Optional. `noNotification` (default false) — see Silent uploads. Notification text is set once via `configure()`, not per upload. |
 
 #### Silent uploads (Android)
 
@@ -143,8 +155,9 @@ to defer it, or to stop it mid-flight and let WorkManager re-run it later. Keep
 the notification for anything that takes real time to upload; reserve
 `noNotification` for small payloads a restart would cost nothing.
 
-Uploads sharing a `notificationId` share one notification, and its progress bar
-reports every in-flight upload — silent ones included.
+All uploads share one notification (identified by the configured
+`notificationId`), and its progress bar reports every in-flight upload — silent
+ones included.
 
 ### `cancelUpload(uploadId): Promise<boolean>`
 Cancels an upload. Fires a `cancelled` event with `cancelReason: 'user'`.
