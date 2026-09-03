@@ -11,8 +11,9 @@ struct JournaledEvent: Codable {
   var responseBodyTruncated: Bool?
   var responseHeaders: [String: String]?
   var error: String?
-  var errorKind: String?    // http | network | file | unknown
+  var errorKind: String?    // http | network | file | expired | unknown
   var cancelReason: String? // user | system
+  var partIndex: Int?       // chunked uploads only: the failing part, when known
 
   // Bridge-friendly dictionary (nil fields omitted so nothing becomes NSNull).
   var bridged: [String: Any] {
@@ -24,6 +25,7 @@ struct JournaledEvent: Codable {
     if let error { m["error"] = error }
     if let errorKind { m["errorKind"] = errorKind }
     if let cancelReason { m["cancelReason"] = cancelReason }
+    if let partIndex { m["partIndex"] = partIndex }
     return m
   }
 }
@@ -88,6 +90,10 @@ enum EventJournal {
   }
 
   static func unacknowledged() -> [[String: Any]] {
+    unacknowledgedEntries().map { $0.bridged }
+  }
+
+  static func unacknowledgedEntries() -> [JournaledEvent] {
     queue.sync {
       let files = (try? FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil)) ?? []
       return files
@@ -97,7 +103,6 @@ enum EventJournal {
           return try? JSONDecoder().decode(JournaledEvent.self, from: data)
         }
         .sorted { $0.timestamp < $1.timestamp }
-        .map { $0.bridged }
     }
   }
 
