@@ -265,4 +265,14 @@ class UploaderModule(context: ReactApplicationContext) :
       promise.reject(exc)
     }
   }
+
+  // The chunked transport arrives in the platform changes that follow this
+  // spec change. Until then, a rejection satisfies the codegen contract.
+  override fun startChunkedUpload(options: ReadableMap, promise: Promise) {
+    promise.reject("E_NOT_IMPLEMENTED", "Chunked uploads are not implemented in this build")
+  }
+
+  override fun removeUpload(id: String, promise: Promise) {
+    promise.reject("E_NOT_IMPLEMENTED", "removeUpload is not implemented in this build")
+  }
 }

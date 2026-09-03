@@ -12,6 +12,10 @@
     "strictNullChecks": true,
     "skipLibCheck": true,
     "noImplicitAny": true,
+    // Diana type-checks this package's shipped .ts sources with its own
+    // stricter configuration. Match that configuration here. Then breaks
+    // appear here, not in Diana.
+    "noUncheckedIndexedAccess": true,
     "noEmit": true,
     // Don't auto-include every @types/* in node_modules: src needs no ambient
     // types (it imports react-native's explicitly, and tests are excluded), and
