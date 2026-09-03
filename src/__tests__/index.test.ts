@@ -8,7 +8,9 @@ jest.mock('react-native', () => {
   const nativeModule = {
     configure: jest.fn(),
     startUpload: jest.fn(async () => 'id-1'),
+    startChunkedUpload: jest.fn(async () => 'id-2'),
     cancelUpload: jest.fn(async () => true),
+    removeUpload: jest.fn(async () => undefined),
     getUnacknowledgedEvents: jest.fn(async () => [
       {
         eventId: 'e1',
@@ -79,13 +81,13 @@ describe('startUpload', () => {
       path: '/tmp/f.bin',
       method: 'POST',
       type: 'raw',
-      acceptStatus: [409],
+      accept: [{ status: 409, bodyIncludes: 'already completed' }],
     });
     expect(native.startUpload).toHaveBeenCalledWith(
       expect.objectContaining({
         url: 'https://example.com/up',
         path: 'file:///tmp/f.bin',
-        acceptStatus: [409],
+        accept: [{ status: 409, bodyIncludes: 'already completed' }],
       }),
     );
   });
@@ -103,6 +105,139 @@ describe('startUpload', () => {
     // configure() owns the notification text. startUpload never carries it.
     expect(options).not.toHaveProperty('notificationTitle');
     expect(options).not.toHaveProperty('notificationId');
+  });
+});
+
+describe('startUpload (chunked)', () => {
+  const chunked = {
+    type: 'chunked' as const,
+    id: 'u1',
+    path: '/tmp/f.bin',
+    parts: [
+      {
+        url: 'https://example.com/up?partNum=1',
+        headers: { 'Content-Range': 'bytes 0-9/20' },
+        range: { start: 0, end: 10 },
+      },
+      {
+        url: 'https://example.com/up?partNum=2',
+        headers: { 'Content-Range': 'bytes 10-19/20' },
+        range: { start: 10, end: 20 },
+      },
+    ],
+    expiresAt: 1735689600000,
+  };
+
+  it('routes to startChunkedUpload, not startUpload', async () => {
+    native.startUpload.mockClear();
+    await Upload.startUpload(chunked);
+    expect(native.startUpload).not.toHaveBeenCalled();
+    expect(native.startChunkedUpload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'u1',
+        path: 'file:///tmp/f.bin',
+        parts: chunked.parts,
+        expiresAt: chunked.expiresAt,
+      }),
+    );
+  });
+
+  it('rejects an empty id', () => {
+    expect(() => Upload.startUpload({ ...chunked, id: '' })).toThrow(
+      /non-empty id/,
+    );
+  });
+
+  it('rejects empty parts', () => {
+    expect(() => Upload.startUpload({ ...chunked, parts: [] })).toThrow(
+      /non-empty/,
+    );
+  });
+
+  it.each([
+    { start: -1, end: 10 },
+    { start: 10, end: 10 },
+    { start: 11, end: 10 },
+    { start: 0.5, end: 10 },
+    { start: 0, end: NaN },
+  ])('rejects range %p', (range) => {
+    const parts = [{ ...chunked.parts[0], range }];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /0 <= start < end/,
+    );
+  });
+
+  it.each([NaN, Infinity, 0, -5])('rejects expiresAt %p', (expiresAt) => {
+    expect(() => Upload.startUpload({ ...chunked, expiresAt })).toThrow(
+      /expiresAt/,
+    );
+  });
+
+  it('rejects a nonzero first start', () => {
+    const parts = [
+      { ...chunked.parts[0], range: { start: 5, end: 10 } },
+      { ...chunked.parts[1], range: { start: 10, end: 20 } },
+    ];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /parts\[0\]\.range\.start must be 0/,
+    );
+  });
+
+  it('rejects a gap between parts', () => {
+    const parts = [
+      { ...chunked.parts[0], range: { start: 0, end: 8 } },
+      { ...chunked.parts[1], range: { start: 10, end: 20 } },
+    ];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /no gaps or overlaps/,
+    );
+  });
+
+  it('rejects overlapping parts', () => {
+    const parts = [
+      { ...chunked.parts[0], range: { start: 0, end: 12 } },
+      { ...chunked.parts[1], range: { start: 10, end: 20 } },
+    ];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /no gaps or overlaps/,
+    );
+  });
+
+  it('rejects out-of-order parts', () => {
+    const parts = [chunked.parts[1], chunked.parts[0]];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /parts\[0\]\.range\.start must be 0/,
+    );
+  });
+
+  it('rejects an empty part url', () => {
+    const parts = [{ ...chunked.parts[0], url: '' }, chunked.parts[1]];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /parts\[0\]\.url must be a non-empty string/,
+    );
+  });
+
+  it('rejects non-object part headers', () => {
+    const parts = [
+      { ...chunked.parts[0], headers: 'nope' as never },
+      chunked.parts[1],
+    ];
+    expect(() => Upload.startUpload({ ...chunked, parts })).toThrow(
+      /parts\[0\]\.headers must be a plain object/,
+    );
+  });
+
+  it('throws before reaching native', () => {
+    native.startChunkedUpload.mockClear();
+    expect(() => Upload.startUpload({ ...chunked, parts: [] })).toThrow();
+    expect(native.startChunkedUpload).not.toHaveBeenCalled();
+  });
+});
+
+describe('removeUpload', () => {
+  it('forwards the id to native', async () => {
+    await Upload.removeUpload('u1');
+    expect(native.removeUpload).toHaveBeenCalledWith('u1');
   });
 });
 

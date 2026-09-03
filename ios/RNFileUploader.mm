@@ -79,11 +79,25 @@
   [RNBackgroundUpload.shared startUpload:options resolve:resolve reject:reject];
 }
 
+- (void)startChunkedUpload:(NSDictionary *)options
+                   resolve:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared startChunkedUpload:options resolve:resolve reject:reject];
+}
+
 - (void)cancelUpload:(NSString *)id
              resolve:(RCTPromiseResolveBlock)resolve
               reject:(RCTPromiseRejectBlock)reject
 {
   [RNBackgroundUpload.shared cancelUpload:id resolve:resolve reject:reject];
+}
+
+- (void)removeUpload:(NSString *)id
+             resolve:(RCTPromiseResolveBlock)resolve
+              reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared removeUpload:id resolve:resolve reject:reject];
 }
 
 - (void)getUnacknowledgedEvents:(RCTPromiseResolveBlock)resolve

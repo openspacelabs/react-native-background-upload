@@ -1,3 +1,64 @@
+## 9.0.0
+
+Chunked uploads move into the library: one file, many part requests, one upload
+id and event stream. The consumer authors the parts (URL, headers, byte range)
+once; the library owns transport, the bytes, and resume. See the README's
+"Chunked uploads" section.
+
+Breaking:
+- **Listeners are global-only.** `addListener(event, uploadId, callback)` is
+  gone; use `addListener(event, callback)` and discriminate on `data.id`.
+- **`acceptStatus: number[]` is replaced by `accept` rules** on all uploads:
+  `accept: [{ status, bodyIncludes? }]`. `bodyIncludes` narrows by
+  response-body substring, for statuses that carry several meanings.
+- **`customUploadId` is renamed to `id`** on all upload types.
+- **`android.maxRetries` is removed.** Retry policy belongs to the library;
+  chunked uploads are bounded by `expiresAt` instead.
+- **`ios.getUploadStatus` is removed.** Its only use was pre-dispatch dedupe,
+  which idempotent `startUpload` (below) makes unnecessary.
+- **Per-upload notification text is removed.** Set it once with `configure()`;
+  it is persisted natively so a worker relaunched by WorkManager with no JS
+  running shows the same text. Per-upload `android` options reduce to
+  `noNotification`.
+
+Added:
+- **Chunked uploads**: `startUpload({ type: 'chunked', id, path,
+  parts, accept?, expiresAt, wifiOnly? })`. The library takes ownership of the
+  file at `startUpload` and deletes it only after a `completed` event is
+  acknowledged; every other terminal outcome keeps the manifest and bytes for
+  resume or recreate.
+- **`startUpload` is idempotent for every upload, always.** Re-calling with a
+  running id is never an error; for chunked uploads it reconciles — accepted
+  parts are skipped, the rest continue with the new call's headers (how a fresh
+  auth token reaches parts stalled on 401). On iOS the guarantee is race-free:
+  concurrent same-id calls are serialized natively, so they can never enqueue a
+  duplicate task.
+- **Recreate under the same id**: calling `startUpload` with an existing id and
+  a *different* parts array replaces the parts over the owned bytes — every
+  part resets to unsent, and the new ranges must tile the same total size.
+  Accepted only while the upload is not running (stalled on a terminal error,
+  expired, or cancelled); rejected while it runs. This is how a consumer
+  re-uploads under a fresh server uploadId after the old one dies.
+- **`expiresAt` / `errorKind: 'expired'`**: a chunked upload past its required
+  deadline journals a terminal `error` and stops, keeping the bytes. Within the
+  deadline, transient failures retry on backoff with no attempt cap.
+- **`removeUpload(uploadId)`** releases a kept manifest and bytes.
+- **`configure(options)`** one-time setup (Android notification text/identity).
+- **`chunkPlan(sizeBytes, { min?, max? })`**: the deterministic range splitter,
+  exposed so the part count told to the server and the parts array derive from
+  one result.
+- Concurrency: on Android a hard cap of 4 concurrent requests across all
+  uploads — every request passes the shared transfer semaphore (previously
+  fully serial), with a chunked upload's parts windowed inside it. On iOS a
+  per-session connection-level backstop: `httpMaximumConnectionsPerHost = 4`
+  (previously 1), with chunked parts bounded by the per-upload window of 3.
+
+Fixed:
+- Android jobs enqueued by a v8 build replay safely after upgrading. WorkManager
+  can hand a v9 worker a job serialized by v8 (`acceptStatus`, no `accept`);
+  the worker now normalizes the legacy shape instead of crashing after the file
+  has fully transmitted and re-sending it on every retry.
+
 ## 8.1.0
 
 Added `android.noNotification`, which uploads a file without posting a progress

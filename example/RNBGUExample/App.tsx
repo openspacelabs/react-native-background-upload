@@ -17,9 +17,11 @@ import {
   Button,
 } from 'react-native';
 import notifee, {AndroidImportance} from '@notifee/react-native';
-import {Colors} from 'react-native/Libraries/NewAppScreen';
 
-import Upload, {UploadOptions} from 'react-native-background-upload';
+import Upload, {
+  ChunkedUploadOptions,
+  UploadOptions,
+} from 'react-native-background-upload';
 
 import * as RNFS from 'react-native-fs';
 
@@ -27,6 +29,7 @@ const TEST_FILE = `${RNFS.DocumentDirectoryPath}/1MB.bin`;
 const TEST_FILE_URL =
   'https://gist.githubusercontent.com/khaykov/a6105154becce4c0530da38e723c2330/raw/41ab415ac41c93a198f7da5b47d604956157c5c3/gistfile1.txt';
 const UPLOAD_URL = 'https://httpbin.org/post';
+const CHUNKED_UPLOAD_URL = 'https://httpbin.org/put';
 const NOTIFICATION_CHANNEL = 'RNBGUExample';
 
 const App = () => {
@@ -78,7 +81,7 @@ const App = () => {
       .then(() => setTestFileDownload('downloaded'));
   }, []);
 
-  const onPressUpload = async () => {
+  const ensureNotificationChannel = async () => {
     await notifee.requestPermission({alert: true, sound: true});
 
     await notifee.createChannel({
@@ -86,6 +89,10 @@ const App = () => {
       name: NOTIFICATION_CHANNEL,
       importance: AndroidImportance.LOW,
     });
+  };
+
+  const onPressUpload = async () => {
+    await ensureNotificationChannel();
 
     const uploadOpts: UploadOptions = {
       type: 'raw',
@@ -110,6 +117,53 @@ const App = () => {
       });
   };
 
+  const onPressChunkedUpload = async () => {
+    await ensureNotificationChannel();
+
+    // The library takes ownership of a chunked upload's file. It renames the
+    // file into its own directory. Thus we upload a copy, and the test file
+    // stays available.
+    const chunkedFile = `${RNFS.DocumentDirectoryPath}/chunked.bin`;
+    if (await RNFS.exists('file://' + chunkedFile)) {
+      await RNFS.unlink(chunkedFile);
+    }
+    await RNFS.copyFile(TEST_FILE, chunkedFile);
+
+    // A small min and max, so the 1MB test file still splits into some parts.
+    // Production callers use the server's real part-size limits.
+    const {size} = await RNFS.stat(chunkedFile);
+    const ranges = Upload.chunkPlan(size, {min: 128 * 1024, max: 256 * 1024});
+
+    const uploadOpts: ChunkedUploadOptions = {
+      type: 'chunked',
+      id: 'chunked-demo',
+      path: chunkedFile,
+      parts: ranges.map((range, i) => ({
+        url: `${CHUNKED_UPLOAD_URL}?partNum=${i + 1}`,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Range': `bytes ${range.start}-${range.end - 1}/${size}`,
+        },
+        range,
+      })),
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    };
+
+    Upload.startUpload(uploadOpts)
+      .then(uploadId => {
+        console.log(
+          `Chunked upload started: ${uploadId} (${ranges.length} parts)`,
+        );
+        setUploadId(uploadId);
+        setProgress(0);
+      })
+      .catch(function (err) {
+        setUploadId(undefined);
+        setProgress(undefined);
+        console.log('Chunked upload error!', err);
+      });
+  };
+
   return (
     <>
       <StatusBar barStyle="dark-content" />
@@ -126,6 +180,7 @@ const App = () => {
             <View style={styles.body}>
               <View style={styles.sectionContainer}>
                 <Button title="Upload" onPress={onPressUpload} />
+                <Button title="Chunked Upload" onPress={onPressChunkedUpload} />
 
                 <View style={{height: 32}} />
                 <Text style={{textAlign: 'center'}}>
@@ -155,6 +210,24 @@ const App = () => {
                 />
 
                 <View style={{height: 16}} />
+                <Button
+                  testID="remove_button"
+                  title="Remove Upload"
+                  onPress={() => {
+                    if (!uploadId) {
+                      console.log('Nothing to remove!');
+                      return;
+                    }
+
+                    // Releases the manifest and the bytes that a non-completed
+                    // terminal outcome (expired, error, cancelled) keeps.
+                    Upload.removeUpload(uploadId).then(() => {
+                      console.log(`Upload ${uploadId} removed`);
+                      setUploadId(undefined);
+                      setProgress(undefined);
+                    });
+                  }}
+                />
                 <Button
                   testID="dump_journal_button"
                   title="Dump journal"
@@ -187,6 +260,16 @@ const App = () => {
       </SafeAreaView>
     </>
   );
+};
+
+// The NewAppScreen template palette, inlined: the deep import
+// ('react-native/Libraries/NewAppScreen') is deprecated and unresolvable under
+// the RN typescript config's bundler moduleResolution.
+const Colors = {
+  lighter: '#F3F3F3',
+  white: '#FFF',
+  dark: '#444',
+  black: '#000',
 };
 
 const styles = StyleSheet.create({

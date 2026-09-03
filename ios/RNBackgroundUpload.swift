@@ -44,6 +44,19 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   private static var responsesData: [String: NSMutableData] = [:] // sessionId:taskId -> body
   private static var lastProgressAt: [String: TimeInterval] = [:] // uploadId -> time
   private static var userCancelledIds = Set<String>()
+  // The ids that removeUpload is releasing now. The cancellation of their
+  // tasks is an explicit release, not an outcome that the consumer awaits.
+  // Thus no terminal event is journaled. This matches Android, whose
+  // removeUpload cancels work with no user-cancel mark.
+  private static var removedIds = Set<String>()
+  // The consumer-supplied ids whose check-and-create is in flight, mapped to
+  // the resolves of the concurrent same-id calls. The existence check
+  // enumerates the session tasks asynchronously. Without this claim, two
+  // concurrent calls could both see "no task" and enqueue duplicates. The id
+  // is claimed synchronously, under `lock`, BEFORE the enumeration is
+  // dispatched. The map entry drains when the first caller's create-or-find
+  // lands.
+  private static var creationsInFlight: [String: [RCTPromiseResolveBlock]] = [:]
 
   private static var backgroundSession: URLSession?
   private static var wifiOnlySession: URLSession?
@@ -58,6 +71,19 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   // id) so the app can be relaunched to finish uploads after termination.
   private static let bgHandlerLock = NSLock()
   private static var bgCompletionHandlers: [String: () -> Void] = [:]
+  // Relaunch ordering: while the chunked coordinator reconciles (deferrals
+  // > 0), urlSessionDidFinishEvents must NOT hand the system its completion
+  // handler. The system could suspend the app before the post-reconcile
+  // refill enqueues a new part task. That would leave zero daemon tasks and
+  // no future wake. A session that finishes its events in that window parks
+  // its id here. The release drains it.
+  private static var bgHandlerDeferrals = 0
+  private static var bgSessionsAwaitingDrain: Set<String> = []
+
+  // Owns the chunked-upload window and the manifests. It is implicitly
+  // unwrapped only because it needs `self` (for the sessions) and is assigned
+  // before init returns. It is never nil after that.
+  private var chunked: ChunkedCoordinator!
 
   public override init() {
     super.init()
@@ -65,6 +91,12 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // nsurlsessiond from a previous launch are delivered to this process.
     _ = session(wifiOnly: false)
     _ = session(wifiOnly: true)
+    chunked = ChunkedCoordinator(uploader: self)
+    // Relaunch reconciliation: match the daemon's surviving tasks against
+    // the stored manifests, and refill each upload's window. It runs on the
+    // coordinator queue. Thus nothing here re-enters the initialization of
+    // `shared`.
+    chunked.reconcileAll()
   }
 
   // MARK: - Event delegate
@@ -97,9 +129,35 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     return eventDelegate
   }
 
+  // Journal-before-emit, the library's one terminal-event path. The write is
+  // durable. The emit is best-effort, because JS can be dead. The
+  // simple-upload delegate handling and the chunked coordinator share it.
+  static func journalAndEmit(_ event: JournaledEvent) {
+    EventJournal.append(event)
+    emitEvent(event)
+  }
+
+  /// Emits WITHOUT a journal write. Use it to deliver again an event that is
+  /// already in the journal (a resume of a finished-but-unacked upload).
+  static func emitEvent(_ event: JournaledEvent) {
+    let body = event.bridged
+    let delegate = currentDelegate
+    switch event.type {
+    case "completed": delegate?.emitCompleted(body)
+    case "cancelled": delegate?.emitCancelled(body)
+    default: delegate?.emitError(body)
+    }
+  }
+
+  static func emitProgress(id: String, progress: Float) {
+    currentDelegate?.emitProgress(["id": id, "progress": progress])
+  }
+
   // MARK: - Sessions
 
-  private func session(wifiOnly: Bool) -> URLSession {
+  // Internal, not private: the chunked coordinator enqueues part tasks on the
+  // same two sessions.
+  func session(wifiOnly: Bool) -> URLSession {
     RNBackgroundUpload.lock.lock()
     defer { RNBackgroundUpload.lock.unlock() }
     if wifiOnly {
@@ -121,7 +179,10 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   private func makeSession(identifier: String, wifiOnly: Bool) -> URLSession {
     let config = URLSessionConfiguration.background(withIdentifier: identifier)
     config.isDiscretionary = false
-    config.httpMaximumConnectionsPerHost = 1
+    // A per-session, connection-level backstop for the design's library-wide
+    // transmission cap of 4. The request-level control is the chunked window.
+    // This limit mostly bounds piles of simple uploads over HTTP/1.1.
+    config.httpMaximumConnectionsPerHost = 4
     config.waitsForConnectivity = true
     config.allowsCellularAccess = !wifiOnly
     config.allowsConstrainedNetworkAccess = !wifiOnly
@@ -130,16 +191,19 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   }
 
   private func taskMapKey(_ session: URLSession, _ task: URLSessionTask) -> String {
-    "\(session.configuration.identifier ?? ""):\(task.taskIdentifier)"
+    TaskMap.key(session, task)
   }
 
   // taskDescription is the primary id; the persisted map is the durable fallback.
+  // A chunked part task's description encodes (uploadId, partIndex). This
+  // returns the uploadId in both cases. Thus id matching works uniformly.
   private func uploadId(_ session: URLSession, _ task: URLSessionTask) -> String {
-    task.taskDescription ?? TaskMap.meta(forKey: taskMapKey(session, task))?.id ?? "unknown"
+    if let ref = ChunkedCoordinator.partRef(session, task) { return ref.id }
+    return task.taskDescription ?? TaskMap.meta(forKey: taskMapKey(session, task))?.id ?? "unknown"
   }
 
-  private func acceptStatus(_ session: URLSession, _ task: URLSessionTask) -> [Int] {
-    TaskMap.meta(forKey: taskMapKey(session, task))?.acceptStatus ?? []
+  private func acceptRules(_ session: URLSession, _ task: URLSessionTask) -> [UploadOutcome.AcceptRule] {
+    TaskMap.meta(forKey: taskMapKey(session, task))?.accept ?? []
   }
 
   private var activeSessions: [URLSession] {
@@ -180,9 +244,7 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     }
 
     let wifiOnly = (options["wifiOnly"] as? Bool) ?? false
-    // RN bridges a JS number[] to NSArray<NSNumber>; map explicitly rather than
-    // rely on an [Int] bridging cast that can yield nil and silently drop it.
-    let acceptStatus = (options["acceptStatus"] as? [NSNumber])?.map { $0.intValue } ?? []
+    let accept = UploadOutcome.parseAcceptRules(options["accept"])
     let uploadId = (options["id"] as? String) ?? UUID().uuidString
     let fileURL = URL(string: path) ?? URL(fileURLWithPath: path)
 
@@ -190,10 +252,9 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     let startNew = {
       let task = session.uploadTask(with: request, fromFile: fileURL)
       task.taskDescription = uploadId
-      TaskMap.set(TaskMap.Meta(id: uploadId, acceptStatus: acceptStatus),
+      TaskMap.set(TaskMap.Meta(id: uploadId, accept: accept, partIndex: nil),
                   forKey: self.taskMapKey(session, task))
       task.resume()
-      resolve(uploadId)
     }
 
     // A consumer-supplied id makes startUpload idempotent. This is the same
@@ -203,7 +264,32 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // different wifiOnly value while the first task continues in its first
     // session. A generated id cannot collide, so that path does not do the
     // (asynchronous) task enumeration.
-    guard options["id"] != nil else { startNew(); return }
+    guard options["id"] != nil else {
+      startNew()
+      resolve(uploadId)
+      return
+    }
+
+    // Serialize the check-and-create for each id: claim the id synchronously,
+    // before we dispatch the enumeration. The first caller runs the check and
+    // creates the task. A concurrent same-id caller parks its resolve here.
+    // When the task lands, we answer the parked calls with the id. There is no
+    // second task, and there is no polling.
+    RNBackgroundUpload.lock.lock()
+    if RNBackgroundUpload.creationsInFlight[uploadId] != nil {
+      RNBackgroundUpload.creationsInFlight[uploadId]?.append(resolve)
+      RNBackgroundUpload.lock.unlock()
+      return
+    }
+    RNBackgroundUpload.creationsInFlight[uploadId] = []
+    RNBackgroundUpload.lock.unlock()
+    let settle = {
+      RNBackgroundUpload.lock.lock()
+      let waiters = RNBackgroundUpload.creationsInFlight.removeValue(forKey: uploadId) ?? []
+      RNBackgroundUpload.lock.unlock()
+      resolve(uploadId)
+      for waiter in waiters { waiter(uploadId) }
+    }
 
     let group = DispatchGroup()
     let foundLock = NSLock()
@@ -222,7 +308,64 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       }
     }
     group.notify(queue: .main) {
-      if exists { resolve(uploadId) } else { startNew() }
+      if !exists { startNew() }
+      settle()
+    }
+  }
+
+  @objc(startChunkedUpload:resolve:reject:)
+  public func startChunkedUpload(_ options: [String: Any],
+                                 resolve: @escaping RCTPromiseResolveBlock,
+                                 reject: @escaping RCTPromiseRejectBlock) {
+    chunked.startUpload(
+      options,
+      resolve: { id in resolve(id) },
+      reject: { message in reject("RN Uploader", message, nil) })
+  }
+
+  @objc(removeUpload:resolve:reject:)
+  public func removeUpload(_ uploadId: String,
+                           resolve: @escaping RCTPromiseResolveBlock,
+                           reject: @escaping RCTPromiseRejectBlock) {
+    // The chunked release runs first: it cancels the in-flight part tasks
+    // and deletes the manifest and the bytes. Then we cancel any simple task
+    // that wears this id. That cancel is kept out of the journal, because an
+    // explicit release is not an outcome that the consumer awaits.
+    chunked.remove(uploadId) {
+      RNBackgroundUpload.lock.lock()
+      RNBackgroundUpload.removedIds.insert(uploadId)
+      RNBackgroundUpload.lock.unlock()
+      let group = DispatchGroup()
+      let foundLock = NSLock()
+      var found = false
+      for session in self.activeSessions {
+        group.enter()
+        session.getAllTasks { tasks in
+          for task in tasks
+          where self.uploadId(session, task) == uploadId
+            && ChunkedCoordinator.partRef(session, task) == nil {
+            foundLock.lock()
+            found = true
+            foundLock.unlock()
+            task.cancel()
+          }
+          group.leave()
+        }
+      }
+      group.notify(queue: .main) {
+        foundLock.lock()
+        let matched = found
+        foundLock.unlock()
+        if !matched {
+          // Nothing was cancelled. Thus no delegate callback will consume
+          // the suppression. Drop it. If we keep it, a later upload that
+          // reuses this id has its real terminal swallowed.
+          RNBackgroundUpload.lock.lock()
+          RNBackgroundUpload.removedIds.remove(uploadId)
+          RNBackgroundUpload.lock.unlock()
+        }
+        resolve(nil)
+      }
     }
   }
 
@@ -230,6 +373,18 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   public func cancelUpload(_ cancelUploadId: String,
                            resolve: @escaping RCTPromiseResolveBlock,
                            reject: @escaping RCTPromiseRejectBlock) {
+    // A chunked upload cancels through its coordinator: one 'cancelled'
+    // terminal for the whole upload, journaled before its part tasks are torn
+    // down. nil means that the id has no manifest. It then falls through to
+    // the simple-task path.
+    chunked.cancel(cancelUploadId) { handled in
+      if let handled { resolve(handled); return }
+      self.cancelSimpleUpload(cancelUploadId, resolve: resolve)
+    }
+  }
+
+  private func cancelSimpleUpload(_ cancelUploadId: String,
+                                  resolve: @escaping RCTPromiseResolveBlock) {
     // Record intent before cancelling so the delegate reports cancelReason 'user'.
     RNBackgroundUpload.lock.lock()
     RNBackgroundUpload.userCancelledIds.insert(cancelUploadId)
@@ -278,8 +433,16 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   public func ackEvents(_ eventIds: [String],
                         resolve: @escaping RCTPromiseResolveBlock,
                         reject: @escaping RCTPromiseRejectBlock) {
+    // An acked 'completed' is the ONE moment when a chunked upload's manifest
+    // and moved bytes may be deleted. Every other terminal keeps them for a
+    // resume. Find those uploads before the entries are removed.
+    let completedUploadIds = EventJournal.unacknowledgedEntries()
+      .filter { $0.type == "completed" && eventIds.contains($0.eventId) }
+      .map { $0.id }
     EventJournal.ack(eventIds)
-    resolve(true)
+    chunked.releaseCompleted(completedUploadIds) { // no-op for simple uploads
+      resolve(true)
+    }
   }
 
   @objc(getAllUploads:reject:)
@@ -293,6 +456,9 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       group.enter()
       session.getAllTasks { tasks in
         for task in tasks {
+          // A chunked upload is one logical row, built from its manifest
+          // below. Its per-part tasks are transport detail.
+          if ChunkedCoordinator.partRef(session, task) != nil { continue }
           let id = self.uploadId(session, task)
           if id == "unknown" { continue }
           lock.lock()
@@ -317,7 +483,14 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
         group.leave()
       }
     }
-    group.notify(queue: .main) { resolve(result) }
+    group.notify(queue: .main) {
+      self.chunked.snapshots { chunkedRows in
+        lock.lock()
+        let combined = result + chunkedRows
+        lock.unlock()
+        resolve(combined)
+      }
+    }
   }
 
   // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:completionHandler:).
@@ -329,11 +502,43 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
                                                           forIdentifier identifier: String) {
     // Touching `shared` recreates the background sessions when this is a fresh,
     // system-relaunched process, which is what lets the queued delegate events
-    // (and therefore this handler) actually fire.
+    // (and therefore this handler) actually fire. On a relaunch, it also
+    // claims the handler deferral (see below) BEFORE the handler is stored
+    // here. Thus the claim provably precedes any drain.
     _ = shared
     bgHandlerLock.lock()
     bgCompletionHandlers[identifier] = handler
     bgHandlerLock.unlock()
+  }
+
+  /// For the chunked coordinator only. It parks every
+  /// urlSessionDidFinishEvents drain until the matching release. Thus the
+  /// system cannot suspend the app between a relaunch's replayed part
+  /// completions and the post-reconcile refill that enqueues the next part
+  /// tasks.
+  static func deferBackgroundCompletionHandlers() {
+    bgHandlerLock.lock()
+    bgHandlerDeferrals += 1
+    bgHandlerLock.unlock()
+  }
+
+  static func releaseBackgroundCompletionHandlers() {
+    bgHandlerLock.lock()
+    bgHandlerDeferrals -= 1
+    var handlers: [() -> Void] = []
+    if bgHandlerDeferrals <= 0 {
+      for identifier in bgSessionsAwaitingDrain {
+        if let handler = bgCompletionHandlers.removeValue(forKey: identifier) {
+          handlers.append(handler)
+        }
+        // A parked id with no stored handler is simply dropped. There is
+        // nothing to hold. If we keep it, a LATER wake's handler could drain
+        // before that wake's events were processed.
+      }
+      bgSessionsAwaitingDrain.removeAll()
+    }
+    bgHandlerLock.unlock()
+    for handler in handlers { DispatchQueue.main.async { handler() } }
   }
 
   // MARK: - URLSession delegate
@@ -356,6 +561,13 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   public func urlSession(_ session: URLSession, task: URLSessionTask,
                          didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
                          totalBytesExpectedToSend: Int64) {
+    // A chunked part's bytes feed the upload's byte-weighted aggregate. A
+    // per-task percentage would have no meaning to the consumer.
+    if let ref = ChunkedCoordinator.partRef(session, task) {
+      chunked.partProgress(id: ref.id, part: ref.part, incarnation: ref.incarnation,
+                           sent: totalBytesSent)
+      return
+    }
     // 0 rather than -1 when the length is unknown: the documented range is
     // 0-100, Android reports 0 for the same case, and a negative value renders
     // as a broken progress bar in a consumer that passes it straight through.
@@ -387,6 +599,22 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       for (key, value) in http.allHeaderFields { headers["\(key)"] = "\(value)" }
     }
 
+    // A chunked part's outcome belongs to the coordinator of its upload:
+    // accept evaluation against the manifest, the window refill, and one
+    // journaled terminal, only when the whole upload settles.
+    if let ref = ChunkedCoordinator.partRef(session, task) {
+      RNBackgroundUpload.lock.lock()
+      let bodyData = RNBackgroundUpload.responsesData.removeValue(forKey: taskMapKey(session, task))
+      RNBackgroundUpload.lock.unlock()
+      chunked.handlePartCompletion(
+        id: ref.id, part: ref.part, incarnation: ref.incarnation,
+        taskKey: taskMapKey(session, task),
+        statusCode: http != nil ? statusCode : nil, headers: headers,
+        body: bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) },
+        error: error as NSError?)
+      return
+    }
+
     RNBackgroundUpload.lock.lock()
     let bodyData = RNBackgroundUpload.responsesData.removeValue(forKey: taskMapKey(session, task))
     RNBackgroundUpload.lastProgressAt[id] = nil
@@ -395,7 +623,16 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // would otherwise linger for the life of the process and a later upload
     // reusing that id would report a system cancel as a user cancel.
     let userCancelled = RNBackgroundUpload.userCancelledIds.remove(id) != nil
+    let removed = RNBackgroundUpload.removedIds.remove(id) != nil
     RNBackgroundUpload.lock.unlock()
+
+    // removeUpload cancelled this task as an explicit release, not as an
+    // outcome that the consumer awaits. Journal nothing. A non-cancel
+    // terminal that only raced the removal still reports normally.
+    if removed, let nsError = error as NSError?, nsError.code == NSURLErrorCancelled {
+      TaskMap.removeKey(taskMapKey(session, task))
+      return
+    }
 
     let rawBody = bodyData.flatMap { String(data: $0 as Data, encoding: .utf8) } ?? ""
     let (cappedBody, truncated) = EventJournal.capBody(rawBody)
@@ -412,9 +649,11 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     }
 
     if error == nil {
-      // "completed" only for 2xx or a per-request acceptStatus code; any other
-      // HTTP response is a terminal http error carrying the full response.
-      let accepted = (200..<300).contains(statusCode) || acceptStatus(session, task).contains(statusCode)
+      // "completed" only for a 2xx or a matching per-request accept rule.
+      // Any other HTTP response is a terminal http error that carries the
+      // full response.
+      let accepted = UploadOutcome.isAccepted(
+        statusCode, body: rawBody, accept: acceptRules(session, task))
       if accepted {
         event.type = "completed"
       } else {
@@ -434,22 +673,24 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       }
     }
 
-    // Journal BEFORE emitting; the emit is best-effort (JS may be dead).
-    EventJournal.append(event)
     TaskMap.removeKey(taskMapKey(session, task))
-
-    let body = event.bridged
-    let delegate = RNBackgroundUpload.currentDelegate
-    switch event.type {
-    case "completed": delegate?.emitCompleted(body)
-    case "cancelled": delegate?.emitCancelled(body)
-    default: delegate?.emitError(body)
-    }
+    // Journals BEFORE it emits. The emit is best-effort, because JS can be
+    // dead.
+    RNBackgroundUpload.journalAndEmit(event)
   }
 
   public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
     guard let identifier = session.configuration.identifier else { return }
     RNBackgroundUpload.bgHandlerLock.lock()
+    guard RNBackgroundUpload.bgHandlerDeferrals <= 0 else {
+      // A relaunch reconcile is in flight. If we hand the system the handler
+      // now, it can suspend the app before the refill enqueues new part
+      // tasks. The id is parked. releaseBackgroundCompletionHandlers drains
+      // it.
+      RNBackgroundUpload.bgSessionsAwaitingDrain.insert(identifier)
+      RNBackgroundUpload.bgHandlerLock.unlock()
+      return
+    }
     let handler = RNBackgroundUpload.bgCompletionHandlers.removeValue(forKey: identifier)
     RNBackgroundUpload.bgHandlerLock.unlock()
     if let handler { DispatchQueue.main.async { handler() } }
@@ -457,8 +698,9 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
 
   // Classify a transport error to match Android's errorKind taxonomy: a missing or
   // unreadable source file -> 'file'; other URL-domain errors -> 'network'; anything
-  // else -> 'unknown'.
-  private static func errorKind(for error: NSError) -> String {
+  // else -> 'unknown'. It is internal because the chunked coordinator also
+  // classifies with it.
+  static func errorKind(for error: NSError) -> String {
     switch (error.domain, error.code) {
     case (NSURLErrorDomain, NSURLErrorFileDoesNotExist),
          (NSURLErrorDomain, NSURLErrorCannotOpenFile),

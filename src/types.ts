@@ -8,7 +8,12 @@ export interface ProgressData extends EventData {
   progress: number;
 }
 
-export type ErrorKind = 'http' | 'network' | 'file' | 'unknown';
+/**
+ * `expired` means that the upload's `expiresAt` time passed before the server
+ * accepted every part. The library keeps the manifest and the bytes. Thus a
+ * new `startUpload` call with a later deadline resumes the upload.
+ */
+export type ErrorKind = 'http' | 'network' | 'file' | 'expired' | 'unknown';
 
 export type CancelReason = 'user' | 'system';
 
@@ -38,7 +43,7 @@ export interface TerminalEventData extends EventData {
   responseHeaders?: Record<string, string>;
 }
 
-/** A 2xx response, or one whose status was listed in the request's `acceptStatus`. */
+/** A 2xx response, or one that matched an `accept` rule on the request. */
 export interface CompletedData extends TerminalEventData {
   type: 'completed';
 }
@@ -52,6 +57,11 @@ export interface ErrorData extends TerminalEventData {
    * is missing or unreadable on disk, so retrying can never succeed.
    */
   errorKind?: ErrorKind;
+  /**
+   * Chunked uploads: the index into `parts` of the failing part, when one
+   * part's response caused the error.
+   */
+  partIndex?: number;
 }
 
 export interface CancelledData extends TerminalEventData {
@@ -71,8 +81,10 @@ export type JournaledEvent = CompletedData | ErrorData | CancelledData;
 export interface UploadSnapshot {
   id: UploadId;
   state: 'pending' | 'running' | 'completed' | 'error' | 'cancelled';
-  bytesSent?: number; // iOS only
-  totalBytes?: number; // iOS only
+  /** iOS: bytes sent so far. Android: a chunked upload's accepted bytes. */
+  bytesSent?: number;
+  /** The total payload bytes. On iOS always; on Android for chunked uploads. */
+  totalBytes?: number;
 }
 
 export type UploadOptions = {
@@ -85,14 +97,56 @@ export type UploadOptions = {
   };
   // Whether the upload should wait for wifi before starting
   wifiOnly?: boolean;
-  // Non-2xx statuses to treat as a successful completion (e.g. [409] when
-  // duplicate-create conflicts are expected). Anything else non-2xx emits an
-  // 'error' event with errorKind 'http'.
-  acceptStatus?: number[];
+  accept?: AcceptRule[];
   // Android options that change behavior. Notification text is not a
   // per-upload option. Set it one time with configure().
   android?: Partial<AndroidOnlyUploadOptions>;
 } & RawUploadOptions;
+
+/**
+ * A non-2xx response to treat as success. `bodyIncludes` narrows the rule by
+ * a response-body substring. This is necessary when one status has several
+ * meanings, and only the message shows the difference (our backend's 409). A
+ * non-2xx response that matches no rule emits an 'error' event with errorKind
+ * 'http'.
+ */
+export type AcceptRule = {
+  status: number;
+  bodyIncludes?: string;
+};
+
+export type ChunkedUploadOptions = {
+  type: 'chunked';
+  /** Required. The consumer's durable id. */
+  id: string;
+  /**
+   * The single source file. The library takes ownership: at startUpload it
+   * renames the file into the library's own directory (an O(1) move). It
+   * deletes the file only after you acknowledge a 'completed' terminal event.
+   * If you must keep the file, copy it first. A keep-the-file mode is
+   * deliberately not part of the library.
+   */
+  path: string;
+  /**
+   * The consumer authors this one time. The library sends the file bytes
+   * [range.start, range.end) as the body of a PUT to `url`, with `headers`
+   * unchanged. The library never derives or edits a protocol field.
+   */
+  parts: Array<{
+    url: string;
+    /** These headers include Content-Range, Content-Type, and auth. */
+    headers: Record<string, string>;
+    /** Byte offsets. The end is exclusive. */
+    range: { start: number; end: number };
+  }>;
+  accept?: AcceptRule[];
+  /** Epoch ms. Required. After this time: terminal error, errorKind 'expired'. */
+  expiresAt: number;
+  wifiOnly?: boolean;
+  android?: Partial<AndroidOnlyUploadOptions>;
+};
+
+export type StartUploadOptions = UploadOptions | ChunkedUploadOptions;
 
 export type AndroidOnlyUploadOptions = {
   /**
