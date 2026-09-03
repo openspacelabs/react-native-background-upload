@@ -29,8 +29,11 @@ class EventJournal(
     val responseBodyTruncated: Boolean = false,
     val responseHeaders: Map<String, String>? = null,
     val error: String? = null,
-    val errorKind: String? = null, // http | network | file | unknown
+    val errorKind: String? = null, // http | network | file | expired | unknown
     val cancelReason: String? = null, // user | system
+    // Chunked uploads: the index of the failing part, when one part's response
+    // caused the error.
+    val partIndex: Int? = null,
   ) {
     fun toWritableMap(): com.facebook.react.bridge.WritableMap =
       com.facebook.react.bridge.Arguments.createMap().apply {
@@ -47,6 +50,7 @@ class EventJournal(
         error?.let { putString("error", it) }
         errorKind?.let { putString("errorKind", it) }
         cancelReason?.let { putString("cancelReason", it) }
+        partIndex?.let { putInt("partIndex", it) }
       }
   }
 

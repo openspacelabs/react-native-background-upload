@@ -57,6 +57,11 @@ export interface ErrorData extends TerminalEventData {
    * is missing or unreadable on disk, so retrying can never succeed.
    */
   errorKind?: ErrorKind;
+  /**
+   * Chunked uploads: the index into `parts` of the failing part, when one
+   * part's response caused the error.
+   */
+  partIndex?: number;
 }
 
 export interface CancelledData extends TerminalEventData {
@@ -76,8 +81,10 @@ export type JournaledEvent = CompletedData | ErrorData | CancelledData;
 export interface UploadSnapshot {
   id: UploadId;
   state: 'pending' | 'running' | 'completed' | 'error' | 'cancelled';
-  bytesSent?: number; // iOS only
-  totalBytes?: number; // iOS only
+  /** iOS: bytes sent so far. Android: a chunked upload's accepted bytes. */
+  bytesSent?: number;
+  /** The total payload bytes. On iOS always; on Android for chunked uploads. */
+  totalBytes?: number;
 }
 
 export type UploadOptions = {
