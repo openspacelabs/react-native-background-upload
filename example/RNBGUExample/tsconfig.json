@@ -1,9 +1,10 @@
 {
-  "extends": "@react-native/typescript-config/tsconfig.json",
+  "extends": "@react-native/typescript-config",
   "compilerOptions": {
     "paths": {
       "react-native-background-upload": ["../../src"]
     }
   },
-  "include": ["../../src"]
+  "include": ["**/*", "../../src"],
+  "exclude": ["node_modules", "**/Pods/**", "__tests__", "../../src/__tests__"]
 }
