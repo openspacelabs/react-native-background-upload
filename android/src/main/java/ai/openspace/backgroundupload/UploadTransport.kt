@@ -16,10 +16,11 @@ private const val REQUEST_TIMEOUT = 24L
 private val REQUEST_TIMEOUT_UNIT = TimeUnit.HOURS
 
 // The number of requests transmitting at one time across ALL uploads, chunked
-// parts included. A semaphore controls this, not OkHttp's connection limits,
-// because those limits add a delay between requests. The design's library-wide
-// cap is 4. The change from 1 to 4 lands with the hardening slice, not here.
-internal const val MAX_TRANSFER_CONCURRENCY = 1
+// parts included. This is the design's library-wide cap of 4. Every request,
+// a simple upload or a chunked part, must pass this semaphore. Thus on
+// Android the cap is hard. A semaphore controls this, not OkHttp's connection
+// limits, because those limits add a delay between requests.
+internal const val MAX_TRANSFER_CONCURRENCY = 4
 internal val transferSemaphore = Semaphore(MAX_TRANSFER_CONCURRENCY)
 
 // Use Okhttp as it provides the most standard behaviors even though it's not coroutine friendly

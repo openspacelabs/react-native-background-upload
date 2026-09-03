@@ -179,7 +179,10 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   private func makeSession(identifier: String, wifiOnly: Bool) -> URLSession {
     let config = URLSessionConfiguration.background(withIdentifier: identifier)
     config.isDiscretionary = false
-    config.httpMaximumConnectionsPerHost = 1
+    // A per-session, connection-level backstop for the design's library-wide
+    // transmission cap of 4. The request-level control is the chunked window.
+    // This limit mostly bounds piles of simple uploads over HTTP/1.1.
+    config.httpMaximumConnectionsPerHost = 4
     config.waitsForConnectivity = true
     config.allowsCellularAccess = !wifiOnly
     config.allowsConstrainedNetworkAccess = !wifiOnly
