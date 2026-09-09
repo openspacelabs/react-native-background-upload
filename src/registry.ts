@@ -31,7 +31,13 @@ const DESCRIPTOR_KEYS = [
   'android',
 ];
 const PART_KEYS = ['url', 'headers', 'range'];
+const RANGE_KEYS = ['start', 'end'];
 const FORM_PART_KEYS = ['name', 'contentType', 'string', 'path', 'fileName'];
+const RETRY_KEYS = ['backoff', 'terminalHttp'];
+const BACKOFF_KEYS = ['baseMs', 'maxMs', 'jitter'];
+const TERMINAL_HTTP_KEYS = ['exempt'];
+const ACCEPT_RULE_KEYS = ['status', 'bodyIncludes'];
+const ANDROID_KEYS = ['noNotification'];
 
 /** The JS-side settings that `configure()` stores. */
 export type Settings = {
@@ -174,8 +180,11 @@ const validateParts = (parts: unknown): void => {
         `mutate: parts[${i}].headers must be a plain object when present`,
       );
     }
+    if (!isPlainObject(range)) {
+      throw new Error(`mutate: parts[${i}].range must be an object`);
+    }
+    rejectUnknownKeys(range, RANGE_KEYS, `parts[${i}].range`);
     if (
-      !range ||
       !Number.isInteger(range.start) ||
       !Number.isInteger(range.end) ||
       range.start < 0 ||
@@ -227,9 +236,86 @@ const validateForm = (form: unknown): void => {
   });
 };
 
+const requireObject = (
+  value: unknown,
+  where: string,
+): Record<string, unknown> => {
+  if (!isPlainObject(value)) {
+    throw new Error(`mutate: ${where} must be a plain object`);
+  }
+  return value;
+};
+
+const validateRetry = (retry: unknown): void => {
+  const r = requireObject(retry, 'retry');
+  rejectUnknownKeys(r, RETRY_KEYS, 'retry');
+  if (r.backoff !== undefined) {
+    const backoff = requireObject(r.backoff, 'retry.backoff');
+    rejectUnknownKeys(backoff, BACKOFF_KEYS, 'retry.backoff');
+  }
+  if (r.terminalHttp !== undefined) {
+    const terminal = requireObject(r.terminalHttp, 'retry.terminalHttp');
+    rejectUnknownKeys(terminal, TERMINAL_HTTP_KEYS, 'retry.terminalHttp');
+    const { exempt } = terminal;
+    if (
+      !Array.isArray(exempt) ||
+      !exempt.every((status) => typeof status === 'number')
+    ) {
+      throw new Error(
+        'mutate: retry.terminalHttp.exempt must be an array of numbers',
+      );
+    }
+  }
+};
+
+const validateAccept = (accept: unknown): void => {
+  if (!Array.isArray(accept)) {
+    throw new Error('mutate: accept must be an array');
+  }
+  accept.forEach((rule, i) => {
+    const r = requireObject(rule, `accept[${i}]`);
+    rejectUnknownKeys(r, ACCEPT_RULE_KEYS, `accept[${i}]`);
+    if (typeof r.status !== 'number') {
+      throw new Error(`mutate: accept[${i}].status must be a number`);
+    }
+    if (r.bodyIncludes !== undefined && typeof r.bodyIncludes !== 'string') {
+      throw new Error(`mutate: accept[${i}].bodyIncludes must be a string`);
+    }
+  });
+};
+
+const validateAndroid = (android: unknown): void => {
+  const a = requireObject(android, 'android');
+  rejectUnknownKeys(a, ANDROID_KEYS, 'android');
+  if (a.noNotification !== undefined && typeof a.noNotification !== 'boolean') {
+    throw new Error('mutate: android.noNotification must be a boolean');
+  }
+};
+
+/**
+ * The descriptor's headers over the provider's. Names match without regard
+ * to case, and the descriptor's spelling is the one kept.
+ */
+const mergeHeaders = (
+  provided: Record<string, string>,
+  own: Record<string, string> = {},
+): Record<string, string> => {
+  const overridden = new Set(
+    Object.keys(own).map((name) => name.toLowerCase()),
+  );
+  const merged: Record<string, string> = {};
+  Object.entries(provided).forEach(([name, value]) => {
+    if (!overridden.has(name.toLowerCase())) {
+      merged[name] = value;
+    }
+  });
+  return { ...merged, ...own };
+};
+
 /**
  * Rejects a malformed descriptor before it crosses the bridge. Then native
- * never persists an entry that cannot run.
+ * never persists an entry that cannot run. Nested objects are checked for
+ * unknown keys too, so a misspelled field cannot be dropped in silence.
  */
 export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   if (!isPlainObject(descriptor)) {
@@ -276,6 +362,15 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   if (d.parts !== undefined) {
     validateParts(d.parts);
   }
+  if (d.retry !== undefined) {
+    validateRetry(d.retry);
+  }
+  if (d.accept !== undefined) {
+    validateAccept(d.accept);
+  }
+  if (d.android !== undefined) {
+    validateAndroid(d.android);
+  }
   if (
     d.expiresAt !== undefined &&
     (!Number.isFinite(d.expiresAt) || d.expiresAt <= 0)
@@ -290,7 +385,8 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
 /**
  * Holds the definitions of one client and builds `define()`. Every `mutate()`
  * validates `vars` and the descriptor, merges the configured headers under the
- * descriptor's, defaults `expiresAt`, and hands the entry to native.
+ * descriptor's (names matched without regard to case), defaults `expiresAt`,
+ * hands the entry to native, and resolves with the entry's own id.
  */
 export const createRegistry = ({
   native,
@@ -355,13 +451,16 @@ export const createRegistry = ({
         vars,
         descriptor: {
           ...descriptor,
-          headers: { ...provided, ...descriptor.headers },
+          headers: mergeHeaders(provided, descriptor.headers),
           expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
         },
       };
       const pending = native.enqueue(entry);
       trackMutate(entry.id, pending);
-      return { id: await pending };
+      // The JS id is the one the caller may have chosen and the one the
+      // entry carries. Native's return value is not trusted for it.
+      await pending;
+      return { id: entry.id };
     };
 
     return { key, mutate } as Defined<V, T>;

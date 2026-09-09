@@ -73,7 +73,10 @@ export type RequestDescriptor = {
   url?: string;
   /** Default POST. With `parts` it applies to every part. */
   method?: Method;
-  /** Merged over `configure().headers()`. Every part inherits the result. */
+  /**
+   * Merged over `configure().headers()`, with names matched without regard
+   * to case. Every part inherits the result.
+   */
   headers?: Record<string, string>;
   /** JSON body. Exactly one of `data`, `form`, `file` must be set. */
   data?: Json;

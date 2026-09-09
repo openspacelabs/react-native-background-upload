@@ -50,8 +50,9 @@ Added:
   arguments.
 - **Request bodies**: JSON (`data`), multipart (`form`), whole file (`file`),
   and chunked (`file` + `parts`). All under one entry shape and one id.
-- **Delivery rules**: dedupe by event id; an outcome for an id waits for that
-  id's in-flight `mutate()`; an outcome whose key has no definition stays
+- **Delivery rules**: dedupe by event id; the outcomes of one id deliver in
+  order, one handler at a time; an outcome for an id waits for that id's
+  in-flight `mutate()`; an outcome whose key has no definition stays
   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`;
   a handler that has not settled after 30 s logs a warning.
 - **`pause()` / `resume()`** for the whole queue, **`updateHeaders(patch)`** to
@@ -65,8 +66,8 @@ Removed:
   names, with their `ProgressData`, `CompletedData`, `ErrorData`,
   `CancelledData`, `EventData`, `TerminalEventData`, `JournaledEvent`,
   `UploadSnapshot`, `UploadOptions`, `ChunkedUploadOptions`,
-  `StartUploadOptions`, `AndroidOnlyUploadOptions`, and `RawUploadOptions`
-  types.
+  `StartUploadOptions`, `AndroidOnlyUploadOptions`, `RawUploadOptions`, and
+  `UploadId` types.
 
 ## 9.0.0
 

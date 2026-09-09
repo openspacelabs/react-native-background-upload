@@ -36,11 +36,22 @@ export const createUploadClient = (): UploadClient => {
   // registered twice is removed one subscription at a time.
   const stateListeners = new Set<{ listener: (event: StateEvent) => void }>();
 
+  // A listener that throws must not stop the others or fail the delivery
+  // that produced the row.
+  const emitState = (event: StateEvent): void => {
+    stateListeners.forEach(({ listener }) => {
+      try {
+        listener(event);
+      } catch (e) {
+        console.warn('addListener: a state listener threw', e);
+      }
+    });
+  };
+
   const delivery = createDelivery({
     native,
     lookup: (key) => definitions.get(key),
-    emitState: (event) =>
-      stateListeners.forEach(({ listener }) => listener(event)),
+    emitState,
   });
   const { define } = createRegistry({
     native,
