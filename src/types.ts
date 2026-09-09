@@ -1,169 +1,256 @@
-import { EventSubscription } from 'react-native';
-
-export interface EventData {
-  id: string;
-}
-
-export interface ProgressData extends EventData {
-  progress: number;
-}
+import type { EventSubscription } from 'react-native';
 
 /**
- * `expired` means that the upload's `expiresAt` time passed before the server
- * accepted every part. The library keeps the manifest and the bytes. Thus a
- * new `startUpload` call with a later deadline resumes the upload.
+ * Any JSON value. `vars` and `data` must be JSON, because native persists them.
+ * A vars type has to be a `type` alias, not an `interface`: only aliases get
+ * the implicit index signature that this recursive type asks for. Fields must
+ * be mutable arrays, not `readonly T[]`.
  */
-export type ErrorKind = 'http' | 'network' | 'file' | 'expired' | 'unknown';
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | Json[]
+  | { [k: string]: Json };
 
+export type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'GET';
+
+/**
+ * Why a request failed. `http` means the server answered and the status was
+ * not accepted. `network` is a transport failure. `file` means the payload is
+ * missing on disk, so a retry can never succeed. `expired` means `expiresAt`
+ * passed. `truncated` means the response body hit the 1 MB cap, so the
+ * `response` parser could not run. `unknown` covers a parser throw.
+ */
+export type ErrorKind =
+  | 'http'
+  | 'network'
+  | 'file'
+  | 'expired'
+  | 'truncated'
+  | 'unknown';
+
+/** `user` for an explicit `cancel()`. `system` for an OS-initiated stop. */
 export type CancelReason = 'user' | 'system';
-
-export type UploadId = string;
-
-/**
- * Fields carried by every terminal event (`completed` / `error` / `cancelled`).
- *
- * The native side emits the journal entry itself, so a live terminal event is
- * the very same object `getUnacknowledgedEvents()` returns — `eventId` included,
- * which is what lets you `ackEvents([eventId])` immediately after handling a
- * live event instead of waiting to rediscover it on the next launch.
- */
-export interface TerminalEventData extends EventData {
-  eventId: string;
-  type: 'completed' | 'error' | 'cancelled';
-  /** Epoch milliseconds, stamped natively when the outcome occurred. */
-  timestamp: number;
-  /**
-   * The response, when one was received. Absent for a transport failure (the
-   * request never reached the server), so always narrow before using it.
-   */
-  responseCode?: number;
-  responseBody?: string;
-  /** True when `responseBody` hit the 64KB cap and was truncated. */
-  responseBodyTruncated?: boolean;
-  responseHeaders?: Record<string, string>;
-}
-
-/** A 2xx response, or one that matched an `accept` rule on the request. */
-export interface CompletedData extends TerminalEventData {
-  type: 'completed';
-}
-
-export interface ErrorData extends TerminalEventData {
-  type: 'error';
-  error: string;
-  /**
-   * Why it failed. `http` means the server responded and the status was not
-   * accepted (the response fields above are populated). `file` means the payload
-   * is missing or unreadable on disk, so retrying can never succeed.
-   */
-  errorKind?: ErrorKind;
-  /**
-   * Chunked uploads: the index into `parts` of the failing part, when one
-   * part's response caused the error.
-   */
-  partIndex?: number;
-}
-
-export interface CancelledData extends TerminalEventData {
-  type: 'cancelled';
-  /** `user` for an explicit `cancelUpload`; `system` for an OS-initiated stop. */
-  cancelReason?: CancelReason;
-}
-
-/**
- * A terminal event journaled natively before being emitted, so it survives app
- * death and JS reloads. Read via `getUnacknowledgedEvents`, process, then
- * acknowledge via `ackEvents`. Discriminate on `type`.
- */
-export type JournaledEvent = CompletedData | ErrorData | CancelledData;
-
-/** A snapshot of an upload the OS still knows about (from getAllUploads). */
-export interface UploadSnapshot {
-  id: UploadId;
-  state: 'pending' | 'running' | 'completed' | 'error' | 'cancelled';
-  /** iOS: bytes sent so far. Android: a chunked upload's accepted bytes. */
-  bytesSent?: number;
-  /** The total payload bytes. On iOS always; on Android for chunked uploads. */
-  totalBytes?: number;
-}
-
-export type UploadOptions = {
-  url: string;
-  path: string;
-  method: 'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE';
-  id?: string;
-  headers?: {
-    [index: string]: string;
-  };
-  // Whether the upload should wait for wifi before starting
-  wifiOnly?: boolean;
-  accept?: AcceptRule[];
-  // Android options that change behavior. Notification text is not a
-  // per-upload option. Set it one time with configure().
-  android?: Partial<AndroidOnlyUploadOptions>;
-} & RawUploadOptions;
 
 /**
  * A non-2xx response to treat as success. `bodyIncludes` narrows the rule by
  * a response-body substring. This is necessary when one status has several
- * meanings, and only the message shows the difference (our backend's 409). A
- * non-2xx response that matches no rule emits an 'error' event with errorKind
- * 'http'.
+ * meanings, and only the message shows the difference.
  */
-export type AcceptRule = {
-  status: number;
-  bodyIncludes?: string;
+export type AcceptRule = { status: number; bodyIncludes?: string };
+
+/**
+ * One multipart/form-data field. A `path` part is a file. The library copies
+ * the file into its own directory at `mutate()`.
+ */
+export type FormPart = { name: string; contentType: string } & (
+  | { string: string }
+  | { path: string; fileName?: string }
+);
+
+/**
+ * One part of a chunked upload. The library sends the file bytes
+ * [range.start, range.end) as the body of a request to `url`. `headers` merge
+ * over the descriptor's headers. The range end is exclusive.
+ */
+export type Part = {
+  url: string;
+  headers?: Record<string, string>;
+  range: { start: number; end: number };
 };
 
-export type ChunkedUploadOptions = {
-  type: 'chunked';
-  /** Required. The consumer's durable id. */
-  id: string;
+export type RetryPolicy = {
+  backoff: { baseMs: number; maxMs: number; jitter: number };
+  /** HTTP statuses in the 4xx range that retry instead of settling. */
+  terminalHttp: { exempt: number[] };
+};
+
+/** What `request(vars)` returns. Native persists it next to `vars`. */
+export type RequestDescriptor = {
+  /** Required unless `parts` is set. */
+  url?: string;
+  /** Default POST. With `parts` it applies to every part. */
+  method?: Method;
   /**
-   * The single source file. The library takes ownership: at startUpload it
-   * renames the file into the library's own directory (an O(1) move). It
-   * deletes the file only after you acknowledge a 'completed' terminal event.
-   * If you must keep the file, copy it first. A keep-the-file mode is
-   * deliberately not part of the library.
+   * Merged over `configure().headers()`, with names matched without regard
+   * to case. Every part inherits the result.
    */
-  path: string;
-  /**
-   * The consumer authors this one time. The library sends the file bytes
-   * [range.start, range.end) as the body of a PUT to `url`, with `headers`
-   * unchanged. The library never derives or edits a protocol field.
-   */
-  parts: Array<{
-    url: string;
-    /** These headers include Content-Range, Content-Type, and auth. */
-    headers: Record<string, string>;
-    /** Byte offsets. The end is exclusive. */
-    range: { start: number; end: number };
-  }>;
+  headers?: Record<string, string>;
+  /** JSON body. Exactly one of `data`, `form`, `file` must be set. */
+  data?: Json;
+  /** multipart/form-data body. */
+  form?: FormPart[];
+  /** Whole file body. Copied. Moved when `parts` is set. */
+  file?: string;
+  /** Chunked over `file`. Each part sends its own byte range. */
+  parts?: Part[];
   accept?: AcceptRule[];
-  /** Epoch ms. Required. After this time: terminal error, errorKind 'expired'. */
-  expiresAt: number;
-  wifiOnly?: boolean;
-  android?: Partial<AndroidOnlyUploadOptions>;
+  /** Epoch ms. Default now + `lifetimeMs`. */
+  expiresAt?: number;
+  retry?: Partial<RetryPolicy>;
+  android?: { noNotification?: boolean };
 };
 
-export type StartUploadOptions = UploadOptions | ChunkedUploadOptions;
-
-export type AndroidOnlyUploadOptions = {
-  /**
-   * Uploads this file without a progress notification. Default false.
-   *
-   * The notification is what puts the upload's worker in foreground mode, which
-   * is how it survives Doze and memory pressure, so a silent upload is easier
-   * for the OS to defer or stop and re-run. Reserve it for payloads small enough
-   * that a restart costs nothing, and keep it off for anything a user would
-   * expect to see progress for.
-   */
-  noNotification?: boolean;
+/**
+ * The last response of a completed request. `status` is absent for a chunked
+ * completion, because no single response represents N parts. `body` holds up
+ * to 1 MB; `bodyTruncated` says whether the cap cut it.
+ */
+export type RawResponse = {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: string;
+  bodyTruncated: boolean;
 };
 
-export type RawUploadOptions = {
-  type: 'raw';
+/**
+ * `response` is set for `http` and `truncated`. `partIndex` is the index of
+ * the failing part of a chunked upload.
+ */
+export type OutcomeError = {
+  errorKind: ErrorKind;
+  message: string;
+  response?: RawResponse;
+  partIndex?: number;
 };
+
+/**
+ * Handler context. `at` is the native outcome time. `requestId` is the last
+ * attempt's X-Request-Id.
+ */
+export type Meta = {
+  id: string;
+  key: string;
+  at: number;
+  attempts: number;
+  requestId?: string;
+};
+
+export type Outcome =
+  | { kind: 'completed'; response: RawResponse }
+  | { kind: 'error'; error: OutcomeError }
+  | { kind: 'cancelled'; cancelReason: CancelReason };
+
+export type RequestState =
+  | 'queued'
+  | 'running'
+  | 'awaiting-auth'
+  | 'paused'
+  | 'completed'
+  | 'error'
+  | 'cancelled';
+
+/**
+ * One row of the native queue, as `getRequests()` and `state` events carry it.
+ * `vars` is `Json`, because the row does not know its definition. Narrow it
+ * with a cast before reading a field: `(row.vars as { captureId?: string })`.
+ */
+export type RequestRow = {
+  id: string;
+  key: string;
+  vars: Json;
+  state: RequestState;
+  bytesSent: number;
+  totalBytes: number;
+  attempts: number;
+  updatedAt: number;
+};
+
+/**
+ * A `state` event. `reason: 'unhandled-key'` reports an outcome whose key has
+ * no definition. The row carries the entry's real state, and the library keeps
+ * the entry unacknowledged.
+ */
+export type StateEvent = RequestRow & { reason?: 'unhandled-key' };
+
+export type ProgressEvent = {
+  id: string;
+  bytesSent: number;
+  totalBytes: number;
+};
+
+/** One HTTP attempt, before the library interprets it. Response body is capped at 4 KB. */
+export type AttemptEvent = {
+  id: string;
+  key: string;
+  requestId: string;
+  attempt: number;
+  url: string;
+  method: Method;
+  partIndex?: number;
+  outcome: 'completed' | 'error' | 'cancelled';
+  httpCode?: number;
+  responseBody?: string;
+  responseBodyTruncated?: boolean;
+  responseHeaders?: Record<string, string>;
+  errorKind?: ErrorKind;
+  errorMessage?: string;
+  cancelReason?: CancelReason;
+  /** Native stamp, epoch ms. */
+  at: number;
+};
+
+type DefinitionBase<V extends Json> = {
+  /** Persisted with every entry, so rename it with care. */
+  key: string;
+  /** Runs one time, at `mutate()`. */
+  request: (vars: V) => RequestDescriptor;
+  onError?: (error: OutcomeError, vars: V, meta: Meta) => void | Promise<void>;
+};
+
+/** A definition with a parser. `onSuccess` receives what `response` returns. */
+export type DefinitionWithResponse<V extends Json, T> = DefinitionBase<V> & {
+  /** Parses the JSON body (`undefined` when there is none) before `onSuccess`. */
+  response: (raw: unknown) => T;
+  onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
+};
+
+/** A definition without a parser. `onSuccess` receives the `RawResponse`. */
+export type DefinitionWithoutResponse<V extends Json> = DefinitionBase<V> & {
+  response?: undefined;
+  onSuccess?: (data: RawResponse, vars: V, meta: Meta) => void | Promise<void>;
+};
+
+/**
+ * One request kind. `key` is persisted with every entry, so rename it with
+ * care. `request` runs one time, at `mutate()`. `response` parses the JSON
+ * body before `onSuccess`. Without `response`, `onSuccess` receives the
+ * `RawResponse`, and the two shapes are kept apart so that an `onSuccess`
+ * annotated with another type does not compile.
+ */
+export type Definition<V extends Json, T> =
+  | DefinitionWithResponse<V, T>
+  | DefinitionWithoutResponse<V>;
+
+/**
+ * What `define()` returns. `mutate()` resolves when native has persisted the
+ * entry. When `V` is `null` (a `request` that takes no vars), `mutate()` takes
+ * no arguments. `T` is carried so a `Defined` names the response type its
+ * handlers see, even though `mutate()` itself does not use it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export type Defined<V extends Json, T> = {
+  key: string;
+  mutate: [V] extends [null]
+    ? (vars?: null, options?: { id?: string }) => Promise<{ id: string }>
+    : (vars: V, options?: { id?: string }) => Promise<{ id: string }>;
+};
+
+/**
+ * `define()`. `V` infers from the `request` parameter and defaults to `null`
+ * when `request` declares none. `T` infers from the `response` return type.
+ * Without `response`, the handlers see the `RawResponse`.
+ */
+export interface Define {
+  <V extends Json = null, T = RawResponse>(
+    definition: DefinitionWithResponse<V, T>,
+  ): Defined<V, T>;
+  <V extends Json = null>(
+    definition: DefinitionWithoutResponse<V>,
+  ): Defined<V, RawResponse>;
+}
 
 /**
  * The text and the identity of the Android upload progress notification. Set
@@ -181,24 +268,36 @@ export type AndroidNotificationConfig = {
 };
 
 export type ConfigureOptions = {
+  /** Default 14 days. Sets the default `expiresAt` of every entry. */
+  lifetimeMs?: number;
+  /** Defaults: base 1 s, max 2 h, jitter 0.2, exempt [404]. */
+  retry?: Partial<RetryPolicy>;
+  /** Called at `mutate()`. The descriptor's headers merge over the result. */
+  headers?: () => Record<string, string>;
   android?: Partial<AndroidNotificationConfig>;
 };
 
 export interface AddListener {
-  (
-    event: 'progress',
-    callback: (data: ProgressData) => void,
-  ): EventSubscription;
-
-  (event: 'error', callback: (data: ErrorData) => void): EventSubscription;
-
-  (
-    event: 'completed',
-    callback: (data: CompletedData) => void,
-  ): EventSubscription;
-
-  (
-    event: 'cancelled',
-    callback: (data: CancelledData) => void,
-  ): EventSubscription;
+  (event: 'state', listener: (e: StateEvent) => void): EventSubscription;
+  (event: 'progress', listener: (e: ProgressEvent) => void): EventSubscription;
+  (event: 'attempt', listener: (e: AttemptEvent) => void): EventSubscription;
 }
+
+export type UploadClient = {
+  configure: (options: ConfigureOptions) => void;
+  define: Define;
+  pause: () => Promise<void>;
+  resume: () => Promise<void>;
+  cancel: (id: string) => Promise<void>;
+  setWifiOnly: (enabled: boolean) => Promise<void>;
+  updateHeaders: (patch: Record<string, string>) => Promise<void>;
+  getRequests: (filter?: { key?: string; id?: string }) => RequestRow[];
+  addListener: AddListener;
+  chunkPlan: (
+    sizeBytes: number,
+    opts?: { min?: number; max?: number },
+  ) => Array<{ start: number; end: number }>;
+  android: {
+    addNotificationListener: (listener: () => void) => EventSubscription;
+  };
+};

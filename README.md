@@ -51,248 +51,266 @@ generated header is Objective-C++ only — so the handler lives on `RNBackground
 
 # Usage
 
-```js
-import Upload from 'react-native-background-upload';
+The library owns a durable queue of HTTP requests: JSON bodies, multipart
+forms, whole files, and chunked files. You describe each request kind one
+time with `define()`, enqueue instances with `mutate()`, and receive every
+outcome through the definition's handlers. Outcomes survive app death,
+because the native side journals them before it tells JS.
 
-// Optional. Call one time at app startup to set the Android notification text.
-// The library keeps the text in native storage. Thus a worker relaunched with
-// no JS shows the same text. If you do not call configure(), the library uses
-// default text and makes its own channel. The call does nothing on iOS.
-Upload.configure({ android: { notificationTitle: 'Uploading…' } });
+```ts
+import { createUploadClient } from 'react-native-background-upload';
 
-// Listeners are global. Every event carries the upload's id.
-Upload.addListener('progress', ({ id, progress }) => {});
-// responseCode/responseBody are set for simple uploads only. A chunked
-// 'completed' carries neither, because no single response represents N parts.
-Upload.addListener('completed', ({ id, responseCode, responseBody }) => {});
-Upload.addListener('error', ({ id, error, errorKind, responseCode }) => {});
-Upload.addListener('cancelled', ({ id, cancelReason }) => {});
+export const uploads = createUploadClient();
 
-const uploadId = await Upload.startUpload({
-  type: 'raw',
-  url: 'https://myservice.com/path/to/post',
-  path: 'file://path/to/file/on/device',
-  method: 'POST',
-  headers: { 'content-type': 'application/octet-stream' },
-  // Optional. Non-2xx responses to treat as success (for example, an
-  // idempotent create that conflicts). Each other non-2xx response is an
-  // 'error' with errorKind 'http'.
-  accept: [{ status: 409, bodyIncludes: 'already completed' }],
+// One definition per request kind. `request` runs one time, at mutate().
+// `vars` must be JSON and at most 4 KB; native persists them next to the entry.
+// Declare the vars as a `type` alias: an `interface` fails the Json constraint.
+type AddCommentVars = { siteId: string; noteId: string; comment: string };
+export const addComment = uploads.define({
+  key: 'note.comment.add', // persisted with every entry; rename with care
+  request: ({ siteId, noteId, comment }: AddCommentVars) => ({
+    url: `https://api.example.com/sites/${siteId}/notes/${noteId}/comments`,
+    data: { comment }, // JSON body. Default method is POST.
+  }),
+  // Parses the JSON body before onSuccess. Zod users pass schema.parse.
+  response: (raw) => (raw as { content: Comment[] }).content,
+  onSuccess: (content, { noteId }, meta) => {
+    // Runs after the server accepted the request, possibly on a later launch.
+    store.dispatch(commentsLoaded({ noteId, content }));
+  },
+  onError: (error, vars, meta) => {
+    // error.errorKind: 'http' | 'network' | 'file' | 'expired' | 'truncated' | 'unknown'
+  },
+});
+
+// At boot, after every define() call. Replay of journaled outcomes starts here.
+uploads.configure({
+  headers: () => ({ Authorization: `Bearer ${currentToken()}` }),
+  android: { notificationTitle: 'Uploading', notificationChannel: 'uploads' },
+});
+
+// Anywhere. Resolves when the entry is durable, never on the network.
+const { id } = await addComment.mutate(
+  { siteId, noteId, comment },
+  { id: localCommentId }, // optional; makes a re-dispatch idempotent
+);
+```
+
+Handlers must be idempotent. The library acknowledges an outcome only after
+the handler's promise resolves, so a crash before that point redelivers the
+outcome at the next launch.
+
+## The request descriptor
+
+`request(vars)` returns a plain object. Exactly one body kind is required.
+A field outside this table makes `mutate()` reject and name the field, because
+TypeScript does not flag a misspelled key on an inferred arrow return.
+
+| Field | Notes |
+| --- | --- |
+| `url` | Required unless `parts` is set. |
+| `method` | `POST` (default), `PUT`, `PATCH`, `DELETE`, `GET`. With `parts` it applies to every part. |
+| `headers` | Merged over `configure().headers()`, names matched without regard to case. Every chunked part inherits the result. |
+| `data` | JSON body. |
+| `form` | `multipart/form-data`: `[{ name, contentType, string }]` or `[{ name, contentType, path, fileName? }]`. File parts are copied. |
+| `file` | Whole file body. Copied. Moved when `parts` is set. |
+| `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
+| `accept` | Non-2xx responses to treat as success: `[{ status, bodyIncludes? }]`. |
+| `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
+| `retry` | Per-request override of the `configure()` retry defaults. |
+| `android` | `{ noNotification?: boolean }`. See Silent uploads. |
+
+### Chunked uploads
+
+A descriptor with `file` and `parts` sends one file as many part requests but
+stays one entry: one id, byte-weighted `progress`, and `completed` only when
+every part is accepted. Author the ranges with `chunkPlan` so the part count
+you tell your server and the parts the library sends derive from one array.
+
+```ts
+type CaptureFileVars = { path: string; size: number; uploadId: string };
+
+const captureFile = uploads.define({
+  key: 'capture.file',
+  request: ({ path, size, uploadId }: CaptureFileVars) => {
+    const ranges = uploads.chunkPlan(size, { min: 8 * 2 ** 20, max: 20 * 2 ** 20 });
+    return {
+      method: 'PUT',
+      file: path, // moved into the library directory
+      // Derive each part URL from its index. The part count you tell the
+      // server and the parts sent here then come from the one chunkPlan call.
+      parts: ranges.map((range, i) => ({
+        url: partUrl(uploadId, i + 1), // part numbers are 1-indexed
+        headers: { 'Content-Range': `${range.start}-${range.end - 1}/${size}` },
+        range,
+      })),
+      accept: [{ status: 409, bodyIncludes: 'already completed' }],
+      // A 404 on a part means the server-side multipart is gone. Make it
+      // terminal so onError can recreate under a fresh server upload id.
+      retry: { terminalHttp: { exempt: [] } },
+    };
+  },
+  onError: (error, vars) => { /* recreate: mutate() again with new parts */ },
 });
 ```
 
-## Chunked uploads
+**File ownership.** A chunked `file` is moved into the library's directory at
+`mutate()`; a single `file` body and every `form` part path are copied. Bytes
+are deleted after a `completed` outcome is acknowledged, or on `cancel()`.
+Nothing else deletes them.
 
-A `type: 'chunked'` upload sends one file as many part requests but stays one
-logical upload: one id, one event stream, byte-weighted `progress`, and
-`completed` only when every part has been accepted. You author the parts — URL,
-headers, byte range — once, at creation; the library owns the transport and
-never constructs or edits a protocol field. Author the ranges with `chunkPlan`
-so the part count you tell your server and the parts the library sends derive
-from the same array:
+**Same id, again.** `mutate()` with an id that exists follows the v9 rules.
+Same parts or body: resume; new headers and `expiresAt` replace the stored
+ones, and a settled entry reopens and settles once more. Settled entry with
+different parts: recreate over the same bytes (the new parts must tile the
+same size). Running entry with different parts: reject.
 
-```js
-const size = (await stat(path)).size;
-const ranges = Upload.chunkPlan(size, { min: 8 * 2 ** 20, max: 20 * 2 ** 20 });
-// Tell your server ranges.length parts, then:
-await Upload.startUpload({
-  type: 'chunked',
-  id: myDurableId, // required
-  path, // see file ownership below
-  parts: ranges.map((range, i) => ({
-    url: partUrl(i + 1),
-    headers: {
-      Authorization: token,
-      'Content-Type': 'application/octet-stream',
-      'Content-Range': `bytes ${range.start}-${range.end - 1}/${size}`,
-    },
-    range, // bytes, end exclusive
-  })),
-  accept: [{ status: 409, bodyIncludes: 'already completed' }],
-  expiresAt: Date.now() + 14 * 24 * 60 * 60 * 1000, // required, epoch ms
-});
-```
+### Silent uploads (Android)
 
-**File ownership.** The library takes the file: an O(1) rename into its own
-directory at `startUpload`. Nothing your app does afterward (cache sweeps,
-logout cleanup) can destroy the bytes mid-upload. The file is deleted in
-exactly one case — a `completed` event has been acknowledged via `ackEvents`.
-Copy the file first if you need it afterward.
-
-**Resume is re-calling `startUpload`.** The parts are persisted in a native
-manifest, so crash recovery, resume after `cancelUpload`, resume after expiry,
-and refreshing auth headers are all the same call: `startUpload` again with the
-same id and the same part ranges/URLs. Parts already accepted are skipped; the
-rest continue with the new call's headers and `expiresAt` (this is how a fresh
-token reaches parts that stalled on 401). Once a manifest exists, `path` is
-ignored — the library's owned bytes are the source of truth.
-
-**Recreate is the same call with different parts.** When the old server upload
-is dead (for example, swept server-side), author fresh part URLs and call
-`startUpload` with the same id and the new parts array. The owned bytes are
-kept, the parts are replaced, and every part resets to unsent; the new ranges
-must tile the same total size. A recreate is accepted only while the upload is
-not running — stalled on a terminal error, expired, or cancelled. While it is
-running, a differing parts array is rejected: that is a consumer bug, not a
-recreate.
-
-**Lifetime.** Within `expiresAt`, transient failures (network, 5xx) retry on
-exponential backoff with no attempt cap. Past it, the library journals an
-`error` with `errorKind: 'expired'` and stops — keeping the manifest and bytes,
-so you can resume the same server upload with a later `expiresAt`, or recreate
-under a new one. When neither is wanted, release them with `removeUpload`.
-
-Choosing a value: `expiresAt` is when your app *hears about* a stuck upload,
-not when data is lost — bytes survive expiry. Pick something well inside your
-backend's own cleanup horizon so expiry fires while the server upload is still
-resumable, and generous enough for real offline stretches. The OpenSpace
-backend prunes incomplete multipart uploads 31 days after creation
-(`UploadPartCleanup`); Diana passes 14 days, leaving a 17-day window where an
-expired upload can still resume the same server uploadId.
+`android: { noNotification: true }` runs the request without a progress
+notification. That notification is also the worker's foreground-service
+notification, so a silent request runs as an ordinary background worker and
+the OS may defer or restart it. Reserve it for small payloads.
 
 # Reliable delivery
 
-Terminal events (`completed` / `error` / `cancelled`) are journaled natively
-*before* they are emitted, so they survive app death, JS reloads, and background
-relaunches. Events stay in the journal until you acknowledge them. Drain it on
-every app start:
+1. **Write-ahead.** Entry, descriptor, and staged body persist before any
+   attempt. `mutate()` resolves when the write lands.
+2. **Journal before emit, ack after the handler.** Every terminal outcome is
+   journaled natively, then delivered. The library acknowledges after the
+   handler's promise resolves. A rejection, or app death before the ack,
+   redelivers at the next launch. A handler that has not settled after 30 s
+   gets a console warning and keeps waiting.
+3. **One outcome per settle cycle.** `pause()` produces none. A same-id
+   `mutate()` on a settled entry reopens it, and it settles once more.
+4. **Never before `mutate()` resolves.** Delivery for an id waits for the
+   caller's promise.
+5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
+   deliver then. Call every `define()` first.
+6. **Unknown key is loud.** An outcome whose key has no definition stays
+   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`.
+7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
+   or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 
-```js
-const events = await Upload.getUnacknowledgedEvents();
-for (const e of events) {
-  // e: { eventId, id, type, timestamp, responseCode?, responseBody?,
-  //      responseHeaders?, error?, errorKind?, cancelReason? }
-  handleOutcome(e);
-}
-await Upload.ackEvents(events.map((e) => e.eventId));
+Retry classes:
 
-// Then reconcile anything still in flight:
-const live = await Upload.getAllUploads(); // [{ id, state, ... }]
-```
+| Attempt outcome | Action |
+| --- | --- |
+| 2xx, or an `accept` rule matches | settle `completed` |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt` |
+| 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
+| other 4xx not in `retry.terminalHttp.exempt` | settle `error` with `errorKind: 'http'` |
+| 4xx in `exempt` (default `[404]`) | as transient |
+| payload missing on disk | settle `error` with `errorKind: 'file'` |
+| `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
+| response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
 
-Notes:
-- **`completed` fires only for 2xx** (or a response matching the request's
-  `accept` rules). Every other HTTP response is an `error` with
-  `errorKind: 'http'` and the response attached — a 400 is an error, not a
-  completion.
-- `errorKind` is `'http' | 'network' | 'file' | 'expired' | 'unknown'`. Retry
-  transport failures; treat client errors as terminal; `expired` means a chunked
-  upload's `expiresAt` passed (see Chunked uploads for recovery).
-- `cancelReason` distinguishes a user cancel (`'user'`) from a system kill
-  (`'system'`).
-- Duplicate journal entries for one upload id are possible if the process dies at
-  the wrong moment (Android may re-run the worker) — dedupe by `id`, keep latest.
-- Android: `getAllUploads()` reflects only live/recent work (WorkManager prunes
-  finished work after ~a day). The journal is the source of truth for outcomes.
+Every attempt sends an `X-Request-Id` header, minted per attempt. `Meta.requestId`
+carries the last one.
 
 # API
 
-All methods are on the default export.
+`createUploadClient()` returns a client. The default export is one client;
+an app needs one.
+
+### `define(definition): { key, mutate }`
+
+```ts
+type Definition<V extends Json, T> =
+  | {
+      key: string;
+      request: (vars: V) => RequestDescriptor;
+      response: (raw: unknown) => T; // JSON-parsed body, or undefined when there is none
+      onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
+      onError?: (error: OutcomeError, vars: V, meta: Meta) => void | Promise<void>;
+    }
+  | {
+      key: string;
+      request: (vars: V) => RequestDescriptor;
+      response?: undefined;
+      onSuccess?: (data: RawResponse, vars: V, meta: Meta) => void | Promise<void>;
+      onError?: (error: OutcomeError, vars: V, meta: Meta) => void | Promise<void>;
+    };
+```
+
+`V` infers from the `request` parameter annotation, `T` from the `response`
+return type. Without `response`, `onSuccess` receives the `RawResponse`
+(`{ status?, headers?, body?, bodyTruncated }`), and an `onSuccess` annotated
+with any other type is a compile error. `V` must be a `type` alias with
+mutable arrays: an `interface` or a `readonly T[]` field fails the `Json`
+constraint, and the compiler error names `null` rather than the cause. A
+`request` that declares no parameter gives `V = null`, and `mutate()` then
+takes no arguments. When `response` is set and
+the body was truncated, `onError` gets `errorKind: 'truncated'`. When
+`response` throws, `onError` gets `errorKind: 'unknown'` with the thrown
+message; the entry still settles as completed. A key that is already defined
+is replaced, with a warning in development. A `cancelled` outcome calls no
+handler.
+
+`Meta` is `{ id, key, at, attempts, requestId? }`; `at` is the native outcome
+time.
+
+### `mutate(vars, { id? }): Promise<{ id }>`
+
+Runs `request(vars)` once, merges `configure().headers()` under the
+descriptor's headers, validates the descriptor, defaults `expiresAt`, and
+persists the entry. Resolves with the id when the write lands. Rejects on a
+malformed descriptor, an unknown descriptor field, a missing file, or `vars`
+over 4 KB. Only `vars` are capped. `id` defaults to a UUID. For a definition
+whose `request` takes no vars, call `mutate()` with no arguments; native stores
+`null`.
 
 ### `configure(options): void`
-One-time setup — call at app startup. `options.android` sets the upload
-notification's text and identity:
-`notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. The config is
-persisted natively, so a worker relaunched by WorkManager with no JS running
-shows the same text. Optional: omitted fields keep the library defaults (each
-call replaces the whole config). A no-op on iOS, which has no library
-notification.
 
-### `startUpload(options): Promise<string>`
-Starts an upload; resolves to its id. Discriminated on `options.type`: `'raw'`
-sends the whole file as one request body, `'chunked'` sends the authored parts
-(see Chunked uploads). Rejects (or, for malformed chunked input, throws
-synchronously) only on bad options — transport failures and HTTP error responses
-arrive later as `error` events, not a rejection.
+Call one time at boot, after every `define()`. Starts replay of journaled
+outcomes. A second call updates the settings and does not replay again.
 
-**Idempotent for every upload, always.** Calling `startUpload` again with an id
-that is already pending or running is never an error: a raw upload resolves with
-the same id instead of starting a duplicate; a chunked upload reconciles — parts
-already accepted are skipped, the rest continue with the new call's headers. No
-pre-dispatch dedupe is needed on your side.
+| Option | Notes |
+| --- | --- |
+| `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
+| `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
+| `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
+| `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
-Options for `type: 'raw'`:
+### `pause(): Promise<void>` and `resume(): Promise<void>`
+Whole-queue pause. No outcome is produced; live rows show `paused`.
 
-| Option | Type | Notes |
-| --- | --- | --- |
-| `url` | string | Required. |
-| `path` | string | Required. Local file path (`file://…`). URIs are not escaped for you. |
-| `method` | string | Default `POST`. |
-| `headers` | object | HTTP headers. |
-| `id` | string | Defaults to a generated UUID. |
-| `wifiOnly` | boolean | Wait for wifi before/while uploading. |
-| `accept` | AcceptRule[] | Non-2xx responses to treat as success — see Accept rules. |
-| `android` | object | Optional. `noNotification` (default false) — see Silent uploads. Notification text is set once via `configure()`, not per upload. |
+### `cancel(id): Promise<void>`
+A live entry settles `cancelled` with reason `user` and is forgotten after
+its ack. A settled entry is forgotten now, row and bytes.
 
-Options for `type: 'chunked'`:
+### `setWifiOnly(enabled): Promise<void>`
+Persisted natively. Applies to queued and future entries.
 
-| Option | Type | Notes |
-| --- | --- | --- |
-| `id` | string | Required — your durable id. |
-| `path` | string | Required. The library takes ownership of the file — see Chunked uploads. |
-| `parts` | array | Required. `{ url, headers, range: { start, end } }` per part; ranges in bytes, end exclusive. Sent verbatim as PUTs. |
-| `expiresAt` | number | Required, epoch ms. Past it: terminal `error` with `errorKind: 'expired'`. |
-| `accept` | AcceptRule[] | See Accept rules. |
-| `wifiOnly` | boolean | Wait for wifi before/while uploading. |
-| `android` | object | Same as raw. |
+### `updateHeaders(patch): Promise<void>`
+Merges the patch into every queued and parked entry's headers, then resumes
+the entries parked on `awaiting-auth`. This is how a fresh token reaches
+requests that stalled on 401.
 
-#### Accept rules
+### `getRequests(filter?): RequestRow[]`
+Synchronous. Live rows from native's in-memory index, so it works offline.
+`filter` is `{ key?, id? }`. A row is
+`{ id, key, vars, state, bytesSent, totalBytes, attempts, updatedAt }`, with
+`state` one of `queued | running | awaiting-auth | paused | completed | error | cancelled`.
+`vars` is typed `Json`, because a row does not know its definition. Narrow
+it before reading a field, for example to cancel every entry of one capture:
 
-`accept: Array<{ status: number, bodyIncludes?: string }>` — non-2xx responses
-to treat as success, for both upload types. `bodyIncludes` narrows a rule by
-response-body substring, for servers where one status carries several meanings
-distinguishable only by message. A response matching a rule completes the
-request (for chunked, marks the part accepted); any other non-2xx is an `error`
-with `errorKind: 'http'`.
-
-#### Silent uploads (Android)
-
-`android: { noNotification: true }` uploads a file without posting a progress
-notification, so the shade only shows the uploads a user actually asked to watch.
-
-That notification is also the worker's foreground-service notification, so a
-silent upload runs as an ordinary background worker instead. The OS is then free
-to defer it, or to stop it mid-flight and let WorkManager re-run it later. Keep
-the notification for anything that takes real time to upload; reserve
-`noNotification` for small payloads a restart would cost nothing.
-
-All uploads share one notification (identified by the configured
-`notificationId`), and its progress bar reports every in-flight upload — silent
-ones included.
-
-### `cancelUpload(uploadId): Promise<boolean>`
-Cancels an upload. Fires a `cancelled` event with `cancelReason: 'user'`. For a
-chunked upload this cancels in-flight requests but keeps the manifest and bytes —
-the next `startUpload` with the same id resumes it (there is no separate pause
-API).
-
-### `removeUpload(uploadId): Promise<void>`
-Releases an upload's native manifest and bytes. Every terminal outcome other
-than an acked `completed` (expired, error, cancelled) keeps both so you can
-resume or recreate; call this once neither is wanted.
+```ts
+uploads
+  .getRequests({ key: 'capture.file' })
+  .filter((row) => (row.vars as { captureId?: string }).captureId === captureId)
+  .forEach((row) => uploads.cancel(row.id));
+```
 
 ### `chunkPlan(sizeBytes, { min?, max? }): Array<{ start, end }>`
 Splits a byte count into contiguous, end-exclusive ranges: a deterministic
-greedy walk of `max`-sized chunks (default 20MB), with a final remainder smaller
-than `min` (default 8MB) absorbed into the previous chunk. A file smaller than
-`min` is a single chunk. Pure and deterministic on purpose: call it once and
-derive both your server's part count and the `parts` array from the same result,
-so the two can never disagree.
+greedy walk of `max`-sized chunks (default 20 MB), with a final remainder
+smaller than `min` (default 8 MB) absorbed into the previous chunk. A file
+smaller than `min` is a single chunk. Also a module export.
 
-### `addListener(eventType, listener): EventSubscription`
-`addListener(event: 'progress' | 'error' | 'completed' | 'cancelled', callback)`.
-Listeners are global — there is no per-upload subscription; every event carries
-the upload's `id`, so discriminate on it. Call `.remove()` on the result to
-unsubscribe.
-
-### `getUnacknowledgedEvents(): Promise<JournaledEvent[]>`
-Terminal events not yet acknowledged, including ones that fired while JS was dead.
-
-### `ackEvents(eventIds: string[]): Promise<boolean>`
-Removes journaled events once processed.
-
-### `getAllUploads(): Promise<UploadSnapshot[]>`
-Uploads the OS still knows about, for boot-time reconciliation.
+### `addListener(event, listener): EventSubscription`
+See Events. Listeners are global; every event carries the entry's `id`. Call
+`.remove()` on the result to unsubscribe.
 
 ### `android.addNotificationListener(listener)`
 Fires when the Android progress notification is pressed. No event data.
@@ -301,10 +319,11 @@ Fires when the Android progress notification is pressed. No event data.
 
 | Event | Data |
 | --- | --- |
-| `progress` | `{ id, progress: 0-100 }` |
-| `completed` | `{ id, responseCode?, responseBody?, responseHeaders?, eventId? }` — response fields on simple uploads only; a chunked `completed` carries none (no single response represents N parts) |
-| `error` | `{ id, error, errorKind?, partIndex?, responseCode?, responseBody?, responseHeaders? }` |
-| `cancelled` | `{ id, cancelReason?: 'user' | 'system' }` |
+| `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key has no definition. A consumer's reducer is one upsert. |
+| `progress` | `{ id, bytesSent, totalBytes }`, byte-weighted across a chunked upload's parts. |
+| `attempt` | One HTTP attempt before interpretation: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, cancelReason?, at }`. |
+
+Terminal outcomes do not appear here. They go to the definition's handlers.
 
 # Contributing
 
