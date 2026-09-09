@@ -110,7 +110,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | --- | --- |
 | `url` | Required unless `parts` is set. |
 | `method` | `POST` (default), `PUT`, `PATCH`, `DELETE`, `GET`. With `parts` it applies to every part. |
-| `headers` | Merged over `configure().headers()`. Every chunked part inherits the result. |
+| `headers` | Merged over `configure().headers()`, names matched without regard to case. Every chunked part inherits the result. |
 | `data` | JSON body. |
 | `form` | `multipart/form-data`: `[{ name, contentType, string }]` or `[{ name, contentType, path, fileName? }]`. File parts are copied. |
 | `file` | Whole file body. Copied. Moved when `parts` is set. |

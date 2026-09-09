@@ -54,8 +54,9 @@ const errorMessage = (e: unknown): string =>
 /**
  * Routes settled outcomes to the definitions' handlers and acknowledges them
  * afterwards. Rules: journal before emit is native's job; here it is dedupe by
- * eventId, wait for the id's in-flight mutate(), look up the key, run the
- * handler, ack after its promise resolves. An unknown key or a rejected
+ * eventId, drop a malformed event, run one id's outcomes in order, wait for
+ * the id's in-flight mutate(), ack a cancelled outcome, look up the key, run
+ * the handler, ack after its promise resolves. An unknown key or a rejected
  * handler leaves the outcome unacknowledged, so native redelivers it at the
  * next launch.
  */
@@ -68,6 +69,9 @@ export const createDelivery = ({
 }: DeliveryDeps): Delivery => {
   const seen = new Set<string>();
   const pendingMutates = new Map<string, Promise<void>>();
+  // The tail of each id's delivery chain. Outcomes of one id run in order,
+  // one handler at a time. Different ids run concurrently.
+  const lanes = new Map<string, Promise<void>>();
   let subscription: EventSubscription | undefined;
   // Live events that arrive while the journal drains wait here, so replayed
   // outcomes deliver first.
@@ -193,23 +197,42 @@ export const createDelivery = ({
     }
   };
 
-  const deliver = async (event: SettledEvent): Promise<void> => {
-    if (typeof event?.eventId !== 'string') {
-      warn('delivery: dropped a settled event without an eventId', event);
+  /** Runs `task` after the previous delivery for `id` has settled. */
+  const enqueueForId = (id: string, task: () => Promise<void>): void => {
+    const prior = lanes.get(id) ?? Promise.resolve();
+    const next = prior.then(task).catch((e) => {
+      warn(`delivery: unexpected failure while delivering for ${id}`, e);
+    });
+    lanes.set(id, next);
+    void next.then(() => {
+      if (lanes.get(id) === next) {
+        lanes.delete(id);
+      }
+    });
+  };
+
+  /** Delivery for `id` waits until the caller of mutate() has the id. */
+  const waitForMutate = async (id: string): Promise<void> => {
+    const pending = pendingMutates.get(id);
+    if (!pending) {
       return;
     }
-    if (seen.has(event.eventId)) {
+    await pending;
+    // The enqueue promise settles before mutate()'s own await and before
+    // the caller's continuation, both microtasks. A macrotask puts the
+    // handler after them, so the caller has the id before any handler
+    // sees it.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  };
+
+  /** The outcome's own steps, run inside its id's lane. */
+  const route = async (event: SettledEvent): Promise<void> => {
+    await waitForMutate(event.id);
+    // A cancelled outcome has no handler, so it acks whether or not the key
+    // is still defined.
+    if (event.kind === 'cancelled') {
+      await ack(event.eventId);
       return;
-    }
-    seen.add(event.eventId);
-    const pending = pendingMutates.get(event.id);
-    if (pending) {
-      await pending;
-      // The enqueue promise settles before mutate()'s own await and before
-      // the caller's continuation, both microtasks. A macrotask puts the
-      // handler after them, so the caller has the id before any handler
-      // sees it.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     const definition = lookup(event.key);
     if (!definition) {
@@ -219,13 +242,36 @@ export const createDelivery = ({
       emitState(unhandledRow(event));
       return;
     }
-    if (event.kind === 'cancelled') {
-      await ack(event.eventId);
-      return;
-    }
     if (await runHandler(event, definition)) {
       await ack(event.eventId);
     }
+  };
+
+  const isWellFormed = (event: SettledEvent): boolean =>
+    typeof event.key === 'string' &&
+    typeof event.kind === 'string' &&
+    typeof event.id === 'string';
+
+  const deliver = (event: SettledEvent): void => {
+    if (typeof event?.eventId !== 'string') {
+      warn('delivery: dropped a settled event without an eventId', event);
+      return;
+    }
+    if (seen.has(event.eventId)) {
+      return;
+    }
+    seen.add(event.eventId);
+    // A journal written by an older native build can carry another shape.
+    // Such an entry is neither acked nor routed. The seen set keeps the
+    // warning to one per eventId.
+    if (!isWellFormed(event)) {
+      warn(
+        `delivery: dropped a malformed settled event ${event.eventId}. It has no string key, kind and id.`,
+        event,
+      );
+      return;
+    }
+    enqueueForId(event.id, () => route(event));
   };
 
   const start = (): void => {
@@ -237,7 +283,7 @@ export const createDelivery = ({
     subscription = native.onSettled((raw) => {
       const event = raw as SettledEvent;
       if (live) {
-        void deliver(event);
+        deliver(event);
       } else {
         buffer.push(event);
       }
@@ -246,13 +292,13 @@ export const createDelivery = ({
       .getUnacknowledgedEvents()
       .then(
         (events) => {
-          (events as SettledEvent[]).forEach((event) => void deliver(event));
+          (events as SettledEvent[]).forEach(deliver);
         },
         (e) => warn('delivery: getUnacknowledgedEvents failed', e),
       )
       .then(() => {
         live = true;
-        buffer.splice(0).forEach((event) => void deliver(event));
+        buffer.splice(0).forEach(deliver);
       });
   };
 

@@ -104,12 +104,12 @@ describe('mutate', () => {
     expect(lastEntry()).toMatchObject({ id: 'fixed', vars: null });
   });
 
-  it('resolves with the id native returns', async () => {
+  it('resolves with the entry id, not the id native returns', async () => {
     const { define, enqueue } = setup();
     enqueue.mockResolvedValueOnce('native-id');
     const create = define({ key: 'k', request: jsonPost });
     await expect(create.mutate({ n: 1 }, { id: 'mine' })).resolves.toEqual({
-      id: 'native-id',
+      id: 'mine',
     });
   });
 
@@ -311,6 +311,76 @@ describe('mutate', () => {
       ).rejects.toThrow(/unknown form\[0\] field "filename".*"fileName"/);
     });
 
+    it('rejects an unknown field inside retry, accept, android or a part range', async () => {
+      const base = { url: 'https://x', data: {} };
+      await expect(
+        mutateWith({ ...base, retry: { terminalHTTP: {} } }).promise,
+      ).rejects.toThrow(/unknown retry field "terminalHTTP".*"terminalHttp"/);
+      await expect(
+        mutateWith({ ...base, retry: { backoff: { base: 1 } } }).promise,
+      ).rejects.toThrow(/unknown retry\.backoff field "base".*"baseMs"/);
+      await expect(
+        mutateWith({ ...base, retry: { terminalHttp: { exmpt: [] } } }).promise,
+      ).rejects.toThrow(/unknown retry\.terminalHttp field "exmpt".*"exempt"/);
+      await expect(
+        mutateWith({ ...base, accept: [{ statsu: 409 }] }).promise,
+      ).rejects.toThrow(/unknown accept\[0\] field "statsu".*"status"/);
+      await expect(
+        mutateWith({ ...base, android: { noNotifications: true } }).promise,
+      ).rejects.toThrow(/unknown android field "noNotifications"/);
+      await expect(
+        mutateWith({
+          file: '/f',
+          parts: [{ url: 'https://p', range: { start: 0, end: 1, length: 1 } }],
+        }).promise,
+      ).rejects.toThrow(/unknown parts\[0\]\.range field "length"/);
+    });
+
+    it('rejects the wrong value shape inside retry, accept and android', async () => {
+      const base = { url: 'https://x', data: {} };
+      await expect(mutateWith({ ...base, accept: {} }).promise).rejects.toThrow(
+        /accept must be an array/,
+      );
+      await expect(
+        mutateWith({ ...base, accept: [{ status: '409' }] }).promise,
+      ).rejects.toThrow(/accept\[0\]\.status must be a number/);
+      await expect(
+        mutateWith({ ...base, accept: [{ status: 409, bodyIncludes: 5 }] })
+          .promise,
+      ).rejects.toThrow(/accept\[0\]\.bodyIncludes must be a string/);
+      await expect(mutateWith({ ...base, retry: [] }).promise).rejects.toThrow(
+        /retry must be a plain object/,
+      );
+      await expect(
+        mutateWith({ ...base, retry: { terminalHttp: { exempt: [404, 'x'] } } })
+          .promise,
+      ).rejects.toThrow(
+        /retry\.terminalHttp\.exempt must be an array of numbers/,
+      );
+      await expect(
+        mutateWith({ ...base, android: { noNotification: 'yes' } }).promise,
+      ).rejects.toThrow(/android\.noNotification must be a boolean/);
+    });
+
+    it('accepts valid retry, accept and android shapes', async () => {
+      await expect(
+        mutateWith({
+          url: 'https://x',
+          data: {},
+          retry: {
+            backoff: { baseMs: 1000, maxMs: 60_000, jitter: 0.2 },
+            terminalHttp: { exempt: [] },
+          },
+          accept: [{ status: 409 }, { status: 400, bodyIncludes: 'dup' }],
+          android: { noNotification: true },
+        }).promise,
+      ).resolves.toBeDefined();
+      await expect(
+        mutateWith({ url: 'https://x', data: {}, retry: {}, accept: [] })
+          .promise,
+      ).resolves.toBeDefined();
+    });
+
     it('never reaches native on a rejected descriptor', async () => {
       const { promise, enqueue } = mutateWith({ data: {} });
       await expect(promise).rejects.toThrow();
@@ -413,6 +483,22 @@ describe('mutate', () => {
         'X-App': 'app',
         'Content-Type': 'a/b',
       });
+    });
+
+    it('matches header names without regard to case and keeps the descriptor spelling', async () => {
+      const { define, lastEntry } = setup({
+        headers: () => ({ Authorization: 'a' }),
+      });
+      const send = define({
+        key: 'k',
+        request: (_vars: null) => ({
+          url: 'https://x',
+          data: {},
+          headers: { authorization: 'b' },
+        }),
+      });
+      await send.mutate(null);
+      expect(lastEntry().descriptor.headers).toEqual({ authorization: 'b' });
     });
 
     it('sends the provider headers alone when the descriptor has none', async () => {

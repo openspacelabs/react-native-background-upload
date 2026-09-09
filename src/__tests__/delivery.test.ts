@@ -264,7 +264,115 @@ describe('ordering against mutate()', () => {
   });
 });
 
+describe('ordering per id', () => {
+  it('runs the outcomes of one id one at a time, in order, without blocking another id', async () => {
+    const gate = deferred();
+    const started: string[] = [];
+    const { start, native } = setup(
+      {
+        k: {
+          key: 'k',
+          request: jest.fn(),
+          onSuccess: (
+            _d: unknown,
+            _v: unknown,
+            meta: { id: string; at: number },
+          ) => {
+            started.push(`${meta.id}@${meta.at}`);
+            return meta.at === 1 ? gate.promise : undefined;
+          },
+        },
+      },
+      [
+        completed({ eventId: 'a', id: 'u1', at: 1 }),
+        completed({ eventId: 'b', id: 'u1', at: 2 }),
+        completed({ eventId: 'c', id: 'u2', at: 3 }),
+      ],
+    );
+    start();
+    await flush();
+    expect(started).toEqual(['u1@1', 'u2@3']);
+    expect(native.ackEvents).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledWith(['c']);
+    gate.resolve();
+    await flush();
+    expect(started).toEqual(['u1@1', 'u2@3', 'u1@2']);
+    expect(native.ackEvents).toHaveBeenCalledWith(['a']);
+    expect(native.ackEvents).toHaveBeenCalledWith(['b']);
+  });
+
+  it('still delivers the next outcome of an id after the previous handler rejected', async () => {
+    const onSuccess = jest.fn();
+    const { start, native } = setup(
+      {
+        k: {
+          key: 'k',
+          request: jest.fn(),
+          onSuccess: (_d: unknown, _v: unknown, meta: { at: number }) => {
+            onSuccess(meta.at);
+            if (meta.at === 1) {
+              throw new Error('first down');
+            }
+          },
+        },
+      },
+      [completed({ eventId: 'a', at: 1 }), completed({ eventId: 'b', at: 2 })],
+    );
+    start();
+    await flush();
+    expect(onSuccess.mock.calls).toEqual([[1], [2]]);
+    expect(native.ackEvents).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledWith(['b']);
+  });
+});
+
+describe('malformed event', () => {
+  it('drops a v9-shaped entry, warns once for its eventId, and neither acks nor emits', async () => {
+    const onSuccess = jest.fn();
+    const { start, emit, native, warn, stateEvents } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess },
+    });
+    start();
+    await flush();
+    const legacy = {
+      eventId: 'v9-1',
+      id: 'u1',
+      type: 'completed',
+      timestamp: 5,
+    } as unknown as SettledEvent;
+    emit(legacy);
+    emit(legacy);
+    await flush();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+    expect(stateEvents).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/malformed settled event v9-1/),
+      legacy,
+    );
+  });
+});
+
 describe('unknown key', () => {
+  it('acks a cancelled outcome whose key has no definition and emits no row', async () => {
+    const { start, emit, native, stateEvents } = setup({});
+    start();
+    await flush();
+    emit(
+      completed({
+        key: 'gone',
+        kind: 'cancelled',
+        state: 'cancelled',
+        response: undefined,
+        cancelReason: 'user',
+      }),
+    );
+    await flush();
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+    expect(stateEvents).toEqual([]);
+  });
+
   it('emits an unhandled-key state row and does not ack', async () => {
     const { start, emit, native, stateEvents, warn } = setup({});
     start();
