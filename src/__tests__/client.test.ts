@@ -400,6 +400,49 @@ describe('addListener', () => {
     warn.mockRestore();
   });
 
+  it('keeps the other state listeners and later deliveries when one listener throws', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = createUploadClient();
+    const second = jest.fn();
+    const onSuccess = jest.fn();
+    client.define({
+      key: 'known',
+      request: (_v: null) => ({ url: 'https://x', data: 1 }),
+      onSuccess,
+    });
+    client.addListener('state', () => {
+      throw new Error('listener down');
+    });
+    client.addListener('state', second);
+    client.configure({});
+    await flush();
+    const settled = (eventId: string, key: string) => ({
+      eventId,
+      id: 'x',
+      key,
+      vars: null,
+      at: 5,
+      attempts: 1,
+      kind: 'completed',
+      response: { bodyTruncated: false },
+      state: 'completed',
+    });
+    fire('settled', settled('e1', 'nobody'));
+    await flush();
+    expect(second).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'x', reason: 'unhandled-key' }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/state listener threw/),
+      expect.any(Error),
+    );
+    fire('settled', settled('e2', 'known'));
+    await flush();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledWith(['e2']);
+    warn.mockRestore();
+  });
+
   it('rejects an unknown event name', () => {
     const client = createUploadClient();
     expect(() => (client.addListener as any)('completed', jest.fn())).toThrow(
