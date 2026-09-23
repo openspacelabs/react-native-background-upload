@@ -9,6 +9,7 @@ import { chunkPlan } from './chunkPlan';
 import { createDelivery } from './delivery';
 import {
   createRegistry,
+  DEFAULT_ENQUEUE_TIMEOUT_MS,
   DEFAULT_LIFETIME_MS,
   type AnyDefinition,
   type Settings,
@@ -30,7 +31,10 @@ export * from './chunkPlan';
  */
 export const createUploadClient = (): UploadClient => {
   const native = NativeRNFileUploader;
-  const settings: Settings = { lifetimeMs: DEFAULT_LIFETIME_MS };
+  const settings: Settings = {
+    lifetimeMs: DEFAULT_LIFETIME_MS,
+    enqueueTimeoutMs: DEFAULT_ENQUEUE_TIMEOUT_MS,
+  };
   const definitions = new Map<string, AnyDefinition>();
   // One entry per subscription, not per function, so the same listener
   // registered twice is removed one subscription at a time.
@@ -75,6 +79,14 @@ export const createUploadClient = (): UploadClient => {
       );
     }
     settings.lifetimeMs = lifetimeMs;
+    const enqueueTimeoutMs =
+      options.enqueueTimeoutMs ?? DEFAULT_ENQUEUE_TIMEOUT_MS;
+    if (!Number.isFinite(enqueueTimeoutMs) || enqueueTimeoutMs <= 0) {
+      throw new Error(
+        `configure: enqueueTimeoutMs must be a positive number, got ${options.enqueueTimeoutMs}`,
+      );
+    }
+    settings.enqueueTimeoutMs = enqueueTimeoutMs;
     settings.headers = options.headers;
     settings.retry = options.retry;
     const forwarded: Record<string, unknown> = {

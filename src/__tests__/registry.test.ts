@@ -16,7 +16,11 @@ const setup = (settings: Partial<Settings> = {}) => {
   const definitions = new Map<string, AnyDefinition>();
   const trackMutate = jest.fn();
   const warn = jest.fn();
-  const current: Settings = { lifetimeMs: DEFAULT_LIFETIME_MS, ...settings };
+  const current: Settings = {
+    lifetimeMs: DEFAULT_LIFETIME_MS,
+    enqueueTimeoutMs: 10_000,
+    ...settings,
+  };
   const registry = createRegistry({
     native: { enqueue },
     definitions,
@@ -661,5 +665,50 @@ describe('uuidV4', () => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
     );
+  });
+});
+
+describe('enqueue watchdog', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('rejects and warns when native enqueue never settles', async () => {
+    const { define, enqueue, warn } = setup({ enqueueTimeoutMs: 10_000 });
+    enqueue.mockImplementation(() => new Promise<string>(() => undefined));
+    const defined = define({ key: 'item.create', request: jsonPost });
+    const promise = defined.mutate({ n: 1 });
+    // Attach the handler before the clock moves, so the rejection is observed.
+    const outcome = promise.then(
+      () => 'resolved',
+      (e: Error) => e.message,
+    );
+    await jest.advanceTimersByTimeAsync(9_999);
+    expect(warn).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await outcome).toMatch(
+      /native enqueue for "item.create" \(id [^)]+\) did not settle within 10000 ms/,
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the watchdog when native settles in time', async () => {
+    const { define, warn } = setup({ enqueueTimeoutMs: 10_000 });
+    const defined = define({ key: 'item.create', request: jsonPost });
+    await expect(defined.mutate({ n: 1 })).resolves.toEqual({
+      id: expect.any(String),
+    });
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('hands delivery the raced promise, so a timed-out id does not block delivery', async () => {
+    const { define, enqueue, trackMutate } = setup({ enqueueTimeoutMs: 1_000 });
+    enqueue.mockImplementation(() => new Promise<string>(() => undefined));
+    const defined = define({ key: 'item.create', request: jsonPost });
+    const promise = defined.mutate({ n: 1 }).catch(() => 'timed out');
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(await promise).toBe('timed out');
+    const tracked = trackMutate.mock.calls[0]![1] as Promise<unknown>;
+    await expect(tracked).rejects.toThrow(/did not settle/);
   });
 });

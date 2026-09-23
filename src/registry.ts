@@ -12,6 +12,12 @@ import type {
 } from './types';
 
 export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
+/**
+ * How long mutate() waits for native enqueue() before it rejects. The native
+ * write is one synchronous disk write, so this is a watchdog for a native
+ * bug (a path that never settles), not a tuning knob.
+ */
+export const DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000;
 /** `vars` are persisted natively next to every entry. Only they are capped. */
 export const MAX_VARS_BYTES = 4096;
 
@@ -42,9 +48,30 @@ const ANDROID_KEYS = ['noNotification'];
 /** The JS-side settings that `configure()` stores. */
 export type Settings = {
   lifetimeMs: number;
+  enqueueTimeoutMs: number;
   headers?: () => Record<string, string>;
   retry?: Partial<RetryPolicy>;
 };
+
+/** Rejects with `makeError()` when `promise` has not settled after `ms`. */
+export const withTimeout = <T>(
+  promise: Promise<T>,
+  ms: number,
+  makeError: () => Error,
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(makeError()), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 
 /** What crosses to native `enqueue()`. */
 export type EnqueueEntry = {
@@ -505,7 +532,20 @@ export const createRegistry = ({
           expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
         },
       };
-      const pending = native.enqueue(entry);
+      // Watchdog. Native enqueue() is one synchronous write, so a promise that
+      // never settles is a native bug. Turn it into a rejection with a name,
+      // and let delivery for this id proceed instead of waiting forever. If
+      // native did persist the entry, its outcome still reaches the handlers,
+      // and a same-id retry resumes instead of duplicating.
+      const pending = withTimeout(
+        native.enqueue(entry),
+        settings.enqueueTimeoutMs,
+        () => {
+          const message = `mutate: native enqueue for "${key}" (id ${entry.id}) did not settle within ${settings.enqueueTimeoutMs} ms`;
+          warn(message);
+          return new Error(message);
+        },
+      );
       trackMutate(entry.id, pending);
       // The JS id is the one the caller may have chosen and the one the
       // entry carries. Native's return value is not trusted for it.

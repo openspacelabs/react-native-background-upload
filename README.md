@@ -272,6 +272,7 @@ outcomes. A second call updates the settings and does not replay again.
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
+| `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when the native write has not settled by then. A watchdog for a native bug, not a tuning knob. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(): Promise<void>` and `resume(): Promise<void>`
