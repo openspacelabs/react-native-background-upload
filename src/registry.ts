@@ -4,11 +4,11 @@ import type {
   Defined,
   Definition,
   FormPart,
-  Json,
   Method,
   Part,
   RequestDescriptor,
   RetryPolicy,
+  Vars,
 } from './types';
 
 export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
@@ -50,7 +50,7 @@ export type Settings = {
 export type EnqueueEntry = {
   id: string;
   key: string;
-  vars: Json;
+  vars: Vars;
   descriptor: RequestDescriptor;
 };
 
@@ -88,6 +88,56 @@ export const isDev = (): boolean => {
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * `JSON.stringify` as native will run it. A throw (a cycle, a BigInt, a
+ * `toJSON` that throws) becomes a `mutate:` error. The result is `undefined`
+ * for a function, a symbol, or a `toJSON` that returns nothing.
+ */
+const stringifyForNative = (
+  value: unknown,
+  where: string,
+): string | undefined => {
+  try {
+    return JSON.stringify(value);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new Error(`mutate: ${where} is not JSON-serializable: ${reason}`);
+  }
+};
+
+/**
+ * TypeScript accepts any object as vars, so the runtime checks what native
+ * will persist. Methods on a class instance are dropped, as JSON.stringify
+ * drops them; a Date or a `toJSON` that yields a primitive is rejected.
+ */
+const serializeVars = (vars: unknown): string => {
+  if (typeof vars !== 'object') {
+    throw new Error(
+      `mutate: vars must be an object, an array, or null, got ${typeof vars}`,
+    );
+  }
+  const serialized = stringifyForNative(vars, 'vars');
+  if (
+    serialized === undefined ||
+    (serialized !== 'null' &&
+      !serialized.startsWith('{') &&
+      !serialized.startsWith('['))
+  ) {
+    throw new Error(
+      'mutate: vars must serialize to a JSON object, an array, or null',
+    );
+  }
+  return serialized;
+};
+
+const validateData = (data: unknown): void => {
+  if (stringifyForNative(data, 'data') === undefined) {
+    throw new Error(
+      `mutate: data must be a JSON-serializable value, got ${typeof data}`,
+    );
+  }
+};
 
 /** UTF-8 length of a string that JSON.stringify produced. */
 export const utf8ByteLength = (s: string): number => {
@@ -329,7 +379,9 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   // No body is valid: a DELETE, or a POST that carries its meaning in the URL.
   if (kinds.length > 1) {
     throw new Error(
-      `mutate: the descriptor must set at most one of data, form, file; got ${kinds.join(', ')}`,
+      `mutate: the descriptor must set at most one of data, form, file; got ${kinds.join(
+        ', ',
+      )}`,
     );
   }
   if (d.parts !== undefined && d.file === undefined) {
@@ -354,6 +406,9 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   }
   if (d.file !== undefined && (typeof d.file !== 'string' || !d.file)) {
     throw new Error('mutate: file must be a non-empty path');
+  }
+  if (d.data !== undefined) {
+    validateData(d.data);
   }
   if (d.form !== undefined) {
     validateForm(d.form);
@@ -397,7 +452,7 @@ export const createRegistry = ({
 }: RegistryDeps): Registry => {
   // The overloads on Define keep the with-parser and without-parser shapes
   // apart for callers. One implementation serves both.
-  const define = (<V extends Json, T>(
+  const define = (<V extends Vars, T>(
     definition: Definition<V, T>,
   ): Defined<V, T> => {
     const { key } = definition;
@@ -422,11 +477,7 @@ export const createRegistry = ({
     ): Promise<{ id: string }> => {
       // A no-vars definition calls mutate() with nothing; native stores null.
       const vars = (input === undefined ? null : input) as V;
-      const serialized = JSON.stringify(vars);
-      if (serialized === undefined) {
-        throw new Error('mutate: vars must be a JSON value');
-      }
-      const bytes = utf8ByteLength(serialized);
+      const bytes = utf8ByteLength(serializeVars(vars));
       if (bytes > MAX_VARS_BYTES) {
         throw new Error(
           `mutate: vars for "${key}" is ${bytes} bytes; the limit is ${MAX_VARS_BYTES}`,

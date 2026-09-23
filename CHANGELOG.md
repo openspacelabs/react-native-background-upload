@@ -45,9 +45,11 @@ Added:
   headers under the descriptor's, validates the descriptor (at most one of
   `data` / `form` / `file`, none for a bodiless DELETE; `parts` only with `file`; parts must tile the
   file; no field outside the descriptor shape), defaults `expiresAt` to now +
-  `lifetimeMs`, and resolves when the entry is durable. `vars` are capped at
-  4 KB. A definition whose `request` takes no vars calls `mutate()` with no
-  arguments.
+  `lifetimeMs`, and resolves when the entry is durable. `vars` is any
+  JSON-serializable object, so generated API request types work as they are;
+  `mutate()` rejects vars or `data` that do not serialize (a cycle, a function,
+  a BigInt) and caps `vars` at 4 KB. A definition whose `request` takes no
+  vars calls `mutate()` with no arguments.
 - **Request bodies**: JSON (`data`), multipart (`form`), whole file (`file`),
   and chunked (`file` + `parts`). All under one entry shape and one id.
 - **Delivery rules**: dedupe by event id; the outcomes of one id deliver in
