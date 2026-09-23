@@ -326,11 +326,10 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   const kinds = (['data', 'form', 'file'] as const).filter(
     (kind) => d[kind] !== undefined,
   );
-  if (kinds.length !== 1) {
+  // No body is valid: a DELETE, or a POST that carries its meaning in the URL.
+  if (kinds.length > 1) {
     throw new Error(
-      `mutate: the descriptor must set exactly one of data, form, file; got ${
-        kinds.length === 0 ? 'none' : kinds.join(', ')
-      }`,
+      `mutate: the descriptor must set at most one of data, form, file; got ${kinds.join(', ')}`,
     );
   }
   if (d.parts !== undefined && d.file === undefined) {

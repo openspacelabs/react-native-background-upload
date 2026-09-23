@@ -192,13 +192,17 @@ describe('mutate', () => {
       return { promise: d.mutate(null), enqueue };
     };
 
-    it('requires exactly one body kind', async () => {
-      await expect(mutateWith({ url: 'https://x' }).promise).rejects.toThrow(
-        /exactly one of data, form, file; got none/,
-      );
+    it('allows at most one body kind', async () => {
+      // A DELETE has no body. So does a POST whose meaning is in the URL.
+      const { promise, enqueue } = mutateWith({
+        url: 'https://x',
+        method: 'DELETE',
+      });
+      await expect(promise).resolves.toEqual({ id: expect.any(String) });
+      expect(enqueue).toHaveBeenCalledTimes(1);
       await expect(
         mutateWith({ url: 'https://x', data: {}, file: '/f' }).promise,
-      ).rejects.toThrow(/exactly one of data, form, file; got data, file/);
+      ).rejects.toThrow(/at most one of data, form, file; got data, file/);
     });
 
     it('accepts each body kind alone', async () => {
