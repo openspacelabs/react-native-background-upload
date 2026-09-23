@@ -102,7 +102,8 @@ outcome at the next launch.
 
 ## The request descriptor
 
-`request(vars)` returns a plain object. Exactly one body kind is required.
+`request(vars)` returns a plain object. Set at most one body kind. A DELETE, or a
+POST whose meaning is in the URL, sets none.
 A field outside this table makes `mutate()` reject and name the field, because
 TypeScript does not flag a misspelled key on an inferred arrow return.
 
