@@ -63,8 +63,8 @@ import { createUploadClient } from 'react-native-background-upload';
 export const uploads = createUploadClient();
 
 // One definition per request kind. `request` runs one time, at mutate().
-// `vars` must be JSON and at most 4 KB; native persists them next to the entry.
-// Declare the vars as a `type` alias: an `interface` fails the Json constraint.
+// `vars` is any JSON-serializable object, at most 4 KB; native persists it
+// next to the entry. Generated API request types work as they are.
 type AddCommentVars = { siteId: string; noteId: string; comment: string };
 export const addComment = uploads.define({
   key: 'note.comment.add', // persisted with every entry; rename with care
@@ -112,7 +112,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `url` | Required unless `parts` is set. |
 | `method` | `POST` (default), `PUT`, `PATCH`, `DELETE`, `GET`. With `parts` it applies to every part. |
 | `headers` | Merged over `configure().headers()`, names matched without regard to case. Every chunked part inherits the result. |
-| `data` | JSON body. |
+| `data` | JSON body. Any JSON-serializable value. |
 | `form` | `multipart/form-data`: `[{ name, contentType, string }]` or `[{ name, contentType, path, fileName? }]`. File parts are copied. |
 | `file` | Whole file body. Copied. Moved when `parts` is set. |
 | `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
@@ -217,7 +217,7 @@ an app needs one.
 ### `define(definition): { key, mutate }`
 
 ```ts
-type Definition<V extends Json, T> =
+type Definition<V extends object | null, T> =
   | {
       key: string;
       request: (vars: V) => RequestDescriptor;
@@ -237,11 +237,12 @@ type Definition<V extends Json, T> =
 `V` infers from the `request` parameter annotation, `T` from the `response`
 return type. Without `response`, `onSuccess` receives the `RawResponse`
 (`{ status?, headers?, body?, bodyTruncated }`), and an `onSuccess` annotated
-with any other type is a compile error. `V` must be a `type` alias with
-mutable arrays: an `interface` or a `readonly T[]` field fails the `Json`
-constraint, and the compiler error names `null` rather than the cause. A
-`request` that declares no parameter gives `V = null`, and `mutate()` then
-takes no arguments. When `response` is set and
+with any other type is a compile error. `V` is any object or `null`, so a
+generated API request type works as it is. `mutate()` rejects vars and
+`data` that do not serialize: a cycle, a function, a BigInt, or a value that
+`JSON.stringify` turns into a primitive. Methods on a class instance are
+dropped. A `request` that declares no parameter gives `V = null`, and
+`mutate()` then takes no arguments. When `response` is set and
 the body was truncated, `onError` gets `errorKind: 'truncated'`. When
 `response` throws, `onError` gets `errorKind: 'unknown'` with the thrown
 message; the entry still settles as completed. A key that is already defined

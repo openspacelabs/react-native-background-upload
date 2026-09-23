@@ -1,11 +1,6 @@
 import type { EventSubscription } from 'react-native';
 
-/**
- * Any JSON value. `vars` and `data` must be JSON, because native persists them.
- * A vars type has to be a `type` alias, not an `interface`: only aliases get
- * the implicit index signature that this recursive type asks for. Fields must
- * be mutable arrays, not `readonly T[]`.
- */
+/** Any JSON value, as parsed from what native stores. */
 export type Json =
   | string
   | number
@@ -13,6 +8,16 @@ export type Json =
   | null
   | Json[]
   | { [k: string]: Json };
+
+/**
+ * The `vars` of a definition: any JSON-serializable object, or null. Native
+ * persists it with `JSON.stringify`. TypeScript cannot prove that an object
+ * serializes, so generated API request types are accepted as they are, and
+ * `mutate()` rejects functions, cycles, and other values that do not
+ * serialize. Methods on a class instance are dropped, as `JSON.stringify`
+ * drops them.
+ */
+export type Vars = object | null;
 
 export type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'GET';
 
@@ -78,8 +83,11 @@ export type RequestDescriptor = {
    * to case. Every part inherits the result.
    */
   headers?: Record<string, string>;
-  /** JSON body. At most one of `data`, `form`, `file`. None is a bodiless request. */
-  data?: Json;
+  /**
+   * JSON body. Any JSON-serializable value. At most one of `data`, `form`,
+   * `file`. None is a bodiless request.
+   */
+  data?: unknown;
   /** multipart/form-data body. */
   form?: FormPart[];
   /** Whole file body. Copied. Moved when `parts` is set. */
@@ -192,7 +200,7 @@ export type AttemptEvent = {
   at: number;
 };
 
-type DefinitionBase<V extends Json> = {
+type DefinitionBase<V extends Vars> = {
   /** Persisted with every entry, so rename it with care. */
   key: string;
   /** Runs one time, at `mutate()`. */
@@ -201,14 +209,14 @@ type DefinitionBase<V extends Json> = {
 };
 
 /** A definition with a parser. `onSuccess` receives what `response` returns. */
-export type DefinitionWithResponse<V extends Json, T> = DefinitionBase<V> & {
+export type DefinitionWithResponse<V extends Vars, T> = DefinitionBase<V> & {
   /** Parses the JSON body (`undefined` when there is none) before `onSuccess`. */
   response: (raw: unknown) => T;
   onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
 };
 
 /** A definition without a parser. `onSuccess` receives the `RawResponse`. */
-export type DefinitionWithoutResponse<V extends Json> = DefinitionBase<V> & {
+export type DefinitionWithoutResponse<V extends Vars> = DefinitionBase<V> & {
   response?: undefined;
   onSuccess?: (data: RawResponse, vars: V, meta: Meta) => void | Promise<void>;
 };
@@ -220,7 +228,7 @@ export type DefinitionWithoutResponse<V extends Json> = DefinitionBase<V> & {
  * `RawResponse`, and the two shapes are kept apart so that an `onSuccess`
  * annotated with another type does not compile.
  */
-export type Definition<V extends Json, T> =
+export type Definition<V extends Vars, T> =
   | DefinitionWithResponse<V, T>
   | DefinitionWithoutResponse<V>;
 
@@ -231,7 +239,7 @@ export type Definition<V extends Json, T> =
  * handlers see, even though `mutate()` itself does not use it.
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-export type Defined<V extends Json, T> = {
+export type Defined<V extends Vars, T> = {
   key: string;
   mutate: [V] extends [null]
     ? (vars?: null, options?: { id?: string }) => Promise<{ id: string }>
@@ -244,12 +252,13 @@ export type Defined<V extends Json, T> = {
  * Without `response`, the handlers see the `RawResponse`.
  */
 export interface Define {
-  <V extends Json = null, T = RawResponse>(
+  <V extends Vars = null, T = RawResponse>(
     definition: DefinitionWithResponse<V, T>,
   ): Defined<V, T>;
-  <V extends Json = null>(
-    definition: DefinitionWithoutResponse<V>,
-  ): Defined<V, RawResponse>;
+  <V extends Vars = null>(definition: DefinitionWithoutResponse<V>): Defined<
+    V,
+    RawResponse
+  >;
 }
 
 /**

@@ -182,6 +182,70 @@ describe('mutate', () => {
     });
   });
 
+  describe('vars serializability', () => {
+    const anyVars = () => {
+      const { define, enqueue, lastEntry } = setup();
+      const send = define({
+        key: 'k',
+        request: (_vars: object) => ({ url: 'https://x', data: null }),
+      });
+      return { send, enqueue, lastEntry };
+    };
+
+    it('rejects a cycle', async () => {
+      const { send, enqueue } = anyVars();
+      const loop: { self?: object } = {};
+      loop.self = loop;
+      await expect(send.mutate(loop)).rejects.toThrow(
+        /^mutate: vars is not JSON-serializable: /,
+      );
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejects a function or a primitive as vars', async () => {
+      const { send, enqueue } = anyVars();
+      await expect(send.mutate(() => 1)).rejects.toThrow(
+        'mutate: vars must be an object, an array, or null, got function',
+      );
+      await expect(send.mutate('s' as unknown as object)).rejects.toThrow(
+        /got string/,
+      );
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejects an object that serializes to a primitive', async () => {
+      const { send } = anyVars();
+      await expect(send.mutate(new Date(0))).rejects.toThrow(
+        'mutate: vars must serialize to a JSON object, an array, or null',
+      );
+      await expect(send.mutate({ toJSON: () => undefined })).rejects.toThrow(
+        /must serialize to a JSON object/,
+      );
+    });
+
+    it('accepts a class instance and passes it through unchanged', async () => {
+      class Point {
+        constructor(public x: number, public y: number) {}
+        norm() {
+          return Math.hypot(this.x, this.y);
+        }
+      }
+      const { send, lastEntry } = anyVars();
+      const point = new Point(1, 2);
+      await expect(send.mutate(point)).resolves.toBeDefined();
+      // Only validated. Native stringifies, which drops the method.
+      expect(lastEntry().vars).toBe(point);
+    });
+
+    it('accepts nested undefined fields and an array', async () => {
+      const { send, lastEntry } = anyVars();
+      const vars = { title: undefined, ids: ['a'] as readonly string[] };
+      await expect(send.mutate(vars)).resolves.toBeDefined();
+      expect(lastEntry().vars).toBe(vars);
+      await expect(send.mutate([1, 2])).resolves.toBeDefined();
+    });
+  });
+
   describe('descriptor validation', () => {
     const mutateWith = (descriptor: unknown) => {
       const { define, enqueue } = setup();
@@ -221,6 +285,29 @@ describe('mutate', () => {
           ],
         }).promise,
       ).resolves.toBeDefined();
+    });
+
+    it('rejects data that cannot serialize', async () => {
+      await expect(
+        mutateWith({ url: 'https://x', data: () => 1 }).promise,
+      ).rejects.toThrow(
+        'mutate: data must be a JSON-serializable value, got function',
+      );
+      const loop: { self?: object } = {};
+      loop.self = loop;
+      await expect(
+        mutateWith({ url: 'https://x', data: loop }).promise,
+      ).rejects.toThrow(/^mutate: data is not JSON-serializable: /);
+      await expect(
+        mutateWith({ url: 'https://x', data: { n: 1n } }).promise,
+      ).rejects.toThrow(/data is not JSON-serializable/);
+    });
+
+    it('passes data with nested undefined fields through unchanged', async () => {
+      const data = { title: undefined, value: { any: 1 } };
+      const { promise, enqueue } = mutateWith({ url: 'https://x', data });
+      await expect(promise).resolves.toBeDefined();
+      expect(enqueue.mock.calls[0][0].descriptor.data).toBe(data);
     });
 
     it('rejects a form part without exactly one of string, path', async () => {

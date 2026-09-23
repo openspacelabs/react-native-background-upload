@@ -81,16 +81,12 @@ const putFile = client.define({
 });
 void putFile.mutate({ path: '/tmp/a', url: 'https://x' });
 
-// vars must be JSON: no functions, no Dates, no undefined fields.
+// vars must be an object or null. A primitive is a type error. Whether the
+// object serializes is checked at mutate(), not here.
 client.define({
-  key: 'bad.vars',
-  // @ts-expect-error a function is not Json
-  request: (_vars: { cb: () => void }) => ({ url: 'https://x', data: null }),
-});
-client.define({
-  key: 'bad.vars.date',
-  // @ts-expect-error a Date is not Json
-  request: (_vars: { when: Date }) => ({ url: 'https://x', data: null }),
+  key: 'bad.vars.primitive',
+  // @ts-expect-error a string is not an object
+  request: (_vars: string) => ({ url: 'https://x', data: null }),
 });
 
 // The descriptor is checked against RequestDescriptor.
@@ -198,26 +194,46 @@ void noVars.mutate('anything goes');
 // @ts-expect-error a no-vars definition takes no vars
 void noVars.mutate({ arbitrary: [1, 2, 3] });
 
-// Known limits of the Json constraint. An interface has no implicit index
-// signature, and a readonly array is not a Json[]. Use a type alias with
-// mutable arrays. These lines pin the limit so a change to it shows up here.
+// Generated API types pass as they are: an interface with optional fields, a
+// readonly array, a field typed `object`, a nullable string, a nested DTO.
 interface InterfaceVars {
-  a: string;
+  siteId: string;
+  title?: string | null;
 }
-client.define({
+const interfaceVars = client.define({
   key: 'interface.vars',
-  // @ts-expect-error an interface does not satisfy Json; use a type alias
   request: (_vars: InterfaceVars) => ({ url: 'https://x', data: null }),
 });
-client.define({
+void interfaceVars.mutate({ siteId: 's' });
+void interfaceVars.mutate({ siteId: 's', title: null });
+const readonlyVars = client.define({
   key: 'readonly.vars',
-  // @ts-expect-error readonly string[] is not a Json[]
-  request: (_vars: { ids: readonly string[] }) => ({
+  request: (_vars: { readonly ids: readonly string[] }) => ({
     url: 'https://x',
     data: null,
   }),
 });
-// Aliases with optional fields, nested aliases and mutable arrays pass.
+void readonlyVars.mutate({ ids: ['a'] });
+interface UpsertDto {
+  valuesToUpsert: Array<{ propertyKey: string; value?: object }>;
+  title?: string | null;
+}
+type UpsertRequest = { readonly siteId: string; readonly body: UpsertDto };
+const upsert = client.define({
+  key: 'upsert.vars',
+  request: ({ siteId, body }: UpsertRequest) => ({
+    url: `https://x/${siteId}`,
+    data: body,
+  }),
+  onSuccess: (_data, _vars) => {
+    assertEqual<typeof _vars, UpsertRequest>(true);
+  },
+});
+void upsert.mutate({
+  siteId: 's',
+  body: { valuesToUpsert: [{ propertyKey: 'k', value: { any: 1 } }] },
+});
+// Aliases with optional fields, nested aliases and arrays pass too.
 type NestedVars = { inner: { b: number }; ids: string[]; note?: string };
 const nested = client.define({
   key: 'nested.vars',
