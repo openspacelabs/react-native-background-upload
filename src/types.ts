@@ -78,7 +78,7 @@ export type RequestDescriptor = {
    * to case. Every part inherits the result.
    */
   headers?: Record<string, string>;
-  /** JSON body. Exactly one of `data`, `form`, `file` must be set. */
+  /** JSON body. At most one of `data`, `form`, `file`. None is a bodiless request. */
   data?: Json;
   /** multipart/form-data body. */
   form?: FormPart[];

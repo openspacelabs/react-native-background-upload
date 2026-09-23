@@ -42,8 +42,8 @@ Added:
   `response` return. A duplicate key replaces the definition and warns in
   development.
 - **`mutate(vars, { id? })`**: runs `request(vars)` once, merges the configured
-  headers under the descriptor's, validates the descriptor (exactly one of
-  `data` / `form` / `file`; `parts` only with `file`; parts must tile the
+  headers under the descriptor's, validates the descriptor (at most one of
+  `data` / `form` / `file`, none for a bodiless DELETE; `parts` only with `file`; parts must tile the
   file; no field outside the descriptor shape), defaults `expiresAt` to now +
   `lifetimeMs`, and resolves when the entry is durable. `vars` are capped at
   4 KB. A definition whose `request` takes no vars calls `mutate()` with no
