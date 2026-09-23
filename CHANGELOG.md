@@ -29,8 +29,10 @@ Breaking:
 - **`progress` carries `{ id, bytesSent, totalBytes }`** instead of a
   percentage.
 - **`configure()` must be called at boot, after every `define()`.** It starts
-  the replay of journaled outcomes. It also takes `lifetimeMs`, `retry`, and a
-  `headers` provider that runs at `mutate()`.
+  the replay of journaled outcomes. It also takes `lifetimeMs`, `retry`, a
+  `headers` provider that runs at `mutate()`, and `enqueueTimeoutMs` (default
+  10 s): `mutate()` rejects with a named error and warns when the native write
+  has not settled by then, so a native bug cannot hang a caller in silence.
 - **`ErrorKind` gains `'truncated'`.** With a `response` parser set and a body
   over the 1 MB cap, `onError` fires with it instead of `onSuccess`.
 

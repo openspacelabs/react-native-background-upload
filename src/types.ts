@@ -283,6 +283,11 @@ export type ConfigureOptions = {
   retry?: Partial<RetryPolicy>;
   /** Called at `mutate()`. The descriptor's headers merge over the result. */
   headers?: () => Record<string, string>;
+  /**
+   * Default 10 s. How long `mutate()` waits for the native write before it
+   * rejects. A watchdog for a native bug, not a tuning knob.
+   */
+  enqueueTimeoutMs?: number;
   android?: Partial<AndroidNotificationConfig>;
 };
 
