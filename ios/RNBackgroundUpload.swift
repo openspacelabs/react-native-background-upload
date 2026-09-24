@@ -152,7 +152,7 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   @objc(cancel:resolve:reject:)
   public func cancel(_ id: String, resolve: @escaping RCTPromiseResolveBlock,
                      reject: @escaping RCTPromiseRejectBlock) {
-    coordinator.cancel(id) { resolve(nil) }
+    coordinator.cancel(id, resolve: { resolve(nil) }, reject: { reject($0, $1, nil) })
   }
 
   @objc(setWifiOnly:resolve:reject:)
