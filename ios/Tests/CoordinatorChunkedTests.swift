@@ -281,6 +281,26 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertFalse(FileIO.exists(h.store.dir("cap")))
   }
 
+  func testCancelLiveChunkedWhoseJournalWriteFailsKeepsThePartsRunning() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
+    h.complete(try XCTUnwrap(partTask(0)))
+    let live = h.transport.live
+    let states = h.sink.states.count
+    setReadOnly(h.journal.root, true)
+    XCTAssertEqual(h.cancel("cap")?.code, "E_STORAGE")
+    XCTAssertTrue(live.allSatisfy { !$0.cancelled })
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(h.sink.states.count, states)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    // The window still refills: the chunked side did not stop.
+    h.complete(live[0])
+    XCTAssertEqual(h.transport.live.count, 3)
+    setReadOnly(h.journal.root, false)
+    XCTAssertNil(h.cancel("cap"))
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.journal.unacknowledged().count, 1)
+  }
+
   func testLateCallbackFromAReplacedPlanIsDropped() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["retry": ["terminalHttp": ["exempt": []]]])).get()
     let stale = try XCTUnwrap(partTask(2))

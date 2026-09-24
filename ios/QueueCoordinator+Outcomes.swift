@@ -8,25 +8,28 @@ extension QueueCoordinator {
   static let journalRetryMs = 5_000
   static let journalRetryMaxMs = 600_000
 
-  /// The one terminal path. Cancels the entry's remaining tasks, emits the
-  /// trailing progress, journals the outcome, saves the settled row, emits
-  /// `state`, then emits `settled` with deliveries 1 when a listener exists.
-  /// With no listener the outcome stays at deliveries 0 for the drain.
+  /// The one terminal path. Journals the outcome, cancels the entry's
+  /// remaining tasks, emits the trailing progress, saves the settled row,
+  /// emits `state`, then emits `settled` with deliveries 1 when a listener
+  /// exists. With no listener the outcome stays at deliveries 0 for the
+  /// drain.
   ///
-  /// A failed journal write still settles and emits: the request already
-  /// ran, so a retry would send it twice, and a user cancel must not run
-  /// again. The event stays in memory, a timer retries the write, and ack
-  /// finds the row by its settledEventId.
-  func settle(_ id: String, _ outcome: Outcome) {
-    guard var e = index.entry(id) else { return }
-    cancelTasks(id, purpose: .superseded)
-    chunked.stop(id)
+  /// `requireJournal` (a user cancel): a failed journal write returns false
+  /// and changes nothing. No task stops, no row moves, nothing is emitted,
+  /// and nothing is kept in memory, so the caller can reject and JS can call
+  /// again.
+  ///
+  /// Otherwise a failed journal write still settles and emits: the request
+  /// already ran, so a retry would send it twice. The event stays in memory,
+  /// a timer retries the write, and ack finds the row by its settledEventId.
+  @discardableResult
+  func settle(_ id: String, _ outcome: Outcome, requireJournal: Bool = false) -> Bool {
+    guard var e = index.entry(id) else { return true }
     switch outcome {
     case .completed: e.bytesSent = e.totalBytes
     // A simple entry keeps the live bytes of its last attempt.
     default: if e.isChunked { e.bytesSent = e.acceptedBytes }
     }
-    emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
 
     var event = JournaledEvent(
       eventId: UUID().uuidString, id: id, key: e.key, varsJSON: e.varsJSON, at: now(),
@@ -50,6 +53,10 @@ extension QueueCoordinator {
       e.state = .cancelled
     }
     let journaled = journal.append(event, keeping: referencedEventIds().union([event.eventId]))
+    if !journaled && requireJournal { return false }
+    cancelTasks(id, purpose: .superseded)
+    chunked.stop(id)
+    emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
     e.settledEventId = event.eventId
     e.nextAttemptAt = nil
     e.authParked = false
@@ -71,6 +78,7 @@ extension QueueCoordinator {
     }
     disarmExpiry(id)
     throttle.reset(id)
+    return true
   }
 
   /// A settle whose journal write landed but whose entry.json save failed
@@ -117,11 +125,60 @@ extension QueueCoordinator {
     store.remove(id)
     index.remove(id)
     if dropEvents {
-      journal.removeForId(id)
+      try? journal.removeForId(id)
       pendingJournal = pendingJournal.filter { $0.value.id != id }
     }
     disarmExpiry(id)
     throttle.reset(id)
+  }
+
+  /// cancel() on a settled or legacy entry: the row, its bytes and its
+  /// unacked outcomes, all or none. The directory is set aside first (one
+  /// rename), then the outcome files are deleted. When a delete fails, the
+  /// directory goes back and this throws; nothing in memory changed. Limit:
+  /// with two or more outcome files, a failure after the first delete leaves
+  /// the ones already deleted gone.
+  func forgetWithEvents(_ id: String) throws {
+    let aside = try store.setAside(id)
+    do {
+      try journal.removeForId(id)
+    } catch {
+      if let aside {
+        do {
+          try store.restore(aside, id)
+        } catch let restore {
+          NSLog("[RNFileUploader] cannot restore \(id) after a failed cancel: \(restore.localizedDescription)")
+        }
+      }
+      throw error
+    }
+    pendingJournal = pendingJournal.filter { $0.value.id != id }
+    cancelTasks(id, purpose: .superseded)
+    chunked.stop(id)
+    index.remove(id)
+    disarmExpiry(id)
+    throttle.reset(id)
+    if let aside { store.discard(aside) }
+  }
+
+  /// Launch, before the index loads: a set-aside directory is a
+  /// `forgetWithEvents` that did not finish. It finishes it when the
+  /// outcome files can go, and puts the row back when they cannot. When the
+  /// id has a directory again, the forget already passed its journal step
+  /// (only the discard failed), so it only discards.
+  func finishSetAsideForgets() {
+    for (aside, id) in store.setAsideDirectories() {
+      guard let id, !FileIO.exists(store.dir(id)) else {
+        store.discard(aside)
+        continue
+      }
+      do {
+        try journal.removeForId(id)
+        store.discard(aside)
+      } catch {
+        try? store.restore(aside, id)
+      }
+    }
   }
 
   /// One ack. The event comes from the journal, or from memory when its

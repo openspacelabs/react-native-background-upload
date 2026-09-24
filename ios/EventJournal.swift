@@ -175,9 +175,18 @@ final class EventJournal {
     }
   }
 
-  /// cancel() on a settled entry: its unacked outcomes go with it.
-  func removeForId(_ id: String) {
-    ack(unacknowledgedForId(id).map(\.eventId))
+  /// cancel() on a settled entry: its unacked outcomes go with it. Throws at
+  /// the first file that cannot be deleted; a file already gone is not an
+  /// error.
+  func removeForId(_ id: String) throws {
+    let ids = unacknowledgedForId(id).map(\.eventId)
+    try queue.sync {
+      for eventId in ids {
+        let file = url(eventId)
+        guard FileIO.exists(file) else { continue }
+        try FileManager.default.removeItem(at: file)
+      }
+    }
   }
 
   /// v9 entries: files that decode as the v9 shape (have `type` and

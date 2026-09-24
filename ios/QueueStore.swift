@@ -24,6 +24,8 @@ final class QueueStore {
   static let manifestName = "manifest.json"
   private static let settingsName = "settings.json"
   private static let importedMarker = "v10-imported"
+  /// Id directory names are base64url, which never starts with ".".
+  private static let asidePrefix = ".forget-"
 
   init(root: URL) {
     self.root = root
@@ -78,6 +80,43 @@ final class QueueStore {
   /// manifest.
   func remove(_ id: String) {
     queue.sync { _ = try? FileManager.default.removeItem(at: dir(id)) }
+  }
+
+  // MARK: - Forget in steps (cancel on a settled entry)
+
+  /// Step one of a forget that must not half-happen: renames the id
+  /// directory to a hidden name in `root`. One rename, so either the row is
+  /// gone from `all()` or nothing moved. Throws when the rename fails.
+  /// Returns nil when the id has no directory.
+  func setAside(_ id: String) throws -> URL? {
+    try queue.sync {
+      let d = dir(id)
+      guard FileIO.exists(d) else { return nil }
+      let aside = root.appendingPathComponent(
+        Self.asidePrefix + d.lastPathComponent + "-" + UUID().uuidString, isDirectory: true)
+      try FileIO.rename(d, onto: aside)
+      return aside
+    }
+  }
+
+  /// Undoes `setAside`.
+  func restore(_ aside: URL, _ id: String) throws {
+    try queue.sync { try FileIO.rename(aside, onto: dir(id)) }
+  }
+
+  /// Deletes a set-aside directory. A failure leaves it for the next launch.
+  func discard(_ aside: URL) {
+    queue.sync { _ = try? FileManager.default.removeItem(at: aside) }
+  }
+
+  /// Set-aside directories a crash left, with the id their entry names (nil
+  /// when entry.json is unreadable).
+  func setAsideDirectories() -> [(aside: URL, id: String?)] {
+    queue.sync {
+      let items = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+      return items.filter { $0.lastPathComponent.hasPrefix(Self.asidePrefix) }
+        .map { ($0, Self.read($0.appendingPathComponent(Self.entryName))?.id) }
+    }
   }
 
   /// Deletes files the entry does not reference: an old body after a
@@ -223,7 +262,7 @@ final class QueueStore {
 
   private func subdirectories() -> [URL] {
     let items = (try? FileManager.default.contentsOfDirectory(
-      at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+      at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
     return items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
   }
 

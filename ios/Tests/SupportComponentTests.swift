@@ -95,11 +95,20 @@ final class EventJournalTests: XCTestCase {
     XCTAssertNil(journal.load("1"))
   }
 
-  func testRemoveForId() {
+  func testRemoveForId() throws {
     journal.append(event("1", id: "a"))
     journal.append(event("2", id: "b"))
-    journal.removeForId("a")
+    try journal.removeForId("a")
     XCTAssertEqual(journal.unacknowledged().map(\.eventId), ["2"])
+    try journal.removeForId("a") // nothing left: not an error
+  }
+
+  func testRemoveForIdThrowsWhenAFileCannotBeDeleted() {
+    journal.append(event("1", id: "a"))
+    setReadOnly(journal.root, true)
+    defer { setReadOnly(journal.root, false) }
+    XCTAssertThrowsError(try journal.removeForId("a"))
+    XCTAssertNotNil(journal.load("1"))
   }
 
   func testBodyCapAtOneMegabyte() {

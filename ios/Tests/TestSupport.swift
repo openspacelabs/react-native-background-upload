@@ -198,9 +198,13 @@ final class Harness {
     return result!
   }
 
-  func cancel(_ id: String) {
-    coordinator.cancel(id) {}
+  /// Returns the rejection, or nil when cancel resolved.
+  @discardableResult
+  func cancel(_ id: String) -> EnqueueError? {
+    var rejected: EnqueueError?
+    coordinator.cancel(id, resolve: {}, reject: { rejected = EnqueueError(code: $0, message: $1) })
     drain()
+    return rejected
   }
 
   func ack(_ eventIds: [String]) {
