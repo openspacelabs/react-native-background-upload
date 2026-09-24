@@ -16,7 +16,7 @@ final class QueueStoreTests: XCTestCase {
 
   private func entry(_ id: String, state: QueueEntry.State = .queued, body: String? = "body-a") -> QueueEntry {
     QueueEntry(
-      id: id, key: "k", varsJSON: "null", descriptorJSON: "{}", url: "https://a.test", method: "POST",
+      id: id, key: "k", varsJSON: "null", url: "https://a.test", method: "POST",
       accept: [], retry: nil, bodyKind: .data, bodyPath: body, bodyContentType: "application/json",
       forceContentType: false, bodyFingerprint: "f", parts: [], incarnation: "inc-1", headers: [:],
       headerGeneration: 0, state: state, authParked: false, generation: 1, attempts: 0, bytesSent: 0,
@@ -123,15 +123,14 @@ final class QueueStoreTests: XCTestCase {
 
   func testDormantManifestReadAndRemove() throws {
     let manifest = ChunkedManifestV9(
-      id: "v9", parts: [.init(url: "https://s3.test/1", headers: [:], start: 0, end: 5, accepted: true)],
-      accept: [], expiresAt: 10, wifiOnly: false, createdAt: 1, incarnation: "old")
+      id: "v9", parts: [.init(url: "https://s3.test/1", start: 0, end: 5, accepted: true)],
+      expiresAt: 10, incarnation: "old")
     writeFile(store.fileURL("v9", QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     XCTAssertEqual(store.loadV9Manifest("v9"), manifest)
-    XCTAssertEqual(store.allDormantManifests(), [manifest])
     XCTAssertEqual(store.allV9Manifests()["v9"], manifest)
     try store.save(entry("v9"))
-    XCTAssertTrue(store.allDormantManifests().isEmpty, "an entry.json makes it not dormant")
+    XCTAssertEqual(store.loadV9Manifest("v9"), manifest, "read with or without an entry.json")
     store.removeV9Manifest("v9")
     XCTAssertNil(store.loadV9Manifest("v9"))
   }

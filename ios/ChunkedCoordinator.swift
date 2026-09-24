@@ -76,13 +76,40 @@ final class ChunkedCoordinator {
         t.task.cancel()
       }
     }
-    inFlight[id] = live
+    // A pending part with a TaskMap key but no live task finished while the
+    // app was dead, and its completion may replay now. Hold its slot for the
+    // grace, so no second PUT of that part starts, and its part file stays.
+    var held: [Int: String] = [:]
+    for key in q.taskMap.keys(where: { $0.id == id && $0.incarnation == e.incarnation
+                                       && ($0.purpose ?? .attempt) == .attempt }) {
+      guard let i = q.taskMap.meta(forKey: key)?.partIndex, e.parts.indices.contains(i),
+            !e.parts[i].accepted, live[i] == nil, held[i] == nil else { continue }
+      held[i] = key
+    }
+    inFlight[id] = live.merging(held) { current, _ in current }
+    if !held.isEmpty { holdForReplay(id, held) }
     // Part files of accepted parts with no live task are orphans.
     for i in e.parts.indices where e.parts[i].accepted && live[i] == nil {
       q.store.removePartFile(id, i)
     }
     start(id)
     updateWait(id)
+  }
+
+  /// When the grace ends (every held replay came, or the timer fired), a
+  /// held slot whose replay never came is released: its key is pruned and
+  /// the part is sent again.
+  private func holdForReplay(_ id: String, _ held: [Int: String]) {
+    q.openGrace("part:" + id, keys: Set(held.values)) { [weak self] in
+      guard let self else { return }
+      var released = false
+      for (i, key) in held where self.inFlight[id]?[i] == key {
+        self.inFlight[id]?[i] = nil
+        self.q.taskMap.removeKey(key)
+        released = true
+      }
+      if released { self.refill(id) }
+    }
   }
 
   // MARK: - Delegate hooks
@@ -112,8 +139,11 @@ final class ChunkedCoordinator {
     if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
     let accepted = c.error == nil
       && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
-    q.emitAttempt(e, requestId: meta?.requestId, attempt: meta?.attempt ?? e.attempts, completion: c,
-                  partIndex: part, accepted: accepted, systemCancel: cancelled)
+    // A system cancel is not an attempt: no event. It retries below.
+    if !cancelled {
+      q.emitAttempt(e, requestId: meta?.requestId, attempt: meta?.attempt ?? e.attempts, completion: c,
+                    partIndex: part, accepted: accepted)
+    }
     e.lastRequestId = meta?.requestId ?? e.lastRequestId
     e.lastUrl = e.parts[part].url
     e.lastPartIndex = part
@@ -121,6 +151,14 @@ final class ChunkedCoordinator {
     // Accept first, whatever the entry's state: the server holds these bytes
     // now. Losing the flag would re-send a part the server already has.
     if accepted {
+      // A replay that lands after its slot was given to a new task: that
+      // task is a duplicate PUT, and it reads the part file. Stop it first.
+      if !owned, let other = inFlight[id]?[part] {
+        q.cancelTask(other, purpose: .superseded)
+        inFlight[id]?[part] = nil
+        partSent[id]?[part] = nil
+        partBeginAt[id]?[part] = nil
+      }
       e = e.withPartAccepted(part)
       q.commit(e, emit: false)
       q.store.removePartFile(id, part)
@@ -150,11 +188,11 @@ final class ChunkedCoordinator {
     let blobExists = e.bodyPath.map { FileIO.exists(q.store.fileURL(id, $0)) } ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: q.policy(e),
-      isChunkedPart: true, fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt))
+      fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt))
     switch verdict {
     case .accepted:
       break // handled above
-    case .transient, .fileUnreadable:
+    case .transient:
       retryPart(e, part)
     case .auth:
       if let g = meta?.headerGeneration, g < q.settings.headerGeneration {
@@ -253,20 +291,25 @@ final class ChunkedCoordinator {
         errorKind: "unknown", message: "part \(index) url is not valid", partIndex: index)))
       return false
     }
+    let blob = e.bodyPath ?? ChunkedManifestV9.blobName
     let file: URL
     do {
       file = try q.store.writePartFile(
-        id: id, blob: e.bodyPath ?? ChunkedManifestV9.blobName, index: index, start: part.start,
-        end: part.end, incarnation: e.incarnation)
+        id: id, blob: blob, index: index, start: part.start, end: part.end, incarnation: e.incarnation)
     } catch {
-      q.settle(id, .fileError("cannot build part \(index): \(error.localizedDescription)", partIndex: index))
+      // Only a missing or short blob can never succeed. Any other failure
+      // (a full disk, protected data) may pass: build the part again later.
+      let blobSize = FileIO.size(q.store.fileURL(id, blob)) ?? 0
+      if blobSize < part.end {
+        q.settle(id, .fileError("cannot build part \(index): \(error.localizedDescription)", partIndex: index))
+      } else {
+        refillLater(e, part: part, delayMs: delayMs)
+      }
       return false
     }
     e.attempts += 1
     guard q.commitAhead(e, emit: false) else {
-      let backoff = RetryClassifier.backoffMs(
-        attempt: max(part.rejections, 1), policy: q.policy(e), random: q.random)
-      q.schedule(max(delayMs ?? 0, backoff)) { [weak self] in self?.refill(id) }
+      refillLater(e, part: part, delayMs: delayMs)
       return false
     }
 
@@ -289,6 +332,15 @@ final class ChunkedCoordinator {
       partBeginAt[id]?[index] = nil
     }
     return true
+  }
+
+  /// No task was made for a part (a failed save or part file). Fill the
+  /// window again after the wait it asked for, or a backoff, whichever is
+  /// longer.
+  private func refillLater(_ e: QueueEntry, part: QueueEntry.Part, delayMs: Int?) {
+    let backoff = RetryClassifier.backoffMs(
+      attempt: max(part.rejections, 1), policy: q.policy(e), random: q.random)
+    q.schedule(max(delayMs ?? 0, backoff)) { [weak self] in self?.refill(e.id) }
   }
 
   /// A transient part failure: the next task is created now with a
@@ -321,9 +373,12 @@ final class ChunkedCoordinator {
     q.commit(e)
   }
 
+  /// Byte-weighted: accepted parts plus what the live part tasks sent. The
+  /// row carries the same value.
   private func emitProgress(_ e: QueueEntry) {
     guard e.totalBytes > 0 else { return }
     let sent = min(e.acceptedBytes + (partSent[e.id]?.values.reduce(0, +) ?? 0), e.totalBytes)
+    q.index.setBytes(e.id, sent)
     q.emitProgress(e.id, sent: sent, total: e.totalBytes)
   }
 }

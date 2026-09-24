@@ -36,6 +36,13 @@ protocol EventSink: AnyObject {
   func emitProgress(_ body: [String: Any])
   func emitAttempt(_ body: [String: Any])
   func emitSettled(_ body: [String: Any])
+  /// true when a JS listener can take a settled outcome: from the first
+  /// journal drain until the module goes away. When false, an outcome is
+  /// journaled with deliveries 0 and not emitted; the drain delivers it.
+  func canDeliver() -> Bool
+  /// The drain calls this on the coordinator queue before it reads the
+  /// journal, so a settle is either in the drain or emitted, never both.
+  func listenerReady()
 }
 
 /// What didCompleteWithError reports, with the response body already capped.

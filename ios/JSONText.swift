@@ -22,8 +22,13 @@ enum JSONText {
   /// The bridged object for stored text. NSNull (JS null) when the text is
   /// "null" or does not parse.
   static func decode(_ text: String) -> Any {
-    (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]))
-      ?? NSNull()
+    parse(text) ?? NSNull()
+  }
+
+  /// The parsed value, or nil when the text is not JSON. "null" parses to
+  /// NSNull, which is a value.
+  static func parse(_ text: String) -> Any? {
+    try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])
   }
 
   static func sha256(_ text: String) -> String {

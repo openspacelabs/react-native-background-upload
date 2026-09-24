@@ -6,6 +6,8 @@ struct EnqueueError: Error {
   let message: String
 
   static func storage(_ message: String) -> EnqueueError { EnqueueError(code: "E_STORAGE", message: message) }
+  /// Input native cannot send: a bad URL scheme, header, body kind or tiling.
+  static func invalid(_ message: String) -> EnqueueError { EnqueueError(code: "E_INVALID", message: message) }
   static func running(_ id: String) -> EnqueueError {
     EnqueueError(code: "E_RUNNING", message: "enqueue: '\(id)' is running; a different body is accepted once it stops")
   }
@@ -67,9 +69,11 @@ final class QueueCoordinator {
   /// Every task this process created or adopted, by TaskMap key.
   var liveTasks: [String: (id: String, task: UploadTask)] = [:]
   var expiryTokens: [String: UUID] = [:]
-  var graceChecks: Set<String> = []
-  /// Last bytesSent reported for a simple entry, for the trailing edge.
-  var lastSent: [String: Int64] = [:]
+  /// Open grace waits (a completion that may still replay), by name. While
+  /// any is open, `afterGrace` holds the background completion handler
+  /// release.
+  var graces: [String: Grace] = [:]
+  var afterGrace: [() -> Void] = []
   /// Outcomes whose journal write failed, by eventId. They were emitted
   /// live; a timer retries the write while the entry still names them.
   var pendingJournal: [String: JournaledEvent] = [:]
@@ -160,6 +164,11 @@ final class QueueCoordinator {
         return
       }
       for e in self.index.entries() where e.state == .paused && !e.legacy {
+        // A pause does not expire an entry; the resume does.
+        if self.now() >= e.expiresAt {
+          self.settle(e.id, .expired)
+          continue
+        }
         var n = e
         n.state = e.authParked ? .awaitingAuth : .queued
         self.commit(n)
@@ -214,7 +223,13 @@ final class QueueCoordinator {
   func updateHeaders(_ patch: [String: Any], resolve: @escaping () -> Void,
                      reject: @escaping (String, String) -> Void) {
     queue.async {
-      let headers = EnqueueParser.headers(patch)
+      let headers: [String: String]
+      do {
+        headers = try EnqueueParser.headers(patch, field: "patch")
+      } catch {
+        reject("E_INVALID", "updateHeaders: \(error.localizedDescription)")
+        return
+      }
       var next = self.settings
       next.headerGeneration += 1
       guard self.saveSettings(next) else {
@@ -224,6 +239,10 @@ final class QueueCoordinator {
       for e in self.index.entries() where !e.legacy {
         var n = e
         n.headers = HeaderMerge.merge(e.headers, headers)
+        // A part's own header of the same name would win over the entry's.
+        for i in n.parts.indices {
+          n.parts[i].headers = HeaderMerge.replaceExisting(n.parts[i].headers, headers)
+        }
         n.headerGeneration = self.settings.headerGeneration
         if n.state == .awaitingAuth {
           n.authParked = false
@@ -248,6 +267,9 @@ final class QueueCoordinator {
   /// Every unacked outcome, oldest first. Each return counts as a delivery.
   func unacknowledgedEvents(resolve: @escaping ([[String: Any]]) -> Void) {
     queue.async {
+      // JS drains after it attaches its listener. From here on, a settle is
+      // emitted live.
+      self.sink?.listenerReady()
       resolve(self.unacknowledgedLocked().map(\.bridged))
     }
   }
@@ -305,10 +327,16 @@ final class QueueCoordinator {
   /// Records why, then cancels every task this process holds for `id`.
   func cancelTasks(_ id: String, purpose: TaskMap.Purpose) {
     for (key, owner) in liveTasks where owner.id == id {
-      taskMap.setPurpose(purpose, forKey: key, id: id)
-      owner.task.cancel()
-      liveTasks[key] = nil
+      cancelTask(key, purpose: purpose)
     }
+  }
+
+  /// One task, by TaskMap key.
+  func cancelTask(_ key: String, purpose: TaskMap.Purpose) {
+    guard let owner = liveTasks[key] else { return }
+    taskMap.setPurpose(purpose, forKey: key, id: owner.id)
+    owner.task.cancel()
+    liveTasks[key] = nil
   }
 
   func emitProgress(_ id: String, sent: Int64, total: Int64) {
@@ -336,22 +364,27 @@ final class QueueCoordinator {
     return request
   }
 
+  /// One HTTP attempt that ended with a response or a transport error. A
+  /// cancel of any kind is not an attempt and never gets here.
   func emitAttempt(_ e: QueueEntry, requestId: String?, attempt: Int, completion c: TaskCompletion,
-                   partIndex: Int?, accepted: Bool, systemCancel: Bool) {
+                   partIndex: Int?, accepted: Bool) {
     let url = c.url ?? partIndex.flatMap { e.parts.indices.contains($0) ? e.parts[$0].url : nil }
       ?? e.url ?? ""
     sink?.emitAttempt(AttemptEvent.build(AttemptEvent.Input(
       id: e.id, key: e.key, requestId: requestId ?? "", attempt: attempt, url: url,
       method: e.method, partIndex: partIndex, statusCode: c.statusCode, headers: c.headers,
-      body: c.body, error: systemCancel ? nil : c.error, accepted: accepted,
-      systemCancel: systemCancel, at: now())))
+      body: c.body, error: c.error, accepted: accepted, at: now())))
   }
 
   // MARK: - Expiry
 
   /// One in-process timer per live entry at expiresAt + 100 ms. A later arm
   /// replaces the token, so a resume that moved expiresAt makes the old timer
-  /// a no-op. Long waits re-arm daily.
+  /// a no-op. Long waits re-arm daily. It settles a queued or awaiting-auth
+  /// entry. It leaves a paused one to resume(), and a running one to the
+  /// result of its attempt: a real response keeps its own error kind, and a
+  /// transient one becomes 'expired' (scheduleRetry, retryPart). An entry
+  /// that parks after that is armed again by park().
   func armExpiry(_ e: QueueEntry) {
     guard e.isLive, !e.legacy else { return }
     let token = UUID()
@@ -361,10 +394,13 @@ final class QueueCoordinator {
       guard let self, self.expiryTokens[e.id] == token else { return }
       self.expiryTokens[e.id] = nil
       guard let current = self.index.entry(e.id), current.isLive, !current.legacy else { return }
-      if self.now() >= current.expiresAt {
-        self.settle(current.id, .expired)
-      } else {
+      guard self.now() >= current.expiresAt else {
         self.armExpiry(current)
+        return
+      }
+      switch current.state {
+      case .paused, .running: return
+      default: self.settle(current.id, .expired)
       }
     }
   }

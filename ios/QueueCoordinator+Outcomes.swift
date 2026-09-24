@@ -10,7 +10,8 @@ extension QueueCoordinator {
 
   /// The one terminal path. Cancels the entry's remaining tasks, emits the
   /// trailing progress, journals the outcome, saves the settled row, emits
-  /// `state`, then emits `settled` with deliveries 1.
+  /// `state`, then emits `settled` with deliveries 1 when a listener exists.
+  /// With no listener the outcome stays at deliveries 0 for the drain.
   ///
   /// A failed journal write still settles and emits: the request already
   /// ran, so a retry would send it twice, and a user cancel must not run
@@ -22,7 +23,8 @@ extension QueueCoordinator {
     chunked.stop(id)
     switch outcome {
     case .completed: e.bytesSent = e.totalBytes
-    default: e.bytesSent = e.isChunked ? e.acceptedBytes : (lastSent[id] ?? e.bytesSent)
+    // A simple entry keeps the live bytes of its last attempt.
+    default: if e.isChunked { e.bytesSent = e.acceptedBytes }
     }
     emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
 
@@ -52,20 +54,59 @@ extension QueueCoordinator {
     e.nextAttemptAt = nil
     e.authParked = false
     commit(e)
-    var delivered: JournaledEvent
+    // Checked after the append. A drain that ran before this line already
+    // set the flag; one that runs after reads the journal and counts it.
+    let live = sink?.canDeliver() == true
     if journaled {
-      delivered = journal.markDelivered([event.eventId]).first ?? event
+      if live {
+        var delivered = journal.markDelivered([event.eventId]).first ?? event
+        delivered.deliveries = max(delivered.deliveries, 1)
+        sink?.emitSettled(delivered.bridged)
+      }
     } else {
-      event.deliveries = 1
+      event.deliveries = live ? 1 : 0
       pendingJournal[event.eventId] = event
       retryJournal(event.eventId, delayMs: Self.journalRetryMs)
-      delivered = event
+      if live { sink?.emitSettled(event.bridged) }
     }
-    delivered.deliveries = max(delivered.deliveries, 1)
-    sink?.emitSettled(delivered.bridged)
     disarmExpiry(id)
     throttle.reset(id)
-    lastSent[id] = nil
+  }
+
+  /// A settle whose journal write landed but whose entry.json save failed
+  /// leaves a live row on disk for an outcome that already happened. This
+  /// moves the row to that outcome, with no emit: the journal drain
+  /// delivers it. Returns the settled row, or nil when `event` is not the
+  /// outcome of this row's generation.
+  @discardableResult
+  func applyJournaled(_ event: JournaledEvent, to e: QueueEntry) -> QueueEntry? {
+    guard e.isLive, !e.legacy, event.id == e.id, event.generation == e.generation else { return nil }
+    var n = e
+    switch event.kind {
+    case .completed: n.state = .completed
+    case .error: n.state = .error
+    case .cancelled: n.state = .cancelled
+    }
+    n.settledEventId = event.eventId
+    n.bytesSent = event.bytesSent
+    n.nextAttemptAt = nil
+    n.authParked = false
+    cancelTasks(e.id, purpose: .superseded)
+    chunked.stop(e.id)
+    disarmExpiry(e.id)
+    commit(n, emit: false)
+    return n
+  }
+
+  /// Relaunch, before any task is matched: every live row whose own
+  /// generation already has an unacked outcome takes that outcome, so it is
+  /// never sent again.
+  func repairLostSettles() {
+    let byId = Dictionary(grouping: journal.unacknowledged(), by: \.id)
+    for e in index.entries() where e.isLive && !e.legacy {
+      guard let event = byId[e.id]?.last(where: { $0.generation == e.generation }) else { continue }
+      applyJournaled(event, to: e)
+    }
   }
 
   /// Deletes the row and the bytes. `dropEvents` also deletes the id's
@@ -81,7 +122,6 @@ extension QueueCoordinator {
     }
     disarmExpiry(id)
     throttle.reset(id)
-    lastSent[id] = nil
   }
 
   /// One ack. The event comes from the journal, or from memory when its
@@ -91,8 +131,10 @@ extension QueueCoordinator {
     let event = journal.load(eventId) ?? pendingJournal[eventId]
     pendingJournal[eventId] = nil
     journal.ack([eventId])
-    let owner = event.flatMap { index.entry($0.id) }
+    var owner = event.flatMap { index.entry($0.id) }
       ?? index.entries().first { $0.settledEventId == eventId }
+    // An ack can run before the relaunch repair: settle a live row first.
+    if let event, let e = owner, let settled = applyJournaled(event, to: e) { owner = settled }
     guard let e = owner, e.isSettled, !e.legacy, e.state != .error else { return }
     if let event {
       guard event.kind != .error, event.generation == e.generation else { return }
