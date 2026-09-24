@@ -109,7 +109,10 @@ export const createUploadClient = (): UploadClient => {
     delivery.start();
   };
 
-  /** Pauses the whole queue. No outcome is produced; live rows show 'paused'. */
+  /**
+   * Pauses the whole queue. No outcome is produced; live rows show 'paused'.
+   * A paused entry past its expiresAt settles error/expired at resume.
+   */
   const pause = (): Promise<void> => native.pause();
 
   /** Resumes a paused queue. */
@@ -117,7 +120,8 @@ export const createUploadClient = (): UploadClient => {
 
   /**
    * On a live entry: settles it 'cancelled' with reason 'user', then forgets
-   * it after the ack. On a settled entry: forgets it now, row and bytes.
+   * it after the ack. On a settled entry: forgets it now: row, bytes, and its
+   * unacknowledged outcomes.
    */
   const cancel = (id: string): Promise<void> => native.cancel(id);
 
@@ -127,7 +131,8 @@ export const createUploadClient = (): UploadClient => {
 
   /**
    * Merges the patch into the headers of every entry not yet forgotten and
-   * resumes the entries parked on 'awaiting-auth'. This is how a fresh token
+   * resumes the entries parked on 'awaiting-auth'. The patch also replaces
+   * same-named headers a part carries. This is how a fresh token
    * reaches requests that stalled on 401. Native bumps a header generation, so
    * a 401 from an attempt issued under the old headers re-issues at once
    * instead of parking.
@@ -161,7 +166,7 @@ export const createUploadClient = (): UploadClient => {
    * the event's id to tell requests apart. 'state' carries a full RequestRow
    * per transition, plus a row with reason 'unhandled-key' for an outcome
    * whose key has no definition. 'progress' is byte-weighted. 'attempt' is
-   * one HTTP attempt before interpretation.
+   * one HTTP attempt, emitted live before the library settles the entry.
    */
   const addListener = ((
     event: 'state' | 'progress' | 'attempt',
