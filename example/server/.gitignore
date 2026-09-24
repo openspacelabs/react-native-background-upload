@@ -6,3 +6,6 @@ typings/
 
 # Node.js dependency directory
 node_modules/
+
+# Files the test server receives
+received/
