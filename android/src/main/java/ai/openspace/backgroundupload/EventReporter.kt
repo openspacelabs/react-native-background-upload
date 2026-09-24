@@ -1,48 +1,72 @@
 package ai.openspace.backgroundupload
 
-import android.content.Context
 import com.facebook.react.bridge.Arguments
 
-// Sends live events to JS through the module's codegen event emitters. Terminal
-// outcomes are journaled before they reach here, so when JS is absent (headless
-// worker, mid-reload) dropping the live event costs nothing — the consumer picks
-// it up from getUnacknowledgedEvents instead.
-object EventReporter {
+/** The events that queue transitions produce. [EventReporter] sends them to JS; tests record them. */
+interface QueueEvents {
+  fun state(row: RequestRow)
 
-  // Journal first, then emit. The journal is the durable record; it survives
-  // when JS is dead. The live emit is best-effort. The two carry the identical
-  // payload. Thus a consumer can acknowledge a live event by its eventId.
-  fun journalAndEmit(context: Context, entry: EventJournal.Entry) {
-    EventJournal.get(context).append(entry)
-    emit(entry)
-  }
+  /** The caller journaled [record] first. */
+  fun settled(record: EventJournal.SettledRecord)
 
-  // Emit a terminal event from its journal entry, so the live event carries the
-  // exact same payload (incl. eventId) as the journaled copy — letting a consumer
-  // ackEvents([eventId]) right after handling a live event, and keeping iOS/Android
-  // event shapes identical.
-  fun emit(entry: EventJournal.Entry) {
-    val module = UploaderModule.instance ?: return
-    val params = entry.toWritableMap()
-    when (entry.type) {
-      "completed" -> module.emitCompletedEvent(params)
-      "cancelled" -> module.emitCancelledEvent(params)
-      else -> module.emitErrorEvent(params)
-    }
-  }
+  /**
+   * Whether a live emit can reach a JS listener now. A record journaled
+   * while no listener is there (JS dead, or alive but not yet subscribed)
+   * starts at 0 deliveries, so its first real delivery (the replay) counts
+   * as 1.
+   */
+  fun canDeliver(): Boolean
+}
 
-  fun progress(uploadId: String, bytesSentTotal: Long, contentLength: Long) {
-    val module = UploaderModule.instance ?: return
-    module.emitProgressEvent(Arguments.createMap().apply {
-      putString("id", uploadId)
-      // Guard against a zero-byte file (contentLength == 0) producing NaN.
-      val pct = if (contentLength <= 0) 0.0 else bytesSentTotal.toDouble() * 100 / contentLength
-      putDouble("progress", pct) // 0-100
+/**
+ * Sends live events to JS through the module's codegen emitters. With no
+ * module (a headless worker, a reload) an event is dropped. Settled outcomes
+ * are journaled before they reach here, so a dropped one is replayed from
+ * the journal.
+ */
+object EventReporter : QueueEvents {
+
+  private val throttle = ProgressThrottle { id, sent, total ->
+    val module = UploaderModule.instance ?: return@ProgressThrottle
+    module.emitProgress(Arguments.createMap().apply {
+      putString("id", id)
+      putDouble("bytesSent", sent.toDouble())
+      putDouble("totalBytes", total.toDouble())
     })
+  }
+
+  override fun state(row: RequestRow) {
+    val module = UploaderModule.instance ?: return
+    module.emitState(JsonBridge.toWritableMap(row.toMap()))
+  }
+
+  override fun settled(record: EventJournal.SettledRecord) {
+    val module = UploaderModule.instance ?: return
+    module.emitSettled(record.toWritableMap())
+  }
+
+  override fun canDeliver(): Boolean = UploaderModule.instance?.listening == true
+
+  /** Moves the row's bytesSent in memory and emits through the throttle. */
+  fun progress(id: String, sent: Long, total: Long) {
+    RequestIndex.shared.setBytes(id, sent)
+    throttle.offer(id, sent, total, isForeground())
+  }
+
+  fun flushProgress(id: String) = throttle.flush(id)
+
+  fun dropProgress(id: String) = throttle.drop(id)
+
+  fun attempt(event: AttemptEvent) {
+    val module = UploaderModule.instance ?: return
+    module.emitAttempt(event.toWritableMap())
   }
 
   fun notification() {
     val module = UploaderModule.instance ?: return
-    module.emitNotificationEvent(Arguments.createMap())
+    module.emitNotification(Arguments.createMap())
   }
+
+  private fun isForeground(): Boolean =
+    runCatching { UploaderModule.instance?.isForeground() == true }.getOrDefault(false)
 }
