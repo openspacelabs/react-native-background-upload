@@ -266,6 +266,32 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertNil(partTask(0))
   }
 
+  func testKeyPauseStopsOnlyThatKeysPartsAndResumeRefills() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", key: "capture", size: 50, parts: 5)).get()
+    _ = try h.enqueue(h.dataRaw(id: "note", key: "fieldNote")).get()
+    h.complete(try XCTUnwrap(partTask(0)))
+    h.pause(keys: ["capture"])
+    XCTAssertEqual(h.entry("cap")?.state, .paused)
+    XCTAssertNil(partTask(1))
+    XCTAssertEqual(h.entry("note")?.state, .running)
+    XCTAssertEqual(h.entry("cap")?.parts[0].accepted, true, "accepted parts are kept")
+    h.resume(keys: ["capture"])
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertNil(partTask(0))
+    XCTAssertNotNil(partTask(1))
+  }
+
+  func testEntryWifiOnlyPicksThePartSession() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["wifiOnly": true])).get()
+    let parts = h.transport.live.filter { ChunkedEngine.parsePartDescription($0.taskDescription) != nil }
+    XCTAssertEqual(parts.count, 3)
+    XCTAssertTrue(parts.allSatisfy(\.wifiOnly))
+    h.setWifiOnly(true)
+    h.setWifiOnly(false)
+    h.complete(try XCTUnwrap(partTask(0)), status: 503)
+    XCTAssertEqual(partTask(0)?.wifiOnly, true, "a part retry after a toggle keeps the entry's own setting")
+  }
+
   func testCancelLiveChunked() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
     h.complete(try XCTUnwrap(partTask(0)))

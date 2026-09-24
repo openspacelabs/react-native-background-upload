@@ -15,7 +15,8 @@ extension QueueCoordinator {
   /// the ordinal and request id. It applies only while the entry holds such
   /// an attempt (nextAttemptAt set); otherwise a new attempt is minted.
   func issue(_ id: String, delayMs: Int? = nil, advanceAttempt: Bool = true) {
-    guard var e = index.entry(id), !e.legacy, e.state == .queued, !settings.paused else { return }
+    guard var e = index.entry(id), !e.legacy, e.state == .queued,
+          !settings.isPaused(e.key) else { return }
     let t = now()
     if t >= e.expiresAt {
       settle(id, .expired)
@@ -76,7 +77,8 @@ extension QueueCoordinator {
       id: id, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt)
     let task = transport.upload(
-      buildRequest(e, url: url, requestId: requestId), fromFile: body, wifiOnly: settings.wifiOnly,
+      buildRequest(e, url: url, requestId: requestId), fromFile: body,
+      wifiOnly: settings.wifiOnly(e.wifiOnly),
       description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
       beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
       beforeResume: { key in self.taskMap.set(meta, forKey: key) })
@@ -199,7 +201,7 @@ extension QueueCoordinator {
       guard meta?.purpose != .superseded,
             case .request(let id, let generation, let attempt) = owner,
             var e = index.entry(id), !e.isChunked, e.generation == generation,
-            e.attempts == attempt, e.state == .queued || e.state == .running, !settings.paused,
+            e.attempts == attempt, e.state == .queued || e.state == .running, !settings.isPaused(e.key),
             let url = e.url.flatMap(URL.init(string:)) else {
         taskMap.setPurpose(.superseded, forKey: key, id: owner.id)
         liveTasks[key] = nil

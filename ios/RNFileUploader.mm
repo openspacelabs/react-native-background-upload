@@ -82,16 +82,18 @@
   [RNBackgroundUpload.shared enqueue:entry resolve:resolve reject:reject];
 }
 
-- (void)pause:(RCTPromiseResolveBlock)resolve
+- (void)pause:(NSDictionary *)scope
+      resolve:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject
 {
-  [RNBackgroundUpload.shared pause:resolve reject:reject];
+  [RNBackgroundUpload.shared pause:scope resolve:resolve reject:reject];
 }
 
-- (void)resume:(RCTPromiseResolveBlock)resolve
+- (void)resume:(NSDictionary *)scope
+       resolve:(RCTPromiseResolveBlock)resolve
         reject:(RCTPromiseRejectBlock)reject
 {
-  [RNBackgroundUpload.shared resume:resolve reject:reject];
+  [RNBackgroundUpload.shared resume:scope resolve:resolve reject:reject];
 }
 
 - (void)cancel:(NSString *)id

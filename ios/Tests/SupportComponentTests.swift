@@ -317,3 +317,56 @@ final class AttemptEventTests: XCTestCase {
     XCTAssertEqual(e["responseBodyTruncated"] as? Bool, true)
   }
 }
+
+final class QueueSettingsTests: XCTestCase {
+  func testPausedDerivesFromTheGateOrTheKey() {
+    var s = QueueSettings()
+    XCTAssertFalse(s.isPaused("capture"))
+    s.pausedKeys = ["capture"]
+    XCTAssertTrue(s.isPaused("capture"))
+    XCTAssertFalse(s.isPaused("fieldNote"))
+    s.paused = true
+    XCTAssertTrue(s.isPaused("fieldNote"))
+  }
+
+  func testEntryWifiOnlyWinsOverTheQueueSetting() {
+    var s = QueueSettings()
+    s.wifiOnly = true
+    XCTAssertTrue(s.wifiOnly(nil))
+    XCTAssertFalse(s.wifiOnly(false))
+    s.wifiOnly = false
+    XCTAssertTrue(s.wifiOnly(true))
+  }
+
+  func testPausedKeysRoundTripAndAnOlderFileLoads() throws {
+    var s = QueueSettings()
+    s.paused = true
+    s.pausedKeys = ["capture", "video"]
+    let back = try JSONDecoder().decode(QueueSettings.self, from: try JSONEncoder().encode(s))
+    XCTAssertEqual(back, s)
+    let old = try JSONDecoder().decode(QueueSettings.self, from: Data(#"{"wifiOnly":true,"paused":true}"#.utf8))
+    XCTAssertEqual(old.pausedKeys, [])
+    XCTAssertTrue(old.paused)
+  }
+
+  func testAnEntryFromAnOlderBuildHasNoWifiOnly() throws {
+    var json = try JSONSerialization.jsonObject(with: try QueueStore.encode(sampleEntry("a", createdAt: 1)))
+      as! [String: Any]
+    json["wifiOnly"] = nil
+    let e = try JSONDecoder().decode(QueueEntry.self, from: try JSONSerialization.data(withJSONObject: json))
+    XCTAssertNil(e.wifiOnly, "follows the queue setting")
+  }
+
+  func testParserReadsWifiOnly() throws {
+    func parse(_ extra: [String: Any]) throws -> ParsedEnqueue {
+      var d: [String: Any] = ["url": "https://a.test", "expiresAt": 1.0]
+      for (k, v) in extra { d[k] = v }
+      return try EnqueueParser.parse(["id": "a", "key": "k", "varsJson": "{}", "descriptor": d])
+    }
+    XCTAssertNil(try parse([:]).wifiOnly)
+    XCTAssertNil(try parse(["wifiOnly": NSNull()]).wifiOnly)
+    XCTAssertEqual(try parse(["wifiOnly": true]).wifiOnly, true)
+    XCTAssertEqual(try parse(["wifiOnly": false]).wifiOnly, false)
+    XCTAssertThrowsError(try parse(["wifiOnly": "yes"]))
+  }
+}

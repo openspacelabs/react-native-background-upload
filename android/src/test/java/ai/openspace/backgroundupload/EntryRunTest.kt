@@ -25,6 +25,8 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
   var network = ArrayDeque<Connectivity>()
   var timeout = false
   var foregroundError: Throwable? = null
+  /** The wifiOnly value of every connectivity check, in order. */
+  val wifiChecks = mutableListOf<Boolean>()
 
   override fun now() = clock
 
@@ -39,7 +41,10 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
     return handler(request, onProgress)
   }
 
-  override fun connectivity(wifiOnly: Boolean) = network.removeFirstOrNull() ?: Connectivity.Ok
+  override fun connectivity(wifiOnly: Boolean): Connectivity {
+    wifiChecks += wifiOnly
+    return network.removeFirstOrNull() ?: Connectivity.Ok
+  }
 
   override suspend fun foreground(entry: QueueEntry) {
     foregroundError?.let { throw it }
@@ -261,6 +266,48 @@ class EntryRunTest {
     run()
     assertEquals("expired", outcome().errorKind)
     assertEquals(EntryState.ERROR, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `the connectivity check uses the entry's wifiOnly, else the queue setting at each poll`() {
+    controller.setWifiOnly(true)
+    controller.enqueue(parsed(id = "cell", descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false)))
+    respond(200)
+    run("cell")
+    assertEquals(listOf(false), host.wifiChecks) // its own false beats the queue's true
+
+    host.wifiChecks.clear()
+    controller.enqueue(parsed(id = "follow"))
+    host.network = ArrayDeque(listOf(Connectivity.NoWifi))
+    host.onSleep = { controller.setWifiOnly(false) } // a toggle while it waits
+    respond(200)
+    run("follow")
+    assertEquals(listOf(true, false), host.wifiChecks)
+    assertEquals(EntryState.COMPLETED, store.load("follow")!!.state)
+  }
+
+  @Test
+  fun `a run under a key pause does not start, and other keys run`() {
+    controller.enqueue(parsed(id = "c", key = "capture"))
+    controller.enqueue(parsed(id = "n", key = "note"))
+    controller.pause(listOf("capture"))
+    respond(200)
+    run("c")
+    run("n")
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+    assertEquals(EntryState.COMPLETED, store.load("n")!!.state)
+    assertEquals(1, host.requests.size)
+  }
+
+  @Test
+  fun `a key pause while waiting for the network stops the run with no outcome`() {
+    controller.enqueue(parsed(id = "c", key = "capture"))
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+    host.onSleep = { controller.pause(listOf("capture")) }
+    run("c")
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+    assertEquals(emptyList<TransferRequest>(), host.requests)
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
 
   @Test

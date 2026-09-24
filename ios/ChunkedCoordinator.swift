@@ -39,7 +39,7 @@ final class ChunkedCoordinator {
   /// queued -> running, then fill the window.
   func start(_ id: String) {
     guard var e = q.index.entry(id), e.isChunked, e.state == .queued || e.state == .running,
-          !q.settings.paused else { return }
+          !q.settings.isPaused(e.key) else { return }
     if e.state == .queued {
       e.state = .running
       e.nextAttemptAt = nil
@@ -221,7 +221,7 @@ final class ChunkedCoordinator {
     let ownedOrUnknown = !q.ready || inFlight[id]?[part] == key
     guard let e = q.index.entry(id), e.isChunked, incarnation == e.incarnation,
           e.parts.indices.contains(part), !e.parts[part].accepted, e.state == .running,
-          !q.settings.paused, ownedOrUnknown, let url = URL(string: e.parts[part].url) else {
+          !q.settings.isPaused(e.key), ownedOrUnknown, let url = URL(string: e.parts[part].url) else {
       q.taskMap.setPurpose(.superseded, forKey: key, id: id)
       q.liveTasks[key] = nil
       if inFlight[id]?[part] == key {
@@ -253,8 +253,8 @@ final class ChunkedCoordinator {
   /// background-wake refill that keeps the upload moving while the app is
   /// dead), at start, and at the end of every reconcile.
   func refill(_ id: String) {
-    guard q.ready, !q.settings.paused, let e = q.index.entry(id), e.isChunked,
-          e.state == .running else { return }
+    guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
+          !q.settings.isPaused(e.key) else { return }
     if e.allAccepted {
       q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
       return
@@ -320,7 +320,7 @@ final class ChunkedCoordinator {
       generation: e.generation, purpose: .attempt)
     let task = q.transport.upload(
       q.buildRequest(e, url: url, requestId: requestId, partHeaders: part.headers),
-      fromFile: file, wifiOnly: q.settings.wifiOnly,
+      fromFile: file, wifiOnly: q.settings.wifiOnly(e.wifiOnly),
       description: ChunkedEngine.taskDescription(id: id, part: index, incarnation: e.incarnation),
       beginAt: delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) },
       beforeResume: { key in self.q.taskMap.set(meta, forKey: key) })

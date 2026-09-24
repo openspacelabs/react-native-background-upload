@@ -113,6 +113,9 @@ extension QueueCoordinator {
         withoutTask(e)
       }
     }
+    // A crash between the settings save and the entry saves of a pause or
+    // resume leaves rows that do not match the gates. Match them now.
+    applyPauseGates()
   }
 
   /// A queued or running entry with no live task. Either the daemon finished
