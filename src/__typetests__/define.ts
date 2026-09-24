@@ -166,6 +166,32 @@ const parsed = client.define({
 });
 void parsed.mutate({ a: 'x' });
 
+// A parser may take the entry vars as its second argument. V still infers
+// from request, and T from the parser's return.
+const withVars = client.define({
+  key: 'parser.vars',
+  request: ({ siteId }: { siteId: string; page: number }) => ({
+    url: `https://x/${siteId}`,
+    data: null,
+  }),
+  response: (raw, vars) => {
+    assertEqual<typeof vars, { siteId: string; page: number }>(true);
+    return { page: vars.page, rows: raw as string[] };
+  },
+  onSuccess: (_data, _vars) => {
+    assertEqual<typeof _data, { page: number; rows: string[] }>(true);
+    assertEqual<typeof _vars, { siteId: string; page: number }>(true);
+  },
+});
+void withVars.mutate({ siteId: 's', page: 1 });
+// A parser annotated with the wrong vars type does not compile.
+client.define({
+  key: 'parser.wrong.vars',
+  request: (_vars: { a: string }) => ({ url: 'https://x', data: null }),
+  // @ts-expect-error the parser's vars must match the request's
+  response: (_raw: unknown, vars: { b: number }) => vars.b,
+});
+
 // An async parser is typed honestly: onSuccess sees the Promise.
 client.define({
   key: 'async.parser',

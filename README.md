@@ -63,8 +63,8 @@ import { createUploadClient } from 'react-native-background-upload';
 export const uploads = createUploadClient();
 
 // One definition per request kind. `request` runs one time, at mutate().
-// `vars` is any JSON-serializable object, at most 4 KB; native persists it
-// next to the entry. Generated API request types work as they are.
+// `vars` is any JSON-serializable object, at most 1 MB by default; native
+// persists it next to the entry. Generated API request types work as they are.
 type AddCommentVars = { siteId: string; noteId: string; comment: string };
 export const addComment = uploads.define({
   key: 'note.comment.add', // persisted with every entry; rename with care
@@ -72,7 +72,8 @@ export const addComment = uploads.define({
     url: `https://api.example.com/sites/${siteId}/notes/${noteId}/comments`,
     data: { comment }, // JSON body. Default method is POST.
   }),
-  // Parses the JSON body before onSuccess. Zod users pass schema.parse.
+  // Parses the JSON body before onSuccess. Zod users pass schema.parse. The
+  // parser also receives the entry's vars as a second argument.
   response: (raw) => (raw as { content: Comment[] }).content,
   onSuccess: (content, { noteId }, meta) => {
     // Runs after the server accepted the request, possibly on a later launch.
@@ -89,7 +90,8 @@ uploads.configure({
   android: { notificationTitle: 'Uploading', notificationChannel: 'uploads' },
 });
 
-// Anywhere. Resolves when the entry is durable, never on the network.
+// Anywhere. Resolves when the entry and its staged body are on disk, never
+// on the network. You may delete a source file after this resolves.
 const { id } = await addComment.mutate(
   { siteId, noteId, comment },
   { id: localCommentId }, // optional; makes a re-dispatch idempotent
@@ -160,11 +162,20 @@ const captureFile = uploads.define({
 are deleted after a `completed` outcome is acknowledged, or on `cancel()`.
 Nothing else deletes them.
 
-**Same id, again.** `mutate()` with an id that exists follows the v9 rules.
-Same parts or body: resume; new headers and `expiresAt` replace the stored
-ones, and a settled entry reopens and settles once more. Settled entry with
-different parts: recreate over the same bytes (the new parts must tile the
-same size). Running entry with different parts: reject.
+**Same id, again.** `mutate()` with an id that exists:
+
+- Same body: resume. New headers, `expiresAt`, and `vars` replace the stored
+  ones.
+- Different body (`data`, `form`, `file`, or `parts`) and the entry is not
+  running (queued, paused, awaiting-auth, or settled): the descriptor, staged
+  body, `vars`, headers, and `expiresAt` are replaced and the entry reopens.
+  It settles once more.
+- Different body, entry running: `mutate()` rejects with `E_RUNNING`.
+- A cancelled entry whose outcome is not yet acknowledged: a fresh
+  generation. The old outcome's ack forgets the entry only when the
+  generation matches.
+- A completed entry whose outcome is not yet acknowledged: the journaled
+  outcome is emitted again. The request does not run again.
 
 ### Silent uploads (Android)
 
@@ -176,12 +187,18 @@ the OS may defer or restart it. Reserve it for small payloads.
 # Reliable delivery
 
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
-   attempt. `mutate()` resolves when the write lands.
+   attempt. `mutate()` resolves after the row and every staged body copy are
+   durably on disk (temp file plus rename), so the caller may delete its
+   source file then. A native failure rejects with a code: `E_RUNNING`,
+   `E_FILE_MISSING`, or `E_STORAGE`.
 2. **Journal before emit, ack after the handler.** Every terminal outcome is
    journaled natively, then delivered. The library acknowledges after the
    handler's promise resolves. A rejection, or app death before the ack,
    redelivers at the next launch. A handler that has not settled after 30 s
-   gets a console warning and keeps waiting.
+   gets a console warning and keeps waiting. `Meta.deliveries` counts the
+   deliveries of one outcome, including boot replays, so a handler that
+   keeps throwing sees it grow. The library never gives up on its own; the
+   app decides a poison policy from that number.
 3. **One outcome per settle cycle.** `pause()` produces none. A same-id
    `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
@@ -192,6 +209,9 @@ the OS may defer or restart it. Reserve it for small payloads.
    unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
+8. **Ordering holds per id only.** The outcomes of one id are delivered in
+   order. There is no ordering guarantee between different ids.
+9. **`attempt` events are live-only.** They are never journaled or replayed.
 
 Retry classes:
 
@@ -221,7 +241,7 @@ type Definition<V extends object | null, T> =
   | {
       key: string;
       request: (vars: V) => RequestDescriptor;
-      response: (raw: unknown) => T; // JSON-parsed body, or undefined when there is none
+      response: (raw: unknown, vars: V) => T; // JSON-parsed body, or undefined when there is none
       onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
       onError?: (error: OutcomeError, vars: V, meta: Meta) => void | Promise<void>;
     }
@@ -235,7 +255,9 @@ type Definition<V extends object | null, T> =
 ```
 
 `V` infers from the `request` parameter annotation, `T` from the `response`
-return type. Without `response`, `onSuccess` receives the `RawResponse`
+return type. `response` also receives the entry's `vars`, for a parser that
+needs the request context; a one-argument parser such as `schema.parse` is
+assignable as it is. Without `response`, `onSuccess` receives the `RawResponse`
 (`{ status?, headers?, body?, bodyTruncated }`), and an `onSuccess` annotated
 with any other type is a compile error. `V` is any object or `null`, so a
 generated API request type works as it is. `mutate()` rejects vars and
@@ -249,16 +271,19 @@ message; the entry still settles as completed. A key that is already defined
 is replaced, with a warning in development. A `cancelled` outcome calls no
 handler.
 
-`Meta` is `{ id, key, at, attempts, requestId? }`; `at` is the native outcome
-time.
+`Meta` is `{ id, key, at, attempts, requestId?, deliveries }`; `at` is the
+native outcome time. `deliveries` is 1 on the first delivery of an outcome and
+grows by one on every redelivery, including a boot replay.
 
 ### `mutate(vars, { id? }): Promise<{ id }>`
 
 Runs `request(vars)` once, merges `configure().headers()` under the
 descriptor's headers, validates the descriptor, defaults `expiresAt`, and
-persists the entry. Resolves with the id when the write lands. Rejects on a
-malformed descriptor, an unknown descriptor field, a missing file, or `vars`
-over 4 KB. Only `vars` are capped. `id` defaults to a UUID. For a definition
+persists the entry. Resolves with the id after the row and every staged body
+copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
+field, a missing file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a
+running entry with a different body (`E_RUNNING`), or `vars` over
+`maxVarsBytes` (1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a definition
 whose `request` takes no vars, call `mutate()` with no arguments; native stores
 `null`.
 
@@ -270,6 +295,7 @@ outcomes. A second call updates the settings and does not replay again.
 | Option | Notes |
 | --- | --- |
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
+| `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
 | `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when the native write has not settled by then. A watchdog for a native bug, not a tuning knob. |
@@ -280,21 +306,27 @@ Whole-queue pause. No outcome is produced; live rows show `paused`.
 
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
-its ack. A settled entry is forgotten now, row and bytes.
+its ack. A settled entry is forgotten now, row and bytes. An unknown id
+resolves and does nothing.
 
 ### `setWifiOnly(enabled): Promise<void>`
 Persisted natively. Applies to queued and future entries.
 
 ### `updateHeaders(patch): Promise<void>`
-Merges the patch into every queued and parked entry's headers, then resumes
-the entries parked on `awaiting-auth`. This is how a fresh token reaches
-requests that stalled on 401.
+Merges the patch into the headers of every entry not yet forgotten and
+resumes the entries parked on `awaiting-auth`. This is how a fresh token
+reaches requests that stalled on 401. Each call bumps a header generation: a
+401 or 403 from an attempt issued under an older generation re-issues at once
+instead of parking. Parking emits one `state` event per entry.
 
 ### `getRequests(filter?): RequestRow[]`
-Synchronous. Live rows from native's in-memory index, so it works offline.
-`filter` is `{ key?, id? }`. A row is
-`{ id, key, vars, state, bytesSent, totalBytes, attempts, updatedAt }`, with
-`state` one of `queued | running | awaiting-auth | paused | completed | error | cancelled`.
+Synchronous, from native's in-memory index, so it works offline. Returns
+every entry native has not yet forgotten: `queued`, `running`,
+`awaiting-auth`, and `paused` entries; `completed` and `cancelled` entries
+until their ack; `error` entries until `cancel()` or a same-id `mutate()`;
+and imported legacy rows. `filter` is `{ key?, id? }`. A row is
+`{ id, key, vars, state, bytesSent, totalBytes, attempts, updatedAt, nextAttemptAt? }`;
+`nextAttemptAt` (epoch ms) is set while the entry waits out a retry backoff.
 `vars` is typed `Json`, because a row does not know its definition. Narrow
 it before reading a field, for example to cancel every entry of one capture:
 
@@ -324,7 +356,7 @@ Fires when the Android progress notification is pressed. No event data.
 | --- | --- |
 | `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key has no definition. A consumer's reducer is one upsert. |
 | `progress` | `{ id, bytesSent, totalBytes }`, byte-weighted across a chunked upload's parts. |
-| `attempt` | One HTTP attempt before interpretation: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, cancelReason?, at }`. |
+| `attempt` | One HTTP attempt before interpretation: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, cancelReason?, at }`. Live-only; never journaled or replayed. |
 
 Terminal outcomes do not appear here. They go to the definition's handlers.
 

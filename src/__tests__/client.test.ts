@@ -27,7 +27,7 @@ jest.mock('react-native', () => {
     updateHeaders: jest.fn(async () => undefined),
     getRequests: jest.fn(() => []),
     getUnacknowledgedEvents: jest.fn(async () => []),
-    ackEvents: jest.fn(async () => true),
+    ackEvents: jest.fn(async () => undefined),
     onState: emitter('state'),
     onProgress: emitter('progress'),
     onAttempt: emitter('attempt'),
@@ -176,6 +176,32 @@ describe('configure', () => {
     );
     expect(() => createUploadClient().configure({ lifetimeMs: NaN })).toThrow(
       /lifetimeMs/,
+    );
+  });
+
+  it('rejects a non-positive maxVarsBytes and keeps it on the JS side', () => {
+    expect(() =>
+      createUploadClient().configure({ maxVarsBytes: 0 }),
+    ).toThrow(/maxVarsBytes must be a positive number, got 0/);
+    expect(() =>
+      createUploadClient().configure({ maxVarsBytes: Infinity }),
+    ).toThrow(/maxVarsBytes/);
+    createUploadClient().configure({ maxVarsBytes: 64 });
+    expect(native.configure.mock.calls.at(-1)![0]).not.toHaveProperty(
+      'maxVarsBytes',
+    );
+  });
+
+  it('applies maxVarsBytes to later mutates', async () => {
+    const client = createUploadClient();
+    const send = client.define({
+      key: 'k',
+      request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
+    });
+    client.configure({ maxVarsBytes: 16 });
+    await expect(send.mutate({ s: 'a'.repeat(8) })).resolves.toBeDefined();
+    await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
+      /is 17 bytes; the limit is 16/,
     );
   });
 
@@ -511,6 +537,7 @@ describe('end to end', () => {
         at: 10,
         attempts: 1,
         requestId: 'r1',
+        deliveries: 1,
       },
     );
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);

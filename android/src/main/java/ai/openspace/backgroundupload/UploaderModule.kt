@@ -120,7 +120,8 @@ class UploaderModule(context: ReactApplicationContext) :
 
 
   /**
-   * Removes journaled events by eventId once JS has processed them.
+   * Removes journaled events by eventId once JS has processed them. Resolves
+   * void. Idempotent: an unknown id is ignored.
    */
   override fun ackEvents(ids: ReadableArray, promise: Promise) {
     try {
@@ -138,7 +139,7 @@ class UploaderModule(context: ReactApplicationContext) :
         completedUploadIds,
         ChunkedManifestStore.get(reactApplicationContext),
       ) { id -> workManager.cancelUniqueWork(id) }
-      promise.resolve(true)
+      promise.resolve(null)
     } catch (exc: Throwable) {
       Log.e(TAG, exc.message, exc)
       promise.reject(exc)

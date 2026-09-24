@@ -18,8 +18,11 @@ export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
  * bug (a path that never settles), not a tuning knob.
  */
 export const DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000;
-/** `vars` are persisted natively next to every entry. Only they are capped. */
-export const MAX_VARS_BYTES = 4096;
+/**
+ * Default `configure().maxVarsBytes`. `vars` are persisted natively next to
+ * every entry. Only they are capped.
+ */
+export const MAX_VARS_BYTES = 1_048_576;
 
 const METHODS: readonly Method[] = ['POST', 'PUT', 'PATCH', 'DELETE', 'GET'];
 
@@ -49,6 +52,7 @@ const ANDROID_KEYS = ['noNotification'];
 export type Settings = {
   lifetimeMs: number;
   enqueueTimeoutMs: number;
+  maxVarsBytes: number;
   headers?: () => Record<string, string>;
   retry?: Partial<RetryPolicy>;
 };
@@ -504,10 +508,11 @@ export const createRegistry = ({
     ): Promise<{ id: string }> => {
       // A no-vars definition calls mutate() with nothing; native stores null.
       const vars = (input === undefined ? null : input) as V;
+      const settings = getSettings();
       const bytes = utf8ByteLength(serializeVars(vars));
-      if (bytes > MAX_VARS_BYTES) {
+      if (bytes > settings.maxVarsBytes) {
         throw new Error(
-          `mutate: vars for "${key}" is ${bytes} bytes; the limit is ${MAX_VARS_BYTES}`,
+          `mutate: vars for "${key}" is ${bytes} bytes; the limit is ${settings.maxVarsBytes} (configure().maxVarsBytes)`,
         );
       }
       if (options?.id !== undefined && !options.id) {
@@ -517,7 +522,6 @@ export const createRegistry = ({
       // request() is the one that runs.
       const current = (definitions.get(key) ?? definition) as Definition<V, T>;
       const descriptor = validateDescriptor(current.request(vars));
-      const settings = getSettings();
       const provided = settings.headers?.() ?? {};
       if (!isPlainObject(provided)) {
         throw new Error('mutate: configure().headers() must return an object');

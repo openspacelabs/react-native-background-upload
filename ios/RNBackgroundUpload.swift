@@ -441,7 +441,8 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       .map { $0.id }
     EventJournal.ack(eventIds)
     chunked.releaseCompleted(completedUploadIds) { // no-op for simple uploads
-      resolve(true)
+      // The spec resolves void. Idempotent: an unknown id is ignored.
+      resolve(nil)
     }
   }
 

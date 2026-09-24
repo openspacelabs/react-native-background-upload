@@ -126,7 +126,11 @@ export type OutcomeError = {
 
 /**
  * Handler context. `at` is the native outcome time. `requestId` is the last
- * attempt's X-Request-Id.
+ * attempt's X-Request-Id. `deliveries` counts how many times this outcome has
+ * reached JS: 1 on the first delivery, more after a handler rejection, an app
+ * death before the ack, or a boot replay. A handler that keeps throwing sees
+ * it grow. The library never gives up on its own, so the app decides a poison
+ * policy from this number.
  */
 export type Meta = {
   id: string;
@@ -134,6 +138,7 @@ export type Meta = {
   at: number;
   attempts: number;
   requestId?: string;
+  deliveries: number;
 };
 
 export type Outcome =
@@ -164,6 +169,8 @@ export type RequestRow = {
   totalBytes: number;
   attempts: number;
   updatedAt: number;
+  /** Epoch ms. Set while the entry waits out a retry backoff. */
+  nextAttemptAt?: number;
 };
 
 /**
@@ -210,8 +217,12 @@ type DefinitionBase<V extends Vars> = {
 
 /** A definition with a parser. `onSuccess` receives what `response` returns. */
 export type DefinitionWithResponse<V extends Vars, T> = DefinitionBase<V> & {
-  /** Parses the JSON body (`undefined` when there is none) before `onSuccess`. */
-  response: (raw: unknown) => T;
+  /**
+   * Parses the JSON body (`undefined` when there is none) before `onSuccess`.
+   * `vars` is the entry's own, for a parser that needs the request context. A
+   * one-argument parser such as `schema.parse` is assignable as it is.
+   */
+  response: (raw: unknown, vars: V) => T;
   onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
 };
 
@@ -279,6 +290,11 @@ export type AndroidNotificationConfig = {
 export type ConfigureOptions = {
   /** Default 14 days. Sets the default `expiresAt` of every entry. */
   lifetimeMs?: number;
+  /**
+   * Default 1 MB. `mutate()` rejects `vars` whose JSON is longer. Only `vars`
+   * are capped, because native persists them next to every entry.
+   */
+  maxVarsBytes?: number;
   /** Defaults: base 1 s, max 2 h, jitter 0.2, exempt [404]. */
   retry?: Partial<RetryPolicy>;
   /** Called at `mutate()`. The descriptor's headers merge over the result. */
