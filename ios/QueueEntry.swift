@@ -31,7 +31,6 @@ struct QueueEntry: Codable, Equatable {
   let id: String
   var key: String
   var varsJSON: String
-  var descriptorJSON: String
   /// nil only for a chunked entry whose descriptor has no url.
   var url: String?
   var method: String
@@ -127,8 +126,7 @@ extension QueueEntry {
   static func created(from p: ParsedEnqueue, staged: StagedBody, headerGeneration: Int,
                       paused: Bool, now: Double, createdAt: Double? = nil) -> QueueEntry {
     QueueEntry(
-      id: p.id, key: p.key, varsJSON: p.varsJSON, descriptorJSON: p.descriptorJSON,
-      url: p.url, method: p.method, accept: p.accept, retry: p.retry,
+      id: p.id, key: p.key, varsJSON: p.varsJSON, url: p.url, method: p.method, accept: p.accept, retry: p.retry,
       bodyKind: staged.kind, bodyPath: staged.relativePath,
       bodyContentType: staged.contentType, forceContentType: staged.forceContentType,
       bodyFingerprint: p.fingerprint, parts: p.parts, incarnation: UUID().uuidString,
@@ -140,16 +138,14 @@ extension QueueEntry {
   }
 
   /// Rule 3, same body: the new vars, headers, expiresAt and descriptor
-  /// fields replace the stored ones. The body, accepted parts, generation and
-  /// createdAt stay. `resetBudget` (a reopen) also resets attempts and part
-  /// rejections, because a resume brings fresh headers.
+  /// fields replace the stored ones. The body, url, method, accepted parts,
+  /// generation and createdAt stay (a different url or method is a different
+  /// body). `resetBudget` (a reopen, which starts a new generation) also
+  /// resets attempts and part rejections: attempts count one generation.
   func resumed(with p: ParsedEnqueue, resetBudget: Bool, now: Double) -> QueueEntry {
     var next = self
     next.key = p.key
     next.varsJSON = p.varsJSON
-    next.descriptorJSON = p.descriptorJSON
-    next.url = p.url
-    next.method = p.method
     next.headers = p.headers
     next.expiresAt = p.expiresAt
     next.accept = p.accept
@@ -205,6 +201,14 @@ enum HeaderMerge {
     var result = base.filter { !overridden.contains($0.key.lowercased()) }
     for (k, v) in over { result[k] = v }
     return result
+  }
+
+  /// Replaces only the names `base` already carries, in any case. A part's
+  /// own header (say Authorization) takes the patched value; a name the
+  /// part does not carry is left to the entry headers.
+  static func replaceExisting(_ base: [String: String], _ patch: [String: String]) -> [String: String] {
+    let carried = Set(base.keys.map { $0.lowercased() })
+    return merge(base, patch.filter { carried.contains($0.key.lowercased()) })
   }
 
   static func value(_ name: String, in headers: [String: String]) -> String? {

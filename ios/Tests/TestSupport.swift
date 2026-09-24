@@ -17,6 +17,35 @@ func setReadOnly(_ dir: URL, _ readOnly: Bool) {
   try! FileManager.default.setAttributes([.posixPermissions: readOnly ? 0o555 : 0o755], ofItemAtPath: dir.path)
 }
 
+/// JSON text as JS JSON.stringify sends it (keys sorted, for stable tests).
+func jsonText(_ value: Any) -> String {
+  String(data: try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]),
+         encoding: .utf8)!
+}
+
+/// Journal files exactly as a v9 build wrote them (JSONEncoder of the v9
+/// JournaledEvent: nil fields omitted), one per kind. Literal, so a change to
+/// JournaledEventV9 cannot change the fixture with it.
+enum V9Journal {
+  static func completed(eventId: String, id: String, timestamp: Int) -> String {
+    #"{"eventId":"\#(eventId)","id":"\#(id)","type":"completed","timestamp":\#(timestamp),"#
+      + #""responseCode":200,"responseBody":"{\"ok\":true}","responseHeaders":{"Content-Type":"application\/json"}}"#
+  }
+
+  static func error(eventId: String, id: String, timestamp: Int) -> String {
+    #"{"eventId":"\#(eventId)","id":"\#(id)","type":"error","timestamp":\#(timestamp),"responseCode":404,"#
+      + #""responseBody":"NoSuchUpload","error":"HTTP 404","errorKind":"http","partIndex":2}"#
+  }
+
+  static func cancelled(eventId: String, id: String, timestamp: Int) -> String {
+    #"{"eventId":"\#(eventId)","id":"\#(id)","type":"cancelled","timestamp":\#(timestamp),"cancelReason":"user"}"#
+  }
+
+  static func write(_ json: String, eventId: String, into journalRoot: URL) {
+    writeFile(journalRoot.appendingPathComponent(eventId + ".json"), json)
+  }
+}
+
 func writeFile(_ url: URL, _ text: String) {
   try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
   try! Data(text.utf8).write(to: url)
@@ -59,20 +88,32 @@ final class FakeTransport: Transport {
   /// Tasks the daemon held before this process started.
   var daemonTasks: [FakeTask] = []
   private(set) var created: [FakeTask] = []
-  private var next = 1
+  /// Static: task keys stay unique across a relaunch, as session task ids do.
+  private static var next = 1
+  /// When set, allTasks holds its answer until `releaseAllTasks()`, so a
+  /// completion can land before reconcile.
+  var deferAllTasks = false
+  private var pendingAllTasks: (() -> Void)?
 
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
               beginAt: Date?, beforeResume: (String) -> Void) -> UploadTask {
-    let task = FakeTask(key: "\(wifiOnly ? "wifi" : "any"):\(next)", description: description,
+    let task = FakeTask(key: "\(wifiOnly ? "wifi" : "any"):\(Self.next)", description: description,
                         request: request, file: file, beginAt: beginAt, wifiOnly: wifiOnly)
-    next += 1
+    Self.next += 1
     beforeResume(task.key)
     created.append(task)
     return task
   }
 
   func allTasks(_ completion: @escaping ([UploadTask]) -> Void) {
-    completion(daemonTasks + created)
+    let answer = { completion(self.daemonTasks + self.created) }
+    if deferAllTasks { pendingAllTasks = answer } else { answer() }
+  }
+
+  func releaseAllTasks() {
+    let answer = pendingAllTasks
+    pendingAllTasks = nil
+    answer?()
   }
 
   var live: [FakeTask] { created.filter(\.isLive) }
@@ -88,6 +129,10 @@ final class FakeSink: EventSink {
   func emitProgress(_ body: [String: Any]) { progress.append(body) }
   func emitAttempt(_ body: [String: Any]) { attempts.append(body) }
   func emitSettled(_ body: [String: Any]) { settled.append(body) }
+  /// A JS listener is attached. A test sets it false for a headless run.
+  var listening = true
+  func canDeliver() -> Bool { listening }
+  func listenerReady() { listening = true }
 
   var stateNames: [String] { states.compactMap { $0["state"] as? String } }
 }
@@ -215,12 +260,13 @@ final class Harness {
   func raw(id: String, key: String = "k", vars: Any = ["n": 1], descriptor: [String: Any]) -> [String: Any] {
     var d = descriptor
     if d["expiresAt"] == nil { d["expiresAt"] = expiresAt }
-    return ["id": id, "key": key, "vars": vars, "descriptor": d]
+    return ["id": id, "key": key, "varsJson": jsonText(vars), "descriptor": d]
   }
 
+  /// `data` crosses as its JSON text, as the JS layer sends it.
   func dataRaw(id: String, data: Any = ["x": 1], url: String = "https://api.test/x",
                headers: [String: Any] = [:], extra: [String: Any] = [:]) -> [String: Any] {
-    var d: [String: Any] = ["url": url, "data": data, "headers": headers]
+    var d: [String: Any] = ["url": url, "dataJson": jsonText(data), "headers": headers]
     for (k, v) in extra { d[k] = v }
     return raw(id: id, descriptor: d)
   }

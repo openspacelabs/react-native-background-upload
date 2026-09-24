@@ -31,6 +31,17 @@ final class RequestIndex {
     }
   }
 
+  /// Live progress while an entry runs: memory only, no save, no `state`
+  /// event. The next commit of the entry saves it.
+  func setBytes(_ id: String, _ bytesSent: Int64) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let item = items[id] else { return }
+    var entry = item.entry
+    entry.bytesSent = bytesSent
+    items[id] = Item(entry: entry, vars: item.vars)
+  }
+
   func remove(_ id: String) {
     lock.lock()
     defer { lock.unlock() }

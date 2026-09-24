@@ -53,7 +53,6 @@ struct QueueSettings: Codable, Equatable {
   /// issued under; a 401/403 from an older value re-issues instead of parking.
   var headerGeneration = 0
   var retry: RetryOverride?
-  var lifetimeMs: Double?
 
   init() {}
 
@@ -65,12 +64,11 @@ struct QueueSettings: Codable, Equatable {
     paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
     headerGeneration = try c.decodeIfPresent(Int.self, forKey: .headerGeneration) ?? 0
     retry = try c.decodeIfPresent(RetryOverride.self, forKey: .retry)
-    lifetimeMs = try c.decodeIfPresent(Double.self, forKey: .lifetimeMs)
   }
 
-  /// configure(options). The Android notification keys are ignored on iOS.
+  /// configure(options). iOS reads `retry` only: JS turns lifetimeMs into
+  /// each entry's expiresAt, and the Android notification keys are Android's.
   mutating func apply(configure options: [String: Any]) {
     retry = RetryOverride.parse(options["retry"])
-    lifetimeMs = (options["lifetimeMs"] as? NSNumber)?.doubleValue
   }
 }
