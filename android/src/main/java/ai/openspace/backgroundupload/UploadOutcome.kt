@@ -11,8 +11,7 @@ object UploadOutcome {
    * A non-2xx response to treat as success. `bodyIncludes` narrows the rule by
    * a response-body substring. This is necessary when one status has several
    * meanings, and only the message shows the difference (our backend's 409).
-   * Gson persists it inside [Upload] and [ChunkedManifest]; see
-   * consumer-rules.pro.
+   * Gson persists it inside [Descriptor]; see consumer-rules.pro.
    */
   data class AcceptRule(
     val status: Int,

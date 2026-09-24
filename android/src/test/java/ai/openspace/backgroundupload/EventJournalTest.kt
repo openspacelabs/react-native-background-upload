@@ -2,6 +2,7 @@ package ai.openspace.backgroundupload
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -12,93 +13,153 @@ class EventJournalTest {
   @get:Rule
   val tmp = TemporaryFolder()
 
-  private fun entry(id: String, uploadId: String = "u1") = EventJournal.Entry(
-    eventId = id,
-    uploadId = uploadId,
-    type = "completed",
-    timestamp = System.currentTimeMillis(),
-    responseCode = 200,
-    responseBody = "ok",
-    responseHeaders = mapOf("x-a" to "b"),
-  )
+  private val id1 = "00000000-0000-0000-0000-000000000001"
+  private val id2 = "00000000-0000-0000-0000-000000000002"
 
   @Test
-  fun `append then read returns the entry`() {
+  fun `append then read returns the record`() {
     val journal = EventJournal(tmp.newFolder())
-    journal.append(entry("e1"))
+    assertTrue(journal.append(record(id1)))
     val events = journal.unacknowledged()
-    assertEquals(1, events.size)
-    assertEquals("e1", events[0].eventId)
-    assertEquals(200, events[0].responseCode)
-    assertEquals("ok", events[0].responseBody)
+    assertEquals(listOf(record(id1)), events)
   }
 
   @Test
-  fun `ack removes only the acked entry`() {
+  fun `ack removes only the acked record and is idempotent`() {
     val journal = EventJournal(tmp.newFolder())
-    journal.append(entry("e1"))
-    journal.append(entry("e2"))
-    journal.ack(listOf("e1"))
-    assertEquals(listOf("e2"), journal.unacknowledged().map { it.eventId })
+    journal.append(record(id1))
+    journal.append(record(id2))
+    journal.ack(listOf(id1, id1, "unknown"))
+    assertEquals(listOf(id2), journal.unacknowledged().map { it.eventId })
   }
 
   @Test
-  fun `entries survive a new journal instance over the same dir`() {
+  fun `ack ignores ids that are not event ids`() {
     val dir = tmp.newFolder()
-    EventJournal(dir).append(entry("e1"))
+    val outside = File(dir.parentFile, "precious.json").apply { writeText("x") }
+    EventJournal(dir).ack(listOf("../precious"))
+    assertTrue(outside.exists())
+  }
+
+  @Test
+  fun `records survive a new journal instance`() {
+    val dir = tmp.newFolder()
+    EventJournal(dir).append(record(id1))
     assertEquals(1, EventJournal(dir).unacknowledged().size)
   }
 
   @Test
-  fun `oversized body is truncated and flagged`() {
+  fun `a body over 1 MB is cut and flagged`() {
     val journal = EventJournal(tmp.newFolder())
     val big = "x".repeat(EventJournal.MAX_BODY_CHARS + 100)
-    journal.append(entry("e1").copy(responseBody = big))
-    val read = journal.unacknowledged()[0]
-    assertTrue(read.responseBodyTruncated)
-    assertTrue(read.responseBody!!.length <= EventJournal.MAX_BODY_CHARS)
+    journal.append(record(id1).copy(response = EventJournal.Response(200, null, big, false)))
+    val read = journal.unacknowledged()[0].response!!
+    assertTrue(read.bodyTruncated)
+    assertEquals(EventJournal.MAX_BODY_CHARS, read.body!!.length)
   }
 
   @Test
-  fun `corrupt file is skipped, not fatal`() {
+  fun `a corrupt file is skipped`() {
     val dir = tmp.newFolder()
     val journal = EventJournal(dir)
-    journal.append(entry("e1"))
-    java.io.File(dir, "garbage.json").writeText("{not json")
-    assertEquals(1, journal.unacknowledged().size)
+    journal.append(record(id1))
+    File(dir, "garbage.json").writeText("{not json")
+    File(dir, "partial.json").writeText("""{"eventId":"x"}""")
+    assertEquals(listOf(id1), journal.unacknowledged().map { it.eventId })
   }
 
   @Test
-  fun `entries are ordered by timestamp`() {
+  fun `records are ordered by time`() {
     val journal = EventJournal(tmp.newFolder())
-    journal.append(entry("late").copy(timestamp = 2000))
-    journal.append(entry("early").copy(timestamp = 1000))
-    assertEquals(listOf("early", "late"), journal.unacknowledged().map { it.eventId })
+    journal.append(record(id1, at = 2_000))
+    journal.append(record(id2, at = 1_000))
+    assertEquals(listOf(id2, id1), journal.unacknowledged().map { it.eventId })
   }
 
   @Test
-  fun `append does not throw when the directory is unwritable`() {
-    // A regular file where a directory is expected: mkdirs() and every write fail.
-    val notADir = tmp.newFile()
-    val journal = EventJournal(notADir)
-    journal.append(entry("e1")) // must not throw
-    assertEquals(emptyList<String>(), journal.unacknowledged().map { it.eventId })
+  fun `append never throws, and says whether it wrote`() {
+    val journal = EventJournal(tmp.newFile()) // a file where the directory should be
+    assertFalse(journal.append(record(id1)))
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
 
   @Test
-  fun `prunes the oldest entries beyond the cap`() {
+  fun `prunes the oldest records beyond the cap`() {
     val dir = tmp.newFolder()
     val journal = EventJournal(dir, maxEntries = 3)
-    // Stamp increasing mtimes so pruning order is deterministic. Each mtime is
-    // set before the next append, which is when pruning reads it.
-    journal.append(entry("e1")); File(dir, "e1.json").setLastModified(1000)
-    journal.append(entry("e2")); File(dir, "e2.json").setLastModified(2000)
-    journal.append(entry("e3")); File(dir, "e3.json").setLastModified(3000)
-    journal.append(entry("e4")) // 4th write trips the cap; oldest (e1) is dropped
+    val ids = (1..4).map { "00000000-0000-0000-0000-00000000000$it" }
+    ids.take(3).forEachIndexed { i, id ->
+      journal.append(record(id))
+      File(dir, "$id.json").setLastModified(1_000L * (i + 1))
+    }
+    journal.append(record(ids[3]))
+    val left = journal.unacknowledged().map { it.eventId }
+    assertEquals(3, left.size)
+    assertFalse(left.contains(ids[0]))
+  }
 
-    val ids = journal.unacknowledged().map { it.eventId }
-    assertEquals(3, ids.size)
-    assertFalse(ids.contains("e1"))
-    assertTrue(ids.contains("e4"))
+  @Test
+  fun `incrementDeliveries persists`() {
+    val dir = tmp.newFolder()
+    val journal = EventJournal(dir)
+    journal.append(record(id1))
+    assertEquals(2, journal.incrementDeliveries(id1)!!.deliveries)
+    assertEquals(3, journal.incrementDeliveries(id1)!!.deliveries)
+    assertEquals(3, EventJournal(dir).find(id1)!!.deliveries)
+    assertNull(journal.incrementDeliveries(id2))
+  }
+
+  @Test
+  fun `forEntry filters by entry id`() {
+    val journal = EventJournal(tmp.newFolder())
+    journal.append(record(id1, id = "a"))
+    journal.append(record(id2, id = "b"))
+    assertEquals(listOf(id2), journal.forEntry("b").map { it.eventId })
+  }
+
+  @Test
+  fun `the completed shape is SettledEvent`() {
+    val map = record(id1).toMap()
+    assertEquals(
+      listOf(
+        "eventId", "id", "key", "vars", "at", "attempts", "requestId", "deliveries", "state",
+        "bytesSent", "totalBytes", "url", "method", "kind", "response",
+      ),
+      map.keys.toList(),
+    )
+    assertEquals(mapOf("n" to 1.0), map["vars"])
+    assertEquals(mapOf("status" to 200.0, "headers" to mapOf<String, String>(), "body" to "ok", "bodyTruncated" to false), map["response"])
+  }
+
+  @Test
+  fun `a chunked completion has a response with no status`() {
+    val map = record(id1).copy(response = null).toMap()
+    assertEquals(mapOf("bodyTruncated" to false), map["response"])
+  }
+
+  @Test
+  fun `the error shape nests errorKind, message, response, and partIndex`() {
+    val map = record(id1, kind = EventJournal.KIND_ERROR).copy(
+      partIndex = 2,
+      response = EventJournal.Response(404, null, "gone", false),
+    ).toMap()
+    assertEquals(2.0, map["partIndex"])
+    assertEquals(
+      mapOf(
+        "errorKind" to "http", "message" to "HTTP 400",
+        "response" to mapOf("status" to 404.0, "body" to "gone", "bodyTruncated" to false),
+        "partIndex" to 2.0,
+      ),
+      map["error"],
+    )
+    assertFalse(map.containsKey("response"))
+  }
+
+  @Test
+  fun `the cancelled shape carries the reason`() {
+    val map = record(id1, kind = EventJournal.KIND_CANCELLED).toMap()
+    assertEquals("user", map["cancelReason"])
+    assertFalse(map.containsKey("error"))
+    assertFalse(map.containsKey("response"))
   }
 }

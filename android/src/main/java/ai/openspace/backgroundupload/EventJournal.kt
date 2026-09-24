@@ -1,82 +1,139 @@
 package ai.openspace.backgroundupload
 
 import android.content.Context
+import com.facebook.react.bridge.WritableMap
 import com.google.gson.Gson
 import java.io.File
 
-// Durable record of terminal upload events (completed / error / cancelled).
-// Written BEFORE the event is emitted to JS; deleted only when JS acknowledges.
-// One JSON file per event named <eventId>.json — tmp+rename keeps each write
-// self-contained so a crash mid-append can never corrupt other entries.
-//
-// `maxEntries` is a runaway guard: the design assumes JS drains the journal via
-// ack() on every boot, but if that loop breaks (or a consumer hasn't adopted it
-// yet) the directory would grow without bound. When exceeded we drop the OLDEST
-// entries. Set high enough that legitimate heavy offline use won't hit it — this
-// only fires in the pathological "nothing ever acks" case.
-class EventJournal(
-  private val dir: File,
-  private val maxEntries: Int = MAX_ENTRIES,
-) {
+/**
+ * The durable record of settled outcomes (completed, error, cancelled). A
+ * record is written BEFORE the outcome is emitted to JS and deleted only when
+ * JS acknowledges it. One JSON file per record, `<eventId>.json`, written
+ * with tmp + fsync + rename, so a crash mid-write can not corrupt another
+ * record.
+ *
+ * [maxEntries] is a runaway guard: if nothing ever acknowledges, the oldest
+ * records are dropped. It only fires in that broken case.
+ */
+class EventJournal(private val dir: File, private val maxEntries: Int = MAX_ENTRIES) {
 
-  data class Entry(
-    val eventId: String,
-    val uploadId: String,
-    val type: String, // completed | error | cancelled
-    val timestamp: Long,
-    val responseCode: Int? = null,
-    val responseBody: String? = null,
-    val responseBodyTruncated: Boolean = false,
-    val responseHeaders: Map<String, String>? = null,
-    val error: String? = null,
-    val errorKind: String? = null, // http | network | file | expired | unknown
-    val cancelReason: String? = null, // user | system
-    // Chunked uploads: the index of the failing part, when one part's response
-    // caused the error.
-    val partIndex: Int? = null,
+  /** RawResponse. [status] is null for a chunked completion. */
+  data class Response(
+    val status: Int?,
+    val headers: Map<String, String>?,
+    val body: String?,
+    val bodyTruncated: Boolean,
   ) {
-    fun toWritableMap(): com.facebook.react.bridge.WritableMap =
-      com.facebook.react.bridge.Arguments.createMap().apply {
-        putString("eventId", eventId)
-        putString("id", uploadId)
-        putString("type", type)
-        putDouble("timestamp", timestamp.toDouble())
-        responseCode?.let { putInt("responseCode", it) }
-        responseBody?.let { putString("responseBody", it) }
-        if (responseBodyTruncated) putBoolean("responseBodyTruncated", true)
-        responseHeaders?.let {
-          putMap("responseHeaders", com.facebook.react.bridge.Arguments.makeNativeMap(it))
-        }
-        error?.let { putString("error", it) }
-        errorKind?.let { putString("errorKind", it) }
-        cancelReason?.let { putString("cancelReason", it) }
-        partIndex?.let { putInt("partIndex", it) }
+    fun toMap(): Map<String, Any?> = LinkedHashMap<String, Any?>().apply {
+      status?.let { put("status", it.toDouble()) }
+      headers?.let { put("headers", it) }
+      body?.let { put("body", it) }
+      put("bodyTruncated", bodyTruncated)
+    }
+
+    companion object {
+      fun of(response: UploadResponse): Response {
+        val (body, truncated) = capBody(response.body)
+        return Response(response.code, response.headers, body, truncated)
       }
+
+      /** A chunked completion: N parts, no one response. */
+      val NONE = Response(null, null, null, false)
+    }
+  }
+
+  /** One settled outcome, in the SettledEvent shape plus [generation]. */
+  data class SettledRecord(
+    val eventId: String,
+    val id: String,
+    val key: String,
+    val varsJson: String,
+    val at: Long,
+    val attempts: Int,
+    val requestId: String?,
+    /**
+     * How many times this outcome reached JS: 1 after a live emit, 0 when it
+     * was journaled with JS dead; +1 per later delivery (replay, re-emit).
+     */
+    val deliveries: Int,
+    /** The entry state this outcome puts it in. */
+    val state: String,
+    val bytesSent: Long,
+    val totalBytes: Long,
+    val url: String,
+    val method: String,
+    val partIndex: Int?,
+    /** completed | error | cancelled */
+    val kind: String,
+    /** completed; also error with errorKind http. */
+    val response: Response?,
+    val errorKind: String?,
+    val message: String?,
+    val cancelReason: String?,
+    /** The entry life this belongs to (same-id rule 6). */
+    val generation: Int,
+  ) {
+    fun toMap(): Map<String, Any?> = LinkedHashMap<String, Any?>().apply {
+      put("eventId", eventId)
+      put("id", id)
+      put("key", key)
+      put("vars", runCatching { JsonBridge.parse(varsJson) }.getOrNull())
+      put("at", at.toDouble())
+      put("attempts", attempts.toDouble())
+      requestId?.let { put("requestId", it) }
+      put("deliveries", deliveries.toDouble())
+      put("state", state)
+      put("bytesSent", bytesSent.toDouble())
+      put("totalBytes", totalBytes.toDouble())
+      put("url", url)
+      put("method", method)
+      partIndex?.let { put("partIndex", it.toDouble()) }
+      put("kind", kind)
+      when (kind) {
+        KIND_COMPLETED -> put("response", (response ?: Response.NONE).toMap())
+        KIND_ERROR -> put("error", LinkedHashMap<String, Any?>().apply {
+          put("errorKind", errorKind ?: "unknown")
+          put("message", message ?: "")
+          response?.let { put("response", it.toMap()) }
+          partIndex?.let { put("partIndex", it.toDouble()) }
+        })
+        KIND_CANCELLED -> put("cancelReason", cancelReason ?: "user")
+      }
+    }
+
+    fun toWritableMap(): WritableMap = JsonBridge.toWritableMap(toMap())
   }
 
   companion object {
-    const val MAX_BODY_CHARS = 64 * 1024
+    const val KIND_COMPLETED = "completed"
+    const val KIND_ERROR = "error"
+    const val KIND_CANCELLED = "cancelled"
+
+    /** 1 MB, the RawResponse cap. */
+    const val MAX_BODY_CHARS = 1_048_576
     const val MAX_ENTRIES = 1000
     private val gson = Gson()
 
-    // Char-count cap (not byte-accurate: splitting on a byte boundary risks
-    // cutting a surrogate pair; a slightly loose cap is fine as a safety limit).
-    // Returns the (possibly truncated) body and whether truncation occurred.
-    // Single source of truth so the journaled copy and the live-emitted copy match.
-    fun capBody(body: String?): Pair<String?, Boolean> =
-      if (body != null && body.length > MAX_BODY_CHARS)
-        body.substring(0, MAX_BODY_CHARS) to true
-      else body to false
+    // Event ids are UUIDs that native mints. ackEvents takes ids from JS, and
+    // an id is a file name here, so anything else is ignored.
+    private val EVENT_ID = Regex("^[A-Za-z0-9-]{1,64}$")
+
+    fun isValidEventId(id: String) = EVENT_ID.matches(id)
+
+    /**
+     * A char-count cap. It is not byte-exact: a cut on a byte boundary could
+     * split a surrogate pair. Returns the body and whether it was cut.
+     */
+    fun capBody(body: String?, max: Int = MAX_BODY_CHARS): Pair<String?, Boolean> =
+      if (body != null && body.length > max) body.substring(0, max) to true else body to false
 
     @Volatile
     private var instance: EventJournal? = null
 
-    // The worker may run in a process where React never initialized, so the
-    // journal must be reachable from a bare Context, not the module.
+    /** v10 records live in `rnbgupload-settled`. The v9 `rnbgupload-events` is read once by [LegacyImport]. */
     fun get(context: Context): EventJournal =
       instance ?: synchronized(this) {
-        instance
-          ?: EventJournal(File(context.filesDir, "rnbgupload-events")).also { instance = it }
+        instance ?: EventJournal(File(context.filesDir, "rnbgupload-settled")).also { instance = it }
       }
   }
 
@@ -84,61 +141,92 @@ class EventJournal(
     dir.mkdirs()
   }
 
+  private fun fileFor(eventId: String) = File(dir, "$eventId.json")
+
+  /**
+   * Never throws. The worker calls this right after the server accepted the
+   * request. A thrown IOException would look like a transient failure and
+   * re-send the request. Losing one record is the lesser harm, so a failure
+   * returns false and the caller goes on.
+   */
   @Synchronized
-  fun append(entry: Entry) {
-    // Defensive cap in case a caller didn't pre-cap; idempotent when it did.
-    val (body, truncated) = capBody(entry.responseBody)
-    val bounded =
-      if (truncated) entry.copy(responseBody = body, responseBodyTruncated = true) else entry
-    // A journal write must NEVER throw into the caller. The worker calls this
-    // right after a successful upload; a propagated IOException (e.g. disk full)
-    // would be classified as a retryable error and re-run the upload, sending
-    // duplicate data to the server. Losing one journal entry is the lesser evil.
-    try {
-      val tmp = File(dir, "${entry.eventId}.tmp")
-      tmp.writeText(gson.toJson(bounded))
-      tmp.renameTo(File(dir, "${entry.eventId}.json"))
+  fun append(record: SettledRecord): Boolean {
+    val bounded = record.response?.let { r ->
+      val (body, truncated) = capBody(r.body)
+      if (truncated) record.copy(response = r.copy(body = body, bodyTruncated = true)) else record
+    } ?: record
+    val written = try {
+      AtomicFiles.writeText(fileFor(record.eventId), gson.toJson(bounded))
+      true
     } catch (t: Throwable) {
-      t.printStackTrace()
-      return
+      Diag.error("journal append failed for ${record.eventId}", t)
+      false
     }
     pruneToMax()
+    return written
   }
 
-  // Keep the directory bounded. Prune by file modification time (no parsing)
-  // rather than the entry's own timestamp — cheaper, and close enough since a
-  // file's mtime is when it was journaled. Guarded: a prune failure must not
-  // propagate for the same reason append() must not.
+  // Prunes by file time (no parsing). Guarded for the same reason as append.
   private fun pruneToMax() {
     try {
-      // Sweep orphaned .tmp files (writeText succeeded but rename failed).
-      dir.listFiles { f -> f.extension == "tmp" }?.forEach { it.delete() }
+      dir.listFiles { f -> f.name.endsWith(AtomicFiles.TMP_SUFFIX) }?.forEach { it.delete() }
       val files = dir.listFiles { f -> f.extension == "json" } ?: return
       if (files.size <= maxEntries) return
-      files.sortedBy { it.lastModified() }
-        .take(files.size - maxEntries)
-        .forEach { it.delete() }
+      files.sortedBy { it.lastModified() }.take(files.size - maxEntries).forEach { it.delete() }
     } catch (t: Throwable) {
-      t.printStackTrace()
+      Diag.error("journal prune failed", t)
     }
   }
 
+  /** Every record, oldest first. Corrupt files are skipped. */
   @Synchronized
-  @Suppress("SENSELESS_COMPARISON") // Gson can inject null into a non-null field
-  fun unacknowledged(): List<Entry> =
+  fun unacknowledged(): List<SettledRecord> =
     (dir.listFiles { f -> f.extension == "json" } ?: emptyArray())
-      .mapNotNull { f ->
-        runCatching { gson.fromJson(f.readText(), Entry::class.java) }.getOrNull()
-      }
-      // Gson bypasses the constructor, so a file missing a field yields null
-      // despite the non-null Kotlin type. Check every field JS relies on being
-      // present, not just eventId — an entry reaching JS with a null `type`
-      // would fall silently through a `switch (event.type)`.
-      .filter { it.eventId != null && it.uploadId != null && it.type != null }
-      .sortedBy { it.timestamp }
+      .mapNotNull { read(it) }
+      .sortedBy { it.at }
 
   @Synchronized
+  fun find(eventId: String): SettledRecord? =
+    if (isValidEventId(eventId)) read(fileFor(eventId)) else null
+
+  @Synchronized
+  fun forEntry(id: String): List<SettledRecord> = unacknowledged().filter { it.id == id }
+
+  /**
+   * One more delivery of [eventId]: rewrites the record with deliveries + 1
+   * and returns it. Null when the record is gone. When the rewrite fails the
+   * incremented record is still returned, so the delivery goes ahead.
+   */
+  @Synchronized
+  fun incrementDeliveries(eventId: String): SettledRecord? {
+    val record = find(eventId) ?: return null
+    val next = record.copy(deliveries = record.deliveries + 1)
+    try {
+      AtomicFiles.writeText(fileFor(eventId), gson.toJson(next))
+    } catch (t: Throwable) {
+      Diag.error("journal deliveries update failed for $eventId", t)
+    }
+    return next
+  }
+
+  /** Idempotent. Unknown and malformed ids are ignored. */
+  @Synchronized
   fun ack(eventIds: List<String>) {
-    eventIds.forEach { File(dir, "$it.json").delete() }
+    eventIds.filter { isValidEventId(it) }.forEach { fileFor(it).delete() }
+  }
+
+  @Suppress("SENSELESS_COMPARISON", "USELESS_ELVIS")
+  private fun read(file: File): SettledRecord? {
+    if (!file.exists()) return null
+    val r = runCatching { gson.fromJson(file.readText(), SettledRecord::class.java) }.getOrNull()
+      ?: return null
+    // Gson does not run constructors. Check every field JS relies on.
+    if (r.eventId == null || r.id == null || r.key == null || r.kind == null || r.state == null) return null
+    return r.copy(
+      varsJson = r.varsJson ?: "null",
+      url = r.url ?: "",
+      method = r.method ?: "POST",
+      deliveries = r.deliveries.coerceAtLeast(0),
+    )
   }
 }
