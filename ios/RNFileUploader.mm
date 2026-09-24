@@ -66,69 +66,58 @@
 
 #pragma mark - Exported methods
 
-// v10 slice 1 ships the JS layer alone. Every queue method rejects with this
-// code until slice 3 builds the iOS queue and executor.
-static NSString *const kNotImplemented = @"E_NOT_IMPLEMENTED";
+// Each method is a one-line forward to the Swift engine, which hops onto its
+// own serial queue and returns. getRequests is the one synchronous method: it
+// reads the in-memory index under a lock.
 
-static void RejectNotImplemented(RCTPromiseRejectBlock reject, NSString *method)
-{
-  reject(kNotImplemented,
-         [NSString stringWithFormat:@"RNFileUploader.%@: the iOS queue is not built yet", method],
-         nil);
-}
-
-// configure() carries { lifetimeMs, retry, ...androidNotificationConfig }. iOS
-// background uploads have no library-owned notification, and slice 3 persists
-// the queue settings. Thus there is nothing to save yet.
 - (void)configure:(NSDictionary *)options
 {
+  [RNBackgroundUpload.shared configure:options];
 }
 
 - (void)enqueue:(NSDictionary *)entry
         resolve:(RCTPromiseResolveBlock)resolve
          reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"enqueue");
+  [RNBackgroundUpload.shared enqueue:entry resolve:resolve reject:reject];
 }
 
 - (void)pause:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"pause");
+  [RNBackgroundUpload.shared pause:resolve reject:reject];
 }
 
 - (void)resume:(RCTPromiseResolveBlock)resolve
         reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"resume");
+  [RNBackgroundUpload.shared resume:resolve reject:reject];
 }
 
 - (void)cancel:(NSString *)id
        resolve:(RCTPromiseResolveBlock)resolve
         reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"cancel");
+  [RNBackgroundUpload.shared cancel:id resolve:resolve reject:reject];
 }
 
 - (void)setWifiOnly:(BOOL)enabled
             resolve:(RCTPromiseResolveBlock)resolve
              reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"setWifiOnly");
+  [RNBackgroundUpload.shared setWifiOnly:enabled resolve:resolve reject:reject];
 }
 
 - (void)updateHeaders:(NSDictionary *)patch
               resolve:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject
 {
-  RejectNotImplemented(reject, @"updateHeaders");
+  [RNBackgroundUpload.shared updateHeaders:patch resolve:resolve reject:reject];
 }
 
-// Synchronous. The live rows of the v10 queue. Slice 3 serializes them from
-// the in-memory index; until then the queue is empty.
 - (NSArray<NSDictionary *> *)getRequests
 {
-  return @[];
+  return [RNBackgroundUpload.shared getRequests];
 }
 
 - (void)getUnacknowledgedEvents:(RCTPromiseResolveBlock)resolve
@@ -146,7 +135,7 @@ static void RejectNotImplemented(RCTPromiseRejectBlock reject, NSString *method)
 
 #pragma mark - RNFileUploaderEventDelegate
 
-// Called synchronously on the URLSession delegate queue. That is safe and
+// Called on the engine's serial queue. That is safe and
 // deliberate: the generated emitter locks its own state and dispatches each
 // listener through the JS CallInvoker, so it is already thread-safe and already
 // async onto the JS thread. Deferring to the main queue instead would open a
@@ -167,25 +156,24 @@ static void RejectNotImplemented(RCTPromiseRejectBlock reject, NSString *method)
   }
 }
 
-// The v9 Swift engine still reports through the delegate. The v10 spec has no
-// per-outcome emitters and a different progress shape ({ id, bytesSent,
-// totalBytes }), so until slice 3 rewires the engine to onState/onProgress/
-// onSettled, the live v9 payloads are dropped here. Terminal outcomes are
-// journaled first, so nothing durable is lost.
+- (void)emitState:(NSDictionary *)body
+{
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnState:body]; }];
+}
+
 - (void)emitProgress:(NSDictionary *)body
 {
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnProgress:body]; }];
 }
 
-- (void)emitCompleted:(NSDictionary *)body
+- (void)emitAttempt:(NSDictionary *)body
 {
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnAttempt:body]; }];
 }
 
-- (void)emitError:(NSDictionary *)body
+- (void)emitSettled:(NSDictionary *)body
 {
-}
-
-- (void)emitCancelled:(NSDictionary *)body
-{
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnSettled:body]; }];
 }
 
 @end
