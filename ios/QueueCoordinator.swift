@@ -74,8 +74,9 @@ final class QueueCoordinator {
   /// release.
   var graces: [String: Grace] = [:]
   var afterGrace: [() -> Void] = []
-  /// Outcomes whose journal write failed, by eventId. They were emitted
-  /// live; a timer retries the write while the entry still names them.
+  /// Settle outcomes (never a user cancel) whose journal write failed, by
+  /// eventId. They were emitted live; a timer retries the write while the
+  /// entry still names them.
   var pendingJournal: [String: JournaledEvent] = [:]
   lazy var chunked = ChunkedCoordinator(self)
 
@@ -96,6 +97,7 @@ final class QueueCoordinator {
       queue.asyncAfter(deadline: .now() + .milliseconds(ms), execute: block)
     }
     settings = store.loadSettings()
+    finishSetAsideForgets()
     // Synchronous, before any session exists, so getRequests() is warm by
     // the time JS can call it, legacy rows included.
     index.load(store.all())
@@ -180,15 +182,24 @@ final class QueueCoordinator {
 
   /// Live entry: journal 'cancelled' (user); forgotten after its ack.
   /// Settled entry: forgotten now, with its unacked outcomes. Unknown: no-op.
-  func cancel(_ id: String, resolve: @escaping () -> Void) {
+  /// When the journal or the store cannot be written, rejects E_STORAGE and
+  /// changes nothing: the entry keeps running (or stays settled), and JS may
+  /// call again.
+  func cancel(_ id: String, resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
     queue.async {
-      defer { resolve() }
-      guard let e = self.index.entry(id) else { return }
+      guard let e = self.index.entry(id) else { return resolve() }
       if e.isLive && !e.legacy {
-        self.settle(id, .cancelled(reason: "user"))
+        guard self.settle(id, .cancelled(reason: "user"), requireJournal: true) else {
+          return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed")
+        }
       } else {
-        self.forget(id, dropEvents: true)
+        do {
+          try self.forgetWithEvents(id)
+        } catch {
+          return reject("E_STORAGE", "cancel: cannot delete '\(id)': \(error.localizedDescription)")
+        }
       }
+      resolve()
     }
   }
 
