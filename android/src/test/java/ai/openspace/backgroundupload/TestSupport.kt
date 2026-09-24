@@ -86,22 +86,24 @@ internal fun record(
 )
 
 /** Records every event in order, as "state:<id>:<state>" and "settled:<id>:<kind>". */
-internal class RecordingEvents(var live: Boolean = true) : QueueEvents {
+internal class RecordingEvents : QueueEvents {
   val log = mutableListOf<String>()
   val rows = mutableListOf<RequestRow>()
   val records = mutableListOf<EventJournal.SettledRecord>()
+
+  /** The listener each settled event went to, in order. */
+  val listeners = mutableListOf<Any>()
 
   override fun state(row: RequestRow) {
     rows += row
     log += "state:${row.id}:${row.state}"
   }
 
-  override fun settled(record: EventJournal.SettledRecord) {
+  override fun settled(record: EventJournal.SettledRecord, listener: Any) {
     records += record
+    listeners += listener
     log += "settled:${record.id}:${record.kind}"
   }
-
-  override fun canDeliver() = live
 }
 
 internal class FakeScheduler : WorkScheduler {

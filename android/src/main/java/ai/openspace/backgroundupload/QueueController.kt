@@ -54,7 +54,7 @@ class QueueController(
     } finally {
       if (pre != null && !preUsed) discard(p.id, pre)
     }
-    result.reEmit?.let { events.settled(it) }
+    result.reEmit?.let { record -> journal.listener()?.let { events.settled(record, it) } }
     result.entry?.let { entry ->
       scheduleRun(entry)
       events.state(entry.toRow())
@@ -65,7 +65,7 @@ class QueueController(
   private fun preStage(p: EntryParsing.Parsed): PreStaged? {
     val generation = store.locked {
       val existing = store.load(p.id)
-      val v9 = if (existing == null) store.legacyManifest(p.id) else null
+      val v9 = v9ManifestFor(existing, p.id)
       val action = EnqueueRules.decide(existing, v9, p.descriptor) { journal.find(it) != null }
       EnqueueRules.preStageGeneration(existing, action, p.descriptor)
     } ?: return null
@@ -84,7 +84,7 @@ class QueueController(
   /** Runs under the store lock. [preStaged] returns the body staged outside the lock for a generation, if any. */
   private fun decideAndCommit(p: EntryParsing.Parsed, preStaged: (generation: Int) -> BodyStaging.Staged?): Enqueued {
     val existing = store.load(p.id)
-    val v9 = if (existing == null) store.legacyManifest(p.id) else null
+    val v9 = v9ManifestFor(existing, p.id)
     val s = settings.load()
     val now = clock()
     val dir = store.entryDir(p.id)
@@ -93,7 +93,8 @@ class QueueController(
         QueueException.E_RUNNING,
         "entry '${p.id}' is running; a different body is accepted once it stops",
       )
-      is EnqueueRules.Action.ReEmit -> Enqueued(null, journal.incrementDeliveries(action.eventId))
+      // With no listener yet, the next drain delivers it.
+      is EnqueueRules.Action.ReEmit -> Enqueued(null, journal.redeliver(action.eventId))
       EnqueueRules.Action.Resume -> {
         val next = EnqueueRules.resumed(existing!!, p, s.paused, s.headerGeneration, now)
         saveOrThrow(next)
@@ -108,8 +109,8 @@ class QueueController(
         val parts = incoming?.let { EnqueueRules.adoptedParts(action.manifest, it) }
         // The same parts resume over the v9 blob, as a same-body enqueue does.
         val keepOwned = incoming != null && ChunkedParts.sameParts(action.manifest.parts, incoming)
-        val staged = stageOrThrow(p.descriptor.copy(parts = parts), dir, 1, store.blobFile(p.id), keepOwned)
-        commit(EnqueueRules.created(p, staged, parts, s.paused, s.headerGeneration, now))
+        val staged = stageOrThrow(p.descriptor.copy(parts = parts), dir, action.generation, store.blobFile(p.id), keepOwned)
+        commit(EnqueueRules.adopted(p, staged, parts, existing, action.generation, s.paused, s.headerGeneration, now))
       }
       EnqueueRules.Action.Replace -> {
         val old = existing!!
@@ -121,6 +122,10 @@ class QueueController(
       }
     }
   }
+
+  /** A v9 manifest counts only where no v10 entry owns the id, or the owner is its legacy row. */
+  private fun v9ManifestFor(existing: QueueEntry?, id: String): LegacyManifest? =
+    if (existing == null || existing.legacy) store.legacyManifest(id) else null
 
   private fun stageOrThrow(
     d: Descriptor,
@@ -183,27 +188,59 @@ class QueueController(
 
   /**
    * Live: journal a 'cancelled' (user) outcome, then forget after its ack.
-   * Settled: forget now, row and bytes. Unknown: no-op. Unacked records of a
-   * forgotten entry are kept, so a handler that has not run yet still runs.
+   * Settled (or legacy): forget now, row, bytes, and its unacknowledged
+   * outcomes. Unknown: no-op.
+   *
+   * A failed journal write rejects E_STORAGE and changes nothing: the entry
+   * goes on, and JS can call cancel() again.
+   *
+   * A failed entry save after the journal write also rejects E_STORAGE, but
+   * the cancel is durable: the work is stopped and the record is emitted.
+   * Its ack, the next cancel(), a worker's begin or settle, or the boot
+   * sweep applies it. A live entry that already has a record of its own
+   * generation gets that record applied, not a second outcome.
    */
   fun cancel(id: String) {
-    val settled = store.locked {
-      val e = store.load(id) ?: return@locked null
-      if (!e.isLive || e.legacy) {
-        store.remove(id)
-        return@locked null
+    var stop = false
+    var journaled: EventJournal.SettledRecord? = null
+    var saved: QueueEntry? = null
+    try {
+      store.locked {
+        stop = true // unknown or settled: stop any stray work, as before
+        val e = store.load(id) ?: return@locked
+        if (!e.isLive || e.legacy) {
+          journal.ackEntry(id)
+          store.remove(id)
+          return@locked
+        }
+        stop = false // a live entry: only once an outcome is journaled
+        val now = clock()
+        EntryTransitions.journaledSettle(e, journal.forEntry(id), now)?.let {
+          stop = true
+          saveOrThrow(it.entry)
+          journal.ack(it.extraEventIds)
+          saved = it.entry
+          return@locked
+        }
+        val record = cancelledRecord(e, now)
+        journaled = try {
+          journal.append(record) { store.referencedEventIds() + record.eventId }
+        } catch (error: IOException) {
+          throw QueueException(QueueException.E_STORAGE, "could not journal the cancel: ${error.message}")
+        }
+        stop = true
+        val next = EntryTransitions.toSettled(e, EntryState.CANCELLED, record.eventId, e.bytesSent, now)
+        saveOrThrow(next)
+        saved = next
       }
-      val now = clock()
-      val record = cancelledRecord(e, now)
-      journal.append(record)
-      val next = EntryTransitions.toSettled(e, EntryState.CANCELLED, record.eventId, e.bytesSent, now)
-      saveOrThrow(next)
-      next to record
-    }
-    scheduler.cancel(id)
-    settled?.let { (entry, record) ->
-      if (record.deliveries > 0) events.settled(record)
-      events.state(entry.toRow())
+    } finally {
+      // Once an outcome is journaled, the worker must stop even when the
+      // save failed: a running request would settle a second outcome.
+      if (stop) scheduler.cancel(id)
+      journaled?.let { record ->
+        if (record.deliveries > 0) journal.listener()?.let { events.settled(record, it) }
+      }
+      saved?.let { events.state(it.toRow()) }
     }
   }
 
@@ -215,7 +252,7 @@ class QueueController(
     at = now,
     attempts = e.attempts,
     requestId = e.lastRequestId,
-    deliveries = if (events.canDeliver()) 1 else 0,
+    deliveries = 0, // the journal sets it
     state = EntryState.CANCELLED.wire,
     bytesSent = e.bytesSent,
     totalBytes = e.totalBytes,
@@ -263,9 +300,12 @@ class QueueController(
 
   // MARK: - journal
 
-  /** Every unacknowledged outcome, each counted as one more delivery. */
-  fun unacknowledged(): List<EventJournal.SettledRecord> =
-    journal.unacknowledged().mapNotNull { journal.incrementDeliveries(it.eventId) }
+  /**
+   * getUnacknowledgedEvents(): [listener] becomes the JS listener, and every
+   * unacknowledged outcome is returned, each counted as one more delivery.
+   */
+  fun unacknowledged(listener: Any, isActive: () -> Boolean = { true }): List<EventJournal.SettledRecord> =
+    journal.drain(listener, isActive)
 
   /**
    * Removes the records. An acked completed or cancelled outcome of the
@@ -286,7 +326,7 @@ class QueueController(
         val record = journal.find(eventId) ?: return@forEach
         var e = store.load(record.id)
         if (e != null && e.isLive && !e.legacy && e.generation == record.generation) {
-          val next = EntryTransitions.toSettled(e, stateOf(record), record.eventId, record.bytesSent, clock())
+          val next = EntryTransitions.toSettled(e, EntryTransitions.stateOf(record), record.eventId, record.bytesSent, clock())
           if (!trySave(next)) return@forEach
           repaired += next
           e = next
@@ -302,9 +342,6 @@ class QueueController(
     forgotten.forEach { scheduler.cancel(it) }
     repaired.filter { it.id !in forgotten }.forEach { events.state(it.toRow()) }
   }
-
-  private fun stateOf(record: EventJournal.SettledRecord): EntryState =
-    EntryState.values().firstOrNull { it.wire == record.state } ?: EntryState.ERROR
 
   // MARK: - boot sweep
 
@@ -336,12 +373,11 @@ class QueueController(
         if (e.legacy || isWorkerRunning(e.id)) continue
         val own = records[e.id].orEmpty().filter { it.generation == e.generation }
         if (e.isLive) {
-          val latest = own.maxByOrNull { it.at }
-          if (latest != null) {
-            val next = EntryTransitions.toSettled(e, stateOf(latest), latest.eventId, latest.bytesSent, now)
-            if (trySave(next)) {
-              journal.ack(own.filter { it !== latest }.map { it.eventId })
-              changed += next
+          val journaled = EntryTransitions.journaledSettle(e, own, now)
+          if (journaled != null) {
+            if (trySave(journaled.entry)) {
+              journal.ack(journaled.extraEventIds)
+              changed += journaled.entry
             }
             continue
           }

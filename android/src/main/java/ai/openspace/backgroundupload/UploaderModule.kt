@@ -53,16 +53,6 @@ class UploaderModule(context: ReactApplicationContext) :
   private val scheduler = WorkManagerScheduler(context)
   private val controller = QueueController(store, journal, settings, EventReporter, scheduler)
 
-  /**
-   * True once JS subscribed to onSettled. JS subscribes, then calls
-   * getUnacknowledgedEvents() at once, so that first call is the signal.
-   * Until then a settled emit reaches no listener, so it must not count as
-   * a delivery. Cleared on teardown.
-   */
-  @Volatile
-  var listening = false
-    private set
-
   // The v9 import, then the v9 work cancel, then the boot sweep.
   // getRequests() waits for the import only (file reads and row saves), so
   // the first call after an upgrade already shows the legacy rows. The
@@ -84,10 +74,17 @@ class UploaderModule(context: ReactApplicationContext) :
     }
   }
 
+  // Set by invalidate(). A drain still queued on the executor then does not
+  // make this dead module the journal's listener.
+  @Volatile
+  private var invalidated = false
+
   override fun invalidate() {
     // A reload constructs the replacement before tearing this one down, so
-    // only clear the pointer when it still refers to us.
-    listening = false
+    // only clear the pointer (and the listener) when it still refers to us.
+    // The flag goes first: the drain reads it under the journal lock.
+    invalidated = true
+    journal.stopListening(this)
     if (instance === this) instance = null
     super.invalidate()
   }
@@ -195,16 +192,16 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
   /**
-   * Every unacknowledged outcome, each counted as one more delivery. Sets
-   * [listening] first: an outcome settled from here on is emitted live with
-   * deliveries 1; one settled before it was journaled with 0, and this
-   * drain makes it 1.
+   * Every unacknowledged outcome, each counted as one more delivery. JS
+   * subscribes to onSettled, then calls this at once, so this call makes
+   * the module the journal's listener. The flip and the scan share the
+   * journal lock: an outcome settled before it is in this drain (journaled
+   * at 0, returned at 1); one settled after is emitted live at 1.
    */
   override fun getUnacknowledgedEvents(promise: Promise) {
-    listening = true
     onQueue(promise) {
       val out = Arguments.createArray()
-      controller.unacknowledged().forEach { out.pushMap(it.toWritableMap()) }
+      controller.unacknowledged(this) { !invalidated }.forEach { out.pushMap(it.toWritableMap()) }
       out
     }
   }

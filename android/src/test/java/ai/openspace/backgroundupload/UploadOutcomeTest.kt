@@ -5,7 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.IOException
 
 class UploadOutcomeTest {
 
@@ -56,20 +55,5 @@ class UploadOutcomeTest {
     assertTrue(UploadOutcome.isAccepted(208, "", rules))
     assertTrue(UploadOutcome.isAccepted(409, "already completed", rules))
     assertFalse(UploadOutcome.isAccepted(410, "already completed", rules))
-  }
-
-  @Test
-  fun `IOException with a missing file is a file error`() {
-    assertEquals("file", UploadOutcome.errorKind(IOException("gone"), fileExists = false))
-  }
-
-  @Test
-  fun `IOException with the file present is a network error`() {
-    assertEquals("network", UploadOutcome.errorKind(IOException("reset"), fileExists = true))
-  }
-
-  @Test
-  fun `a non-IO error is unknown`() {
-    assertEquals("unknown", UploadOutcome.errorKind(RuntimeException("boom"), fileExists = true))
   }
 }

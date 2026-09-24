@@ -6,16 +6,13 @@ import com.facebook.react.bridge.Arguments
 interface QueueEvents {
   fun state(row: RequestRow)
 
-  /** The caller journaled [record] first. */
-  fun settled(record: EventJournal.SettledRecord)
-
   /**
-   * Whether a live emit can reach a JS listener now. A record journaled
-   * while no listener is there (JS dead, or alive but not yet subscribed)
-   * starts at 0 deliveries, so its first real delivery (the replay) counts
-   * as 1.
+   * The caller journaled [record] first, and emits it only when its
+   * deliveries is above 0: [EventJournal] decides that under its lock.
+   * [listener] is [EventJournal.listener]: the module whose JS drained, so
+   * the delivery the journal counted goes to that JS.
    */
-  fun canDeliver(): Boolean
+  fun settled(record: EventJournal.SettledRecord, listener: Any)
 }
 
 /**
@@ -40,12 +37,12 @@ object EventReporter : QueueEvents {
     module.emitState(JsonBridge.toWritableMap(row.toMap()))
   }
 
-  override fun settled(record: EventJournal.SettledRecord) {
-    val module = UploaderModule.instance ?: return
+  // Not UploaderModule.instance: a reload sets that before the new JS
+  // subscribes, and the journal counted this delivery for the listener.
+  override fun settled(record: EventJournal.SettledRecord, listener: Any) {
+    val module = listener as? UploaderModule ?: return
     module.emitSettled(record.toWritableMap())
   }
-
-  override fun canDeliver(): Boolean = UploaderModule.instance?.listening == true
 
   /** Moves the row's bytesSent in memory and emits through the throttle. */
   fun progress(id: String, sent: Long, total: Long) {
