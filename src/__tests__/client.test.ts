@@ -246,14 +246,48 @@ describe('configure', () => {
 describe('queue control forwards', () => {
   const client = createUploadClient();
 
-  it('pause', async () => {
+  it('pause with no scope forwards {} (the whole queue)', async () => {
     await client.pause();
-    expect(native.pause).toHaveBeenCalledTimes(1);
+    expect(native.pause).toHaveBeenCalledWith({});
+    await client.pause({});
+    expect(native.pause).toHaveBeenLastCalledWith({});
   });
 
-  it('resume', async () => {
+  it('resume with no scope forwards {} (the whole queue)', async () => {
     await client.resume();
-    expect(native.resume).toHaveBeenCalledTimes(1);
+    expect(native.resume).toHaveBeenCalledWith({});
+  });
+
+  it('forwards a keys scope as a copy', async () => {
+    const keys = ['capture.upload'];
+    await client.pause({ keys });
+    expect(native.pause).toHaveBeenCalledWith({ keys: ['capture.upload'] });
+    expect(native.pause.mock.calls[0][0].keys).not.toBe(keys);
+    await client.resume({ keys: ['capture.upload', 'capture.meta'] });
+    expect(native.resume).toHaveBeenCalledWith({
+      keys: ['capture.upload', 'capture.meta'],
+    });
+  });
+
+  it('forwards an empty keys list, which changes nothing natively', async () => {
+    await client.pause({ keys: [] });
+    expect(native.pause).toHaveBeenCalledWith({ keys: [] });
+  });
+
+  it.each([
+    ['a non-object scope', 'capture', /scope must be an object/],
+    ['an array scope', ['capture'], /scope must be an object/],
+    ['a null scope', null, /scope must be an object/],
+    ['a misspelled field', { key: ['capture'] }, /unknown scope field "key"/],
+    ['keys that is not an array', { keys: 'capture' }, /keys must be an array/],
+    ['keys: undefined', { keys: undefined }, /keys must be an array/],
+    ['an empty key', { keys: ['a', ''] }, /non-empty strings/],
+    ['a non-string key', { keys: [1] }, /non-empty strings/],
+  ])('rejects %s and never reaches native', async (_name, scope, message) => {
+    await expect(client.pause(scope as any)).rejects.toThrow(message);
+    await expect(client.resume(scope as any)).rejects.toThrow(message);
+    expect(native.pause).not.toHaveBeenCalled();
+    expect(native.resume).not.toHaveBeenCalled();
   });
 
   it('cancel', async () => {

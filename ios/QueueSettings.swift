@@ -48,7 +48,11 @@ struct RetryOverride: Codable, Equatable {
 /// Queue-wide settings, persisted as `settings.json` in the queue directory.
 struct QueueSettings: Codable, Equatable {
   var wifiOnly = false
+  /// The global pause gate: pause() / resume() with no keys.
   var paused = false
+  /// Keys paused by pause({ keys }). An entry is paused when the gate is on
+  /// or its key is in this set.
+  var pausedKeys: Set<String> = []
   /// Bumped by every updateHeaders(). An attempt records the value it was
   /// issued under; a 401/403 from an older value re-issues instead of parking.
   var headerGeneration = 0
@@ -62,9 +66,16 @@ struct QueueSettings: Codable, Equatable {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     wifiOnly = try c.decodeIfPresent(Bool.self, forKey: .wifiOnly) ?? false
     paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+    pausedKeys = try c.decodeIfPresent(Set<String>.self, forKey: .pausedKeys) ?? []
     headerGeneration = try c.decodeIfPresent(Int.self, forKey: .headerGeneration) ?? 0
     retry = try c.decodeIfPresent(RetryOverride.self, forKey: .retry)
   }
+
+  /// true when either scope pauses entries of `key`.
+  func isPaused(_ key: String) -> Bool { paused || pausedKeys.contains(key) }
+
+  /// The queue setting unless the entry pins its own.
+  func wifiOnly(_ entryWifiOnly: Bool?) -> Bool { entryWifiOnly ?? wifiOnly }
 
   /// configure(options). iOS reads `retry` only: JS turns lifetimeMs into
   /// each entry's expiresAt, and the Android notification keys are Android's.

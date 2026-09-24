@@ -19,6 +19,7 @@ import {
 import type {
   AddListener,
   ConfigureOptions,
+  PauseScope,
   RequestRow,
   StateEvent,
   UploadClient,
@@ -36,6 +37,42 @@ export type UploadNative = Spec;
 export type UploadClientOptions = {
   /** Default: the real TurboModule. A test passes a fake. */
   native?: UploadNative;
+};
+
+/**
+ * The scope as it crosses to native. Codegen has no optional arguments, so
+ * the whole queue is `{}`. A misspelled field throws, because dropping it
+ * would pause the whole queue. Throws inside the async caller, so the
+ * promise rejects.
+ */
+const toNativeScope = (
+  method: 'pause' | 'resume',
+  scope: PauseScope | undefined,
+): PauseScope => {
+  if (scope === undefined) {
+    return {};
+  }
+  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) {
+    throw new Error(`${method}: scope must be an object when given`);
+  }
+  Object.keys(scope).forEach((field) => {
+    if (field !== 'keys') {
+      throw new Error(`${method}: unknown scope field "${field}"`);
+    }
+  });
+  if (!('keys' in scope)) {
+    return {};
+  }
+  // A present but undefined list is refused too: it is more often a
+  // computed list gone missing than a request for the whole queue.
+  const { keys } = scope;
+  if (
+    !Array.isArray(keys) ||
+    !keys.every((key) => typeof key === 'string' && key.length > 0)
+  ) {
+    throw new Error(`${method}: keys must be an array of non-empty strings`);
+  }
+  return { keys: [...keys] };
 };
 
 /**
@@ -123,13 +160,20 @@ export const createUploadClient = ({
   };
 
   /**
-   * Pauses the whole queue. No outcome is produced; live rows show 'paused'.
-   * A paused entry past its expiresAt settles error/expired at resume.
+   * No scope pauses the whole queue. `{ keys }` pauses the entries of those
+   * keys, queued and future. No outcome is produced; live rows show
+   * 'paused'. A paused entry past its expiresAt settles error/expired when
+   * it resumes.
    */
-  const pause = (): Promise<void> => native.pause();
+  const pause = async (scope?: PauseScope): Promise<void> =>
+    native.pause(toNativeScope('pause', scope));
 
-  /** Resumes a paused queue. */
-  const resume = (): Promise<void> => native.resume();
+  /**
+   * Undoes the pause of the same scope. An entry stays paused while another
+   * scope still pauses it: the whole-queue pause, or its key.
+   */
+  const resume = async (scope?: PauseScope): Promise<void> =>
+    native.resume(toNativeScope('resume', scope));
 
   /**
    * On a live entry: settles it 'cancelled' with reason 'user', then forgets
@@ -138,7 +182,10 @@ export const createUploadClient = ({
    */
   const cancel = (id: string): Promise<void> => native.cancel(id);
 
-  /** Persisted natively. Applies to queued and future entries. */
+  /**
+   * Persisted natively. Applies to queued and future entries whose
+   * descriptor does not set `wifiOnly`.
+   */
   const setWifiOnly = (enabled: boolean): Promise<void> =>
     native.setWifiOnly(enabled);
 

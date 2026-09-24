@@ -96,13 +96,13 @@ class QueueController(
       // With no listener yet, the next drain delivers it.
       is EnqueueRules.Action.ReEmit -> Enqueued(null, journal.redeliver(action.eventId))
       EnqueueRules.Action.Resume -> {
-        val next = EnqueueRules.resumed(existing!!, p, s.paused, s.headerGeneration, now)
+        val next = EnqueueRules.resumed(existing!!, p, s.isPaused(p.key), s.headerGeneration, now)
         saveOrThrow(next)
         Enqueued(next, null)
       }
       EnqueueRules.Action.Create -> {
         val staged = preStaged(1) ?: stageOrThrow(p.descriptor, dir, 1)
-        commit(EnqueueRules.created(p, staged, null, s.paused, s.headerGeneration, now))
+        commit(EnqueueRules.created(p, staged, null, s.isPaused(p.key), s.headerGeneration, now))
       }
       is EnqueueRules.Action.AdoptV9 -> {
         val incoming = p.descriptor.parts
@@ -110,7 +110,7 @@ class QueueController(
         // The same parts resume over the v9 blob, as a same-body enqueue does.
         val keepOwned = incoming != null && ChunkedParts.sameParts(action.manifest.parts, incoming)
         val staged = stageOrThrow(p.descriptor.copy(parts = parts), dir, action.generation, store.blobFile(p.id), keepOwned)
-        commit(EnqueueRules.adopted(p, staged, parts, existing, action.generation, s.paused, s.headerGeneration, now))
+        commit(EnqueueRules.adopted(p, staged, parts, existing, action.generation, s.isPaused(p.key), s.headerGeneration, now))
       }
       EnqueueRules.Action.Replace -> {
         val old = existing!!
@@ -118,7 +118,7 @@ class QueueController(
         val ownedBlob = if (old.body?.kind == StagedBody.CHUNKED) store.bodyFile(old) else null
         val staged = preStaged(old.generation + 1)
           ?: stageOrThrow(p.descriptor, dir, old.generation + 1, ownedBlob)
-        commit(EnqueueRules.replaced(old, p, staged, s.paused, s.headerGeneration, now))
+        commit(EnqueueRules.replaced(old, p, staged, s.isPaused(p.key), s.headerGeneration, now))
       }
     }
   }
@@ -164,22 +164,38 @@ class QueueController(
 
   // MARK: - queue control
 
-  /** Whole-queue pause. Live rows move to paused and their work stops. No outcome. */
-  fun pause() {
-    settings.update { it.copy(paused = true) }
+  /**
+   * [keys] null is the whole-queue gate; a list adds those keys to the
+   * paused set, and an empty list changes nothing. Each live row that is now
+   * paused (gate on, or its key in the set) moves to paused and its work
+   * stops. No outcome.
+   */
+  fun pause(keys: List<String>? = null) {
+    if (keys != null && keys.isEmpty()) return
+    val s = settings.update {
+      if (keys == null) it.copy(paused = true) else it.copy(pausedKeys = it.pausedKeys + keys)
+    }
     val now = clock()
     val paused = transformAll { e ->
-      if (e.isLive && e.state != EntryState.PAUSED) EntryTransitions.toPaused(e, now) else e
+      if (e.isLive && e.state != EntryState.PAUSED && s.isPaused(e.key)) EntryTransitions.toPaused(e, now) else e
     }
     paused.forEach { scheduler.cancel(it.id) }
     paused.forEach { events.state(it.toRow()) }
   }
 
-  fun resume() {
-    val s = settings.update { it.copy(paused = false) }
+  /**
+   * Undoes the pause of the same scope: [keys] null turns the gate off, a
+   * list removes those keys from the set. A row comes back only when no
+   * scope still pauses it, so the gate on + its key resumed stays paused.
+   */
+  fun resume(keys: List<String>? = null) {
+    if (keys != null && keys.isEmpty()) return
+    val s = settings.update {
+      if (keys == null) it.copy(paused = false) else it.copy(pausedKeys = it.pausedKeys - keys.toSet())
+    }
     val now = clock()
     val resumed = transformAll { e ->
-      if (e.state == EntryState.PAUSED) EntryTransitions.toResumed(e, s.headerGeneration, now) else e
+      if (e.state == EntryState.PAUSED && !s.isPaused(e.key)) EntryTransitions.toResumed(e, s.headerGeneration, now) else e
     }
     resumed.forEach { events.state(it.toRow()) }
     // Every queued entry, not only the resumed ones: a run is idempotent.
@@ -290,7 +306,7 @@ class QueueController(
       val patched = e.withHeadersPatched(patch, s.headerGeneration)
       if (patched.state != EntryState.AWAITING_AUTH) return@transformAll patched
       unparkedIds += e.id
-      EntryTransitions.toUnparked(patched, s.paused, now)
+      EntryTransitions.toUnparked(patched, s.isPaused(patched.key), now)
     }
     changed.filter { it.id in unparkedIds }.forEach { entry ->
       scheduleRun(entry)
@@ -353,8 +369,8 @@ class QueueController(
    * 1. A live entry with a journal record of its own generation: the process
    *    died between the journal append and the store transition. Apply it.
    * 2. A running entry with no worker: a process death mid-run. Queue it.
-   *    A live row that disagrees with the queue's paused setting (a death
-   *    partway through pause() or resume()): make it agree.
+   *    A live row that disagrees with the paused settings, the gate or its
+   *    key (a death partway through pause() or resume()): make it agree.
    * 3. A settled entry with records of its generation other than its own:
    *    orphans from a cancel race. Ack them.
    * 4. A completed or cancelled entry whose own record is gone: the ack
@@ -366,7 +382,7 @@ class QueueController(
     val changed = mutableListOf<QueueEntry>()
     val toForget = mutableListOf<String>()
     val toSchedule = mutableListOf<QueueEntry>()
-    val paused = settings.load().paused
+    val s = settings.load()
     store.locked {
       val records = journal.unacknowledged().groupBy { it.id }
       for (e in store.all()) {
@@ -386,11 +402,12 @@ class QueueController(
             cur = EntryTransitions.toStopped(e, now)
           }
           // A process death partway through pause() or resume() leaves rows
-          // that disagree with the queue setting.
+          // that disagree with the settings (the gate or the paused keys).
+          val paused = s.isPaused(e.key)
           if (paused && cur.state != EntryState.PAUSED) {
             cur = EntryTransitions.toPaused(cur, now)
           } else if (!paused && cur.state == EntryState.PAUSED) {
-            cur = EntryTransitions.toResumed(cur, settings.load().headerGeneration, now)
+            cur = EntryTransitions.toResumed(cur, s.headerGeneration, now)
           }
           if (cur !== e) {
             if (trySave(cur)) changed += cur else continue

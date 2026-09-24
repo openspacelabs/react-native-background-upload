@@ -603,6 +603,209 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.state, .queued)
   }
 
+  // MARK: - Per-entry wifiOnly
+
+  private func liveTask(_ id: String) -> FakeTask? {
+    h.transport.live.first { $0.taskDescription?.contains("\"\(id)\"") == true }
+  }
+
+  func testEntryWifiOnlyOverridesTheQueueSetting() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", extra: ["wifiOnly": true])).get()
+    XCTAssertEqual(liveTask("cap")?.wifiOnly, true)
+    h.setWifiOnly(true)
+    _ = try h.enqueue(h.dataRaw(id: "note", extra: ["wifiOnly": false])).get()
+    XCTAssertEqual(liveTask("note")?.wifiOnly, false, "false pins cellular too")
+    _ = try h.enqueue(h.dataRaw(id: "plain")).get()
+    XCTAssertEqual(liveTask("plain")?.wifiOnly, true, "no field follows the queue")
+  }
+
+  func testEntryWifiOnlyIsPersistedAndUsedForEachRetry() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", extra: ["wifiOnly": true])).get()
+    XCTAssertEqual(h.store.load("cap")?.wifiOnly, true)
+    _ = try h.enqueue(h.dataRaw(id: "b")).get()
+    XCTAssertNil(h.store.load("b")?.wifiOnly)
+    h.relaunch()
+    h.boot()
+    h.complete(try XCTUnwrap(liveTask("cap")), status: 503)
+    XCTAssertEqual(liveTask("cap")?.wifiOnly, true, "the retry after a relaunch keeps it")
+  }
+
+  func testSetWifiOnlyMovesOnlyEntriesThatFollowIt() throws {
+    _ = try h.enqueue(h.dataRaw(id: "pinned", extra: ["wifiOnly": false])).get()
+    _ = try h.enqueue(h.dataRaw(id: "follows")).get()
+    h.complete(try XCTUnwrap(liveTask("pinned")), status: 503)
+    h.complete(try XCTUnwrap(liveTask("follows")), status: 503)
+    let pinnedWait = try XCTUnwrap(liveTask("pinned"))
+    let followsWait = try XCTUnwrap(liveTask("follows"))
+    h.setWifiOnly(true)
+    XCTAssertFalse(pinnedWait.cancelled, "a pinned entry keeps its task")
+    XCTAssertTrue(followsWait.cancelled)
+    XCTAssertEqual(liveTask("follows")?.wifiOnly, true)
+    XCTAssertEqual(liveTask("pinned")?.key, pinnedWait.key)
+  }
+
+  func testSameIdEnqueueReplacesTheEntryWifiOnly() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["wifiOnly": true])).get()
+    h.complete(try XCTUnwrap(liveTask("a")), status: 503)
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertNil(h.entry("a")?.wifiOnly)
+    XCTAssertEqual(liveTask("a")?.wifiOnly, false, "the retry re-issued under the queue setting")
+  }
+
+  // MARK: - Key-scoped pause
+
+  func testKeyPauseStopsOnlyThatKeyAndItsFutureEntries() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture")).get()
+    _ = try h.enqueue(h.dataRaw(id: "note", key: "fieldNote")).get()
+    let capTask = try XCTUnwrap(liveTask("cap"))
+    h.sink.states = []
+    h.pause(keys: ["capture"])
+    XCTAssertTrue(capTask.cancelled)
+    XCTAssertEqual(h.map.meta(forKey: capTask.key)?.purpose, .pause)
+    XCTAssertEqual(h.entry("cap")?.state, .paused)
+    XCTAssertEqual(h.entry("note")?.state, .running)
+    XCTAssertEqual(h.sink.states.map { $0["id"] as? String }, ["cap"], "one state event, for the paused row")
+    h.deliverCancel(capTask)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    XCTAssertTrue(h.sink.attempts.isEmpty)
+
+    _ = try h.enqueue(h.dataRaw(id: "cap2", key: "capture")).get()
+    XCTAssertEqual(h.entry("cap2")?.state, .paused, "a future entry of the key starts paused")
+    XCTAssertNil(liveTask("cap2"))
+    _ = try h.enqueue(h.dataRaw(id: "note2", key: "fieldNote")).get()
+    XCTAssertNotNil(liveTask("note2"))
+
+    h.sink.states = []
+    h.resume(keys: ["capture"])
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(h.entry("cap2")?.state, .running)
+    XCTAssertEqual(h.entry("cap")?.attempts, 2)
+    XCTAssertEqual(Set(h.sink.states.compactMap { $0["id"] as? String }), ["cap", "cap2"])
+  }
+
+  func testAKeyResumeKeepsEntriesTheGlobalGatePauses() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture")).get()
+    _ = try h.enqueue(h.dataRaw(id: "note", key: "fieldNote")).get()
+    h.pause(keys: ["capture"])
+    h.pause()
+    h.sink.states = []
+    h.resume(keys: ["capture"])
+    XCTAssertEqual(h.entry("cap")?.state, .paused, "the global gate still pauses it")
+    XCTAssertTrue(h.sink.states.isEmpty)
+    XCTAssertTrue(h.transport.live.isEmpty)
+    h.resume()
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(h.entry("note")?.state, .running)
+  }
+
+  func testAGlobalResumeKeepsEntriesAKeyPauses() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture")).get()
+    _ = try h.enqueue(h.dataRaw(id: "note", key: "fieldNote")).get()
+    h.pause()
+    h.pause(keys: ["capture"])
+    h.resume()
+    XCTAssertEqual(h.entry("cap")?.state, .paused, "the key still pauses it")
+    XCTAssertEqual(h.entry("note")?.state, .running)
+    XCTAssertNil(liveTask("cap"))
+  }
+
+  func testPausedKeysSurviveRelaunch() throws {
+    h.pause(keys: ["capture"])
+    XCTAssertEqual(h.store.loadSettings().pausedKeys, ["capture"])
+    h.relaunch()
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture")).get()
+    _ = try h.enqueue(h.dataRaw(id: "note", key: "fieldNote")).get()
+    XCTAssertEqual(h.entry("cap")?.state, .paused)
+    XCTAssertEqual(h.entry("note")?.state, .running)
+  }
+
+  func testEmptyKeysChangeNothing() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.pause(keys: [])
+    XCTAssertEqual(h.entry("a")?.state, .running, "an empty list never means the whole queue")
+    XCTAssertEqual(h.store.loadSettings(), QueueSettings())
+  }
+
+  func testKeysThatAreNotAStringListReject() throws {
+    var code: String?
+    h.coordinator.pause(["keys": "capture"], resolve: { XCTFail("resolved") }, reject: { c, _ in code = c })
+    h.drain()
+    XCTAssertEqual(code, "E_INVALID")
+    XCTAssertEqual(h.store.loadSettings(), QueueSettings())
+  }
+
+  func testKeyPausedEntryCrossingExpiresAtSettlesAtItsResume() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture", extra: ["expiresAt": h.clock + 60_000])).get()
+    h.pause(keys: ["capture"])
+    h.advance(60_200)
+    XCTAssertEqual(h.entry("cap")?.state, .paused)
+    h.resume(keys: ["capture"])
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    XCTAssertTrue(h.transport.live.isEmpty)
+  }
+
+  func testKeyPauseKeepsAuthParkingAcrossResume() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "capture")).get()
+    h.complete(try XCTUnwrap(liveTask("a")), status: 403)
+    h.pause(keys: ["capture"])
+    XCTAssertEqual(h.entry("a")?.state, .paused)
+    h.resume(keys: ["capture"])
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    XCTAssertTrue(h.transport.live.isEmpty)
+  }
+
+  func testSameIdEnqueueUnderAPausedKeyPausesTheEntry() throws {
+    h.pause(keys: ["capture"])
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "fieldNote")).get()
+    let task = try XCTUnwrap(liveTask("a"))
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "capture")).get()
+    XCTAssertTrue(task.cancelled)
+    XCTAssertEqual(h.entry("a")?.state, .paused)
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "fieldNote")).get()
+    XCTAssertEqual(h.entry("a")?.state, .running, "back under a key nothing pauses")
+    XCTAssertNotNil(liveTask("a"))
+  }
+
+  func testSameIdEnqueueOffAPausedKeyLeavesAuthParking() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "capture")).get()
+    h.complete(try XCTUnwrap(liveTask("a")), status: 403)
+    h.pause(keys: ["capture"])
+    XCTAssertEqual(h.entry("a")?.state, .paused)
+    XCTAssertEqual(h.entry("a")?.authParked, true)
+    _ = try h.enqueue(h.dataRaw(id: "a", key: "fieldNote")).get()
+    XCTAssertEqual(h.entry("a")?.state, .running, "the fresh headers are tried, not parked")
+    XCTAssertEqual(h.entry("a")?.authParked, false)
+    XCTAssertEqual(h.store.load("a")?.authParked, false)
+    XCTAssertNotNil(liveTask("a"))
+  }
+
+  func testSameIdEnqueueOnAGloballyPausedParkedEntryResumesToQueued() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(try XCTUnwrap(liveTask("a")), status: 401)
+    h.pause()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(h.entry("a")?.state, .paused, "the gate still pauses it")
+    XCTAssertNil(liveTask("a"))
+    h.resume()
+    XCTAssertEqual(h.entry("a")?.state, .running, "the fresh headers are tried at the resume")
+    XCTAssertNotNil(liveTask("a"))
+  }
+
+  func testRelaunchMatchesRowsThatAPauseDidNotReach() throws {
+    _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture")).get()
+    let task = try XCTUnwrap(liveTask("cap"))
+    // A crash after the settings save, before the entry save.
+    var s = h.store.loadSettings()
+    s.pausedKeys = ["capture"]
+    try h.store.saveSettings(s)
+    h.relaunch()
+    h.boot()
+    XCTAssertEqual(h.entry("cap")?.state, .paused)
+    XCTAssertTrue(task.cancelled)
+    XCTAssertTrue(h.transport.live.isEmpty)
+  }
+
   // MARK: - Write-ahead failures
 
   func testFailedAttemptSaveCreatesNoTaskAndIssuesAfterABackoff() throws {

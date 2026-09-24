@@ -29,6 +29,40 @@ class QueueSettingsTest {
   }
 
   @Test
+  fun `paused keys persist and reload in a new instance`() {
+    val file = File(tmp.newFolder(), "settings.json")
+    QueueSettingsStore(file).update { it.copy(pausedKeys = setOf("capture", "video")) }
+    assertEquals(setOf("capture", "video"), QueueSettingsStore(file).load().pausedKeys)
+  }
+
+  @Test
+  fun `a null paused keys field reads an empty set`() {
+    val file = File(tmp.newFolder(), "settings.json").apply { writeText("""{"paused":true,"pausedKeys":null}""") }
+    val s = QueueSettingsStore(file).load()
+    assertTrue(s.paused)
+    assertEquals(emptySet<String>(), s.pausedKeys)
+  }
+
+  @Test
+  fun `an entry is paused under the gate or its key`() {
+    assertFalse(QueueSettings().isPaused("note"))
+    assertTrue(QueueSettings(paused = true).isPaused("note"))
+    val keyed = QueueSettings(pausedKeys = setOf("capture"))
+    assertTrue(keyed.isPaused("capture"))
+    assertFalse(keyed.isPaused("note"))
+  }
+
+  @Test
+  fun `the entry's own wifiOnly wins, and absent follows the queue setting`() {
+    val on = QueueSettings(wifiOnly = true)
+    val off = QueueSettings(wifiOnly = false)
+    assertTrue(on.wifiOnlyFor(entry(descriptor = desc())))
+    assertFalse(off.wifiOnlyFor(entry(descriptor = desc())))
+    assertFalse(on.wifiOnlyFor(entry(descriptor = desc(wifiOnly = false))))
+    assertTrue(off.wifiOnlyFor(entry(descriptor = desc(wifiOnly = true))))
+  }
+
+  @Test
   fun `a corrupt file reads as the defaults`() {
     val file = File(tmp.newFolder(), "settings.json").apply { writeText("{not json") }
     assertEquals(QueueSettings(), QueueSettingsStore(file).load())
@@ -40,6 +74,7 @@ class QueueSettingsTest {
     val s = QueueSettingsStore(file).load()
     assertTrue(s.wifiOnly)
     assertFalse(s.paused)
+    assertEquals(emptySet<String>(), s.pausedKeys)
     assertEquals(RetryDefaults(), s.retry)
   }
 

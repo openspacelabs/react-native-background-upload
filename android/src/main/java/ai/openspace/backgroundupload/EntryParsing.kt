@@ -65,6 +65,7 @@ object EntryParsing {
 
     val headers = parseHeaderMap(d.map("headers"))
     requireValidHeaders(headers, "headers")
+    if (d.isSet("wifiOnly") && d.bool("wifiOnly") == null) invalid("wifiOnly must be a boolean")
 
     return Descriptor(
       url = url,
@@ -77,7 +78,23 @@ object EntryParsing {
       accept = parseAcceptRules(d.array("accept")),
       retry = d.map("retry")?.let { parseRetry(it) },
       noNotification = d.map("android")?.bool("noNotification") ?: false,
+      wifiOnly = d.bool("wifiOnly"),
     )
+  }
+
+  /**
+   * pause/resume scope `{ keys?: string[] }`. A null scope or a scope with
+   * no keys is the whole queue (null comes from a caller that sent no
+   * argument). A keys field that is not a list of non-empty strings is
+   * refused: dropping it would widen the scope to the whole queue.
+   */
+  fun scopeKeys(scope: ReadableMap?): List<String>? {
+    if (scope == null || !scope.hasKey("keys")) return null
+    val arr = scope.array("keys") ?: invalid("scope.keys must be an array of strings")
+    return (0 until arr.size()).map { i ->
+      if (arr.getType(i) != ReadableType.String) invalid("scope.keys[$i] must be a string")
+      arr.getString(i)?.takeIf { it.isNotEmpty() } ?: invalid("scope.keys[$i] must be a non-empty string")
+    }
   }
 
   /** updateHeaders(patch): the header map, checked the same way as a descriptor's. */

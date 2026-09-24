@@ -39,6 +39,7 @@ const DESCRIPTOR_KEYS = [
   'accept',
   'expiresAt',
   'retry',
+  'wifiOnly',
   'android',
 ];
 const PART_KEYS = ['url', 'headers', 'range'];
@@ -81,7 +82,8 @@ export const withTimeout = <T>(
 
 /**
  * The descriptor as it crosses to native. `dataJson` is `JSON.stringify(data)`
- * and replaces `data`. It is absent for a bodiless request.
+ * and replaces `data`. It is absent for a bodiless request. `wifiOnly` crosses
+ * only when the definition set it; absent means "follow setWifiOnly()".
  */
 export type NativeDescriptor = Omit<RequestDescriptor, 'data'> & {
   dataJson?: string;
@@ -477,6 +479,9 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
   }
   if (d.android !== undefined) {
     validateAndroid(d.android);
+  }
+  if (d.wifiOnly !== undefined && typeof d.wifiOnly !== 'boolean') {
+    throw new Error('mutate: wifiOnly must be a boolean when present');
   }
   if (
     d.expiresAt !== undefined &&
