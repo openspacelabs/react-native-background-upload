@@ -5,6 +5,7 @@
  */
 import type { EventSubscription } from 'react-native';
 import NativeRNFileUploader from './NativeRNFileUploader';
+import type { Spec } from './NativeRNFileUploader';
 import { chunkPlan } from './chunkPlan';
 import { createDelivery } from './delivery';
 import {
@@ -27,11 +28,23 @@ export * from './types';
 export * from './chunkPlan';
 
 /**
+ * The native module contract that a client talks to. Tests pass a fake one
+ * to createUploadClient(); see createFakeNative() in ./testing.
+ */
+export type UploadNative = Spec;
+
+export type UploadClientOptions = {
+  /** Default: the real TurboModule. A test passes a fake. */
+  native?: UploadNative;
+};
+
+/**
  * Builds one client over the native queue. Each client has its own
  * definitions and settings. An app needs one; the default export is one.
  */
-export const createUploadClient = (): UploadClient => {
-  const native = NativeRNFileUploader;
+export const createUploadClient = ({
+  native = NativeRNFileUploader,
+}: UploadClientOptions = {}): UploadClient => {
   const settings: Settings = {
     lifetimeMs: DEFAULT_LIFETIME_MS,
     enqueueTimeoutMs: DEFAULT_ENQUEUE_TIMEOUT_MS,
