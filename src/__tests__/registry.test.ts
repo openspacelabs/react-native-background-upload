@@ -19,6 +19,7 @@ const setup = (settings: Partial<Settings> = {}) => {
   const current: Settings = {
     lifetimeMs: DEFAULT_LIFETIME_MS,
     enqueueTimeoutMs: 10_000,
+    maxVarsBytes: MAX_VARS_BYTES,
     ...settings,
   };
   const registry = createRegistry({
@@ -154,7 +155,11 @@ describe('mutate', () => {
   });
 
   describe('vars cap', () => {
-    it('accepts vars at exactly the cap and rejects one byte over', async () => {
+    it('defaults to 1 MB', () => {
+      expect(MAX_VARS_BYTES).toBe(1_048_576);
+    });
+
+    it('accepts vars at exactly the default cap and rejects one byte over', async () => {
       const { define, enqueue } = setup();
       const send = define({
         key: 'k',
@@ -164,13 +169,26 @@ describe('mutate', () => {
       const fits = 'a'.repeat(MAX_VARS_BYTES - 8);
       await expect(send.mutate({ s: fits })).resolves.toBeDefined();
       await expect(send.mutate({ s: fits + 'a' })).rejects.toThrow(
-        /vars for "k" is 4097 bytes; the limit is 4096/,
+        /vars for "k" is 1048577 bytes; the limit is 1048576 \(configure\(\)\.maxVarsBytes\)/,
+      );
+      expect(enqueue).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the configured cap at mutate()', async () => {
+      const { define, enqueue } = setup({ maxVarsBytes: 16 });
+      const send = define({
+        key: 'k',
+        request: (_vars: { s: string }) => ({ url: 'https://x', data: null }),
+      });
+      await expect(send.mutate({ s: 'a'.repeat(8) })).resolves.toBeDefined();
+      await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
+        /is 17 bytes; the limit is 16/,
       );
       expect(enqueue).toHaveBeenCalledTimes(1);
     });
 
     it('counts UTF-8 bytes, not UTF-16 code units', async () => {
-      const { define } = setup();
+      const { define } = setup({ maxVarsBytes: 4096 });
       const send = define({
         key: 'k',
         request: (_vars: { s: string }) => ({ url: 'https://x', data: null }),

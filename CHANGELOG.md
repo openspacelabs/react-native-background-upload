@@ -30,9 +30,10 @@ Breaking:
   percentage.
 - **`configure()` must be called at boot, after every `define()`.** It starts
   the replay of journaled outcomes. It also takes `lifetimeMs`, `retry`, a
-  `headers` provider that runs at `mutate()`, and `enqueueTimeoutMs` (default
-  10 s): `mutate()` rejects with a named error and warns when the native write
-  has not settled by then, so a native bug cannot hang a caller in silence.
+  `headers` provider that runs at `mutate()`, `maxVarsBytes` (default 1 MB),
+  and `enqueueTimeoutMs` (default 10 s): `mutate()` rejects with a named
+  error and warns when the native write has not settled by then, so a native
+  bug cannot hang a caller in silence.
 - **`ErrorKind` gains `'truncated'`.** With a `response` parser set and a body
   over the 1 MB cap, `onError` fires with it instead of `onSuccess`.
 
@@ -41,8 +42,9 @@ Added:
   settings. The default export is one client.
 - **`define({ key, request, response?, onSuccess?, onError? })`**: `vars`
   infer from the `request` parameter, the handler data type from the
-  `response` return. A duplicate key replaces the definition and warns in
-  development.
+  `response` return. `response(raw, vars)` also receives the entry's `vars`;
+  a one-argument parser such as `schema.parse` still fits. A duplicate key
+  replaces the definition and warns in development.
 - **`mutate(vars, { id? })`**: runs `request(vars)` once, merges the configured
   headers under the descriptor's, validates the descriptor (at most one of
   `data` / `form` / `file`, none for a bodiless DELETE; `parts` only with `file`; parts must tile the
@@ -50,15 +52,25 @@ Added:
   `lifetimeMs`, and resolves when the entry is durable. `vars` is any
   JSON-serializable object, so generated API request types work as they are;
   `mutate()` rejects vars or `data` that do not serialize (a cycle, a function,
-  a BigInt) and caps `vars` at 4 KB. A definition whose `request` takes no
-  vars calls `mutate()` with no arguments.
+  a BigInt) and caps `vars` at `configure().maxVarsBytes`, 1 MB by default. A
+  definition whose `request` takes no vars calls `mutate()` with no arguments.
+  It resolves after the row and every staged body copy are on disk, so the
+  caller may delete its source file then; native failures reject with
+  `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`.
 - **Request bodies**: JSON (`data`), multipart (`form`), whole file (`file`),
   and chunked (`file` + `parts`). All under one entry shape and one id.
 - **Delivery rules**: dedupe by event id; the outcomes of one id deliver in
   order, one handler at a time; an outcome for an id waits for that id's
   in-flight `mutate()`; an outcome whose key has no definition stays
   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`;
-  a handler that has not settled after 30 s logs a warning.
+  a handler that has not settled after 30 s logs a warning. No ordering is
+  promised between different ids.
+- **`Meta.deliveries`**: how many times an outcome has reached JS, including
+  boot replays. A handler that keeps throwing sees it grow; the library never
+  gives up on its own, so the app decides a poison policy.
+- **`RequestRow.nextAttemptAt`**: epoch ms, set while an entry waits out a
+  retry backoff. `getRequests()` returns every entry native has not yet
+  forgotten, so completed and cancelled rows appear until their ack.
 - **`pause()` / `resume()`** for the whole queue, **`updateHeaders(patch)`** to
   re-auth parked entries, and the **`attempt`** event with one row per HTTP
   attempt before interpretation.
