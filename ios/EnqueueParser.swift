@@ -30,6 +30,8 @@ struct ParsedEnqueue {
   let accept: [UploadOutcome.AcceptRule]
   let expiresAt: Double
   let retry: RetryOverride?
+  /// nil when the descriptor has none: the entry follows the queue setting.
+  let wifiOnly: Bool?
   /// Body identity for the same-id rules.
   let fingerprint: String
 }
@@ -65,6 +67,11 @@ enum EnqueueParser {
 
     let url = present(d["url"]) as? String
     if let url { try requireURL(url, "url") }
+    var wifiOnly: Bool?
+    if let raw = present(d["wifiOnly"]) {
+      guard let b = raw as? Bool else { throw ParseError(message: "'wifiOnly' must be a boolean") }
+      wifiOnly = b
+    }
 
     var kinds: [ParsedEnqueue.Body] = []
     if let text = present(d["dataJson"]) {
@@ -92,7 +99,7 @@ enum EnqueueParser {
       id: id, key: key, varsJSON: varsJSON, url: url,
       method: method, headers: try headers(present(d["headers"])), body: body, parts: parts,
       accept: UploadOutcome.parseAcceptRules(present(d["accept"])), expiresAt: expiresAt,
-      retry: RetryOverride.parse(present(d["retry"])),
+      retry: RetryOverride.parse(present(d["retry"])), wifiOnly: wifiOnly,
       fingerprint: fingerprint(body, parts: parts, url: url, method: method))
   }
 

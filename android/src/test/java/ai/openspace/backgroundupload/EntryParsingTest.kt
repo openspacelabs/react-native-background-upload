@@ -117,6 +117,35 @@ class EntryParsingTest {
   }
 
   @Test
+  fun `wifiOnly parses true, false, or absent`() {
+    assertEquals(true, EntryParsing.parse(entryMap(base("wifiOnly", true))).descriptor.wifiOnly)
+    assertEquals(false, EntryParsing.parse(entryMap(base("wifiOnly", false))).descriptor.wifiOnly)
+    assertNull(EntryParsing.parse(entryMap(base())).descriptor.wifiOnly)
+    assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.parse(entryMap(base("wifiOnly", "yes")))
+    }
+  }
+
+  @Test
+  fun `a pause scope with no keys is the whole queue, and keys must be non-empty strings`() {
+    assertNull(EntryParsing.scopeKeys(JavaOnlyMap()))
+    // Codegen passes null when a stale bundle calls pause() with no argument.
+    assertNull(EntryParsing.scopeKeys(null))
+    assertEquals(listOf("capture", "video"), EntryParsing.scopeKeys(JavaOnlyMap.of("keys", JavaOnlyArray.of("capture", "video"))))
+    assertEquals(emptyList<String>(), EntryParsing.scopeKeys(JavaOnlyMap.of("keys", JavaOnlyArray())))
+    // A keys field that native drops would widen the scope to the whole queue.
+    listOf(
+      JavaOnlyMap.of("keys", null),
+      JavaOnlyMap.of("keys", "capture"),
+      JavaOnlyMap.of("keys", JavaOnlyArray.of("capture", 1.0)),
+      // JS and the README refuse empty keys; native agrees.
+      JavaOnlyMap.of("keys", JavaOnlyArray.of("capture", "")),
+    ).forEach { m ->
+      assertThrows("$m", EntryParsing.InvalidEntryException::class.java) { EntryParsing.scopeKeys(m) }
+    }
+  }
+
+  @Test
   fun `what native can not run is rejected`() {
     val cases = listOf(
       JavaOnlyMap.of("url", "https://example.com"), // no expiresAt

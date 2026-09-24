@@ -566,6 +566,33 @@ describe('mutate', () => {
       ).resolves.toBeDefined();
     });
 
+    it('forwards wifiOnly to native when set, and omits it when absent', async () => {
+      const on = mutateWith({ url: 'https://x', wifiOnly: true });
+      await on.promise;
+      expect(on.enqueue.mock.calls[0][0].descriptor.wifiOnly).toBe(true);
+      const off = mutateWith({ url: 'https://x', wifiOnly: false });
+      await off.promise;
+      expect(off.enqueue.mock.calls[0][0].descriptor.wifiOnly).toBe(false);
+      // Absent means the entry follows setWifiOnly(), so nothing crosses.
+      const follow = mutateWith({ url: 'https://x' });
+      await follow.promise;
+      expect(follow.enqueue.mock.calls[0][0].descriptor).not.toHaveProperty(
+        'wifiOnly',
+      );
+    });
+
+    it('rejects a wifiOnly that is not a boolean, and a misspelling', async () => {
+      await expect(
+        mutateWith({ url: 'https://x', wifiOnly: 'yes' }).promise,
+      ).rejects.toThrow(/wifiOnly must be a boolean/);
+      await expect(
+        mutateWith({ url: 'https://x', wifiOnly: null }).promise,
+      ).rejects.toThrow(/wifiOnly must be a boolean/);
+      await expect(
+        mutateWith({ url: 'https://x', wifionly: true }).promise,
+      ).rejects.toThrow(/unknown descriptor field "wifionly".*"wifiOnly"/);
+    });
+
     it('never reaches native on a rejected descriptor', async () => {
       const { promise, enqueue } = mutateWith({ data: {} });
       await expect(promise).rejects.toThrow();
