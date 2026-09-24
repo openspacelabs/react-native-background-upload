@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Each v9 journal entry becomes a read-only settled row with key "legacy"
 /// and id = the v9 upload id. Nothing is delivered: Diana reads the rows,
-/// marks those transfers terminal, and cancels them. When the id also has a
-/// v9 chunked manifest, the row reports its bytes, and the blob stays in the
-/// directory until cancel(id).
+/// marks those transfers terminal, and cancels them. A legacy row reports
+/// 0/0 bytes, as on Android. When the id also has a v9 chunked manifest, the
+/// blob stays in the directory until cancel(id) or a same-id enqueue.
 ///
 /// A manifest with no journal entry makes no row. It stays dormant until a
 /// same-id enqueue adopts it (a legacy row would be cancelled by Diana, and
@@ -25,13 +25,13 @@ enum LegacyImport {
       guard let state = state(e.type) else { return nil }
       let manifest = manifests[e.id]
       return QueueEntry(
-        id: e.id, key: key, varsJSON: "null", descriptorJSON: "{}", url: nil, method: "POST",
+        id: e.id, key: key, varsJSON: "null", url: nil, method: "POST",
         accept: [], retry: nil, bodyKind: .none,
         bodyPath: manifest == nil ? nil : ChunkedManifestV9.blobName,
         bodyContentType: nil, forceContentType: false, bodyFingerprint: fingerprint, parts: [],
         incarnation: manifest?.incarnation ?? UUID().uuidString, headers: [:], headerGeneration: 0,
         state: state, authParked: false, generation: 1, attempts: 0,
-        bytesSent: manifest?.acceptedBytes ?? 0, totalBytes: manifest?.totalBytes ?? 0,
+        bytesSent: 0, totalBytes: 0,
         expiresAt: manifest?.expiresAt ?? e.timestamp, nextAttemptAt: nil, settledEventId: nil,
         lastRequestId: nil, lastUrl: nil, lastPartIndex: e.partIndex, legacy: true,
         createdAt: e.timestamp, updatedAt: e.timestamp)

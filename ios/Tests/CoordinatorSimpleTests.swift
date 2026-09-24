@@ -73,6 +73,36 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.unacknowledged().first?["deliveries"] as? Int, 3)
   }
 
+  func testSettleWithNoListenerIsJournaledAtZeroAndTheFirstDrainReturnsOne() throws {
+    h.sink.listening = false // headless: no JS listener yet
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask())
+    XCTAssertTrue(h.sink.settled.isEmpty, "not emitted live")
+    let eventId = try XCTUnwrap(h.journal.unacknowledged().first?.eventId)
+    XCTAssertEqual(h.journal.load(eventId)?.deliveries, 0)
+    // Rule 7 with no listener: nothing emitted, nothing counted.
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    XCTAssertEqual(h.journal.load(eventId)?.deliveries, 0)
+    XCTAssertEqual(h.unacknowledged().first?["deliveries"] as? Int, 1, "the first delivery")
+    // The drain marks the listener: the next settle goes out live at 1.
+    _ = try h.enqueue(h.dataRaw(id: "b")).get()
+    h.complete(onlyTask())
+    XCTAssertEqual(h.sink.settled.last?["id"] as? String, "b")
+    XCTAssertEqual(h.sink.settled.last?["deliveries"] as? Int, 1)
+  }
+
+  func testFailedJournalWriteWithNoListenerKeepsZeroForTheDrain() throws {
+    h.sink.listening = false
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    setReadOnly(h.journal.root, true)
+    defer { setReadOnly(h.journal.root, false) }
+    h.complete(onlyTask())
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    XCTAssertEqual(h.coordinator.pendingJournal.values.first?.deliveries, 0)
+    XCTAssertEqual(h.unacknowledged().first?["deliveries"] as? Int, 1)
+  }
+
   // MARK: - Same-id rules
 
   func testRule7CompletedUnackedReemitsWithoutRunning() throws {
@@ -89,12 +119,44 @@ final class CoordinatorSimpleTests: XCTestCase {
   func testRule3SameBodyWhileRunningReplacesHeadersAndVars() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "old"])).get()
     var raw = h.dataRaw(id: "a", headers: ["Authorization": "new"])
-    raw["vars"] = ["n": 2]
+    raw["varsJson"] = #"{"n":2}"#
     _ = try h.enqueue(raw).get()
     XCTAssertEqual(h.transport.created.count, 1, "the in-flight task keeps its request")
     XCTAssertEqual(h.entry("a")?.headers["Authorization"], "new")
     XCTAssertEqual((h.row("a")?["vars"] as? [String: Int])?["n"], 2)
     XCTAssertEqual(h.entry("a")?.attempts, 1, "a live resume keeps the attempt ordinal")
+  }
+
+  func testADifferentUrlOrMethodIsADifferentBody() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    guard case .failure(let e) = h.enqueue(h.dataRaw(id: "a", url: "https://api.test/other")) else {
+      return XCTFail("a new url on a running entry")
+    }
+    XCTAssertEqual(e.code, "E_RUNNING")
+    h.complete(onlyTask(), status: 503) // now waiting, not running
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["method": "PUT"])).get()
+    let entry = try XCTUnwrap(h.entry("a"))
+    XCTAssertEqual(entry.generation, 2, "replaced, not resumed")
+    XCTAssertEqual(entry.method, "PUT")
+    XCTAssertEqual(onlyTask().request.httpMethod, "PUT")
+  }
+
+  func testSameBodyOnAWaitingRetryRetriesNowWithTheSameAttempt() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "old"])).get()
+    h.complete(onlyTask(), status: 503)
+    let waiting = onlyTask()
+    XCTAssertNotNil(waiting.beginAt)
+    _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "new"])).get()
+    XCTAssertTrue(waiting.cancelled)
+    let now = onlyTask()
+    XCTAssertNil(now.beginAt, "no wait")
+    XCTAssertEqual(now.header("X-Request-Id"), waiting.header("X-Request-Id"), "the waiting attempt never ran")
+    XCTAssertEqual(now.header("Authorization"), "new")
+    XCTAssertEqual(h.entry("a")?.attempts, 2)
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertNil(h.entry("a")?.nextAttemptAt)
+    h.deliverCancel(waiting)
+    XCTAssertEqual(h.entry("a")?.state, .running, "the replaced task's cancel does nothing")
   }
 
   func testRule5DifferentBodyWhileRunningRejects() throws {
@@ -152,14 +214,14 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.generation, 2)
   }
 
-  func testMissingFileRejectsFileMissingAndParseErrorRejectsStorage() {
+  func testMissingFileRejectsFileMissingAndParseErrorRejectsInvalid() {
     guard case .failure(let missing) = h.enqueue(h.raw(id: "f", descriptor: [
       "url": "https://a.test", "file": "/does/not/exist"])) else { return XCTFail() }
     XCTAssertEqual(missing.code, "E_FILE_MISSING")
     XCTAssertNil(h.row("f"))
     guard case .failure(let bad) = h.enqueue(["id": "b", "key": "k", "descriptor": ["url": "https://a.test"]])
     else { return XCTFail() }
-    XCTAssertEqual(bad.code, "E_STORAGE", "no expiresAt")
+    XCTAssertEqual(bad.code, "E_INVALID", "no expiresAt")
   }
 
   // MARK: - Cancel
@@ -241,11 +303,10 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.sink.progress.last?["totalBytes"] as? Int64, 7)
   }
 
-  func testSystemCancelIsAnAttemptAndARetry() throws {
+  func testSystemCancelIsNoAttemptAndARetry() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     h.deliverCancel(onlyTask())
-    XCTAssertEqual(h.sink.attempts.last?["outcome"] as? String, "cancelled")
-    XCTAssertEqual(h.sink.attempts.last?["cancelReason"] as? String, "system")
+    XCTAssertTrue(h.sink.attempts.isEmpty, "a cancel is not an attempt")
     XCTAssertTrue(h.sink.settled.isEmpty, "never a cancelled outcome")
     XCTAssertEqual(h.entry("a")?.state, .queued)
     XCTAssertNotNil(onlyTask().beginAt)
@@ -261,11 +322,58 @@ final class CoordinatorSimpleTests: XCTestCase {
 
   func testExpiryTimerSettlesAWaitingEntry() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
-    let task = onlyTask()
+    h.complete(onlyTask(), status: 503)
+    let waiting = onlyTask()
     h.advance(60_200)
     XCTAssertEqual(h.entry("a")?.state, .error)
-    XCTAssertTrue(task.cancelled)
+    XCTAssertTrue(waiting.cancelled)
     XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+  }
+
+  func testExpiryLeavesARunningAttemptToItsOwnResult() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
+    let task = onlyTask()
+    h.advance(60_200)
+    XCTAssertEqual(h.entry("a")?.state, .running, "not settled mid-flight")
+    XCTAssertFalse(task.cancelled)
+    h.complete(task, status: 400)
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "http", "a real response keeps its kind")
+
+    _ = try h.enqueue(h.dataRaw(id: "b", extra: ["expiresAt": h.clock + 60_000])).get()
+    let second = onlyTask()
+    h.advance(60_200)
+    h.complete(second, status: 503)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired",
+                   "a transient result past expiresAt is expired")
+  }
+
+  func testAnExpiredEntryThatParksStillExpires() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
+    let task = onlyTask()
+    h.advance(60_200) // passes while running
+    h.complete(task, status: 401)
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    h.advance(100)
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+  }
+
+  func testPausedEntryCrossingExpiresAtSettlesAtResume() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
+    _ = try h.enqueue(h.dataRaw(id: "b", extra: ["expiresAt": h.clock + 60_000])).get()
+    h.complete(h.transport.live.first { $0.taskDescription?.contains("\"b\"") == true }!, status: 401)
+    h.pause()
+    h.advance(60_200)
+    XCTAssertEqual(h.entry("a")?.state, .paused, "a pause does not expire")
+    XCTAssertEqual(h.entry("b")?.state, .paused)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    h.resume()
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertEqual(h.entry("b")?.state, .error, "a parked entry too")
+    XCTAssertEqual(h.sink.settled.compactMap { ($0["error"] as? [String: Any])?["errorKind"] as? String },
+                   ["expired", "expired"])
+    XCTAssertTrue(h.transport.live.isEmpty, "nothing issues")
   }
 
   func testExpiredAtIssue() throws {
@@ -324,6 +432,15 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertTrue(h.transport.live.allSatisfy { $0.header("Authorization") == "fresh" })
     XCTAssertEqual(h.entry("a")?.headers, ["authorization": "fresh"], "the old spelling is replaced")
     XCTAssertEqual(h.entry("a")?.state, .running)
+  }
+
+  func testSameBodyOnAParkedEntryKeepsCountingAttempts() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "expired"])).get()
+    h.complete(onlyTask(), status: 401)
+    XCTAssertEqual(h.entry("a")?.attempts, 1)
+    _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "fresh"])).get()
+    XCTAssertEqual(h.entry("a")?.attempts, 2, "the same generation: no reset")
+    XCTAssertEqual(ChunkedEngine.parseRequestDescription(onlyTask().taskDescription)?.attempt, 2)
   }
 
   func testAuthUnderAnOlderGenerationReissuesAtOnce() throws {
@@ -497,6 +614,42 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertNil(h.row("a"))
   }
 
+  func testInvalidInputRejectsInvalidAndStoresNothing() {
+    for d: [String: Any] in [
+      ["url": "ftp://a.test/x"],
+      ["url": "https://a.test/x", "headers": ["Authorization": "t\r\nX: 1"]],
+      ["url": "https://a.test/x", "method": "GET", "dataJson": "{}"],
+    ] {
+      guard case .failure(let e) = h.enqueue(h.raw(id: "bad", descriptor: d)) else { return XCTFail("\(d)") }
+      XCTAssertEqual(e.code, "E_INVALID")
+    }
+    XCTAssertNil(h.row("bad"))
+    XCTAssertFalse(FileIO.exists(h.store.dir("bad")))
+  }
+
+  func testUpdateHeadersRejectsALineBreakAndChangesNothing() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", headers: ["Authorization": "old"])).get()
+    var code: String?
+    h.coordinator.updateHeaders(["Authorization": "new\r\n"], resolve: {}, reject: { c, _ in code = c })
+    h.drain()
+    XCTAssertEqual(code, "E_INVALID")
+    XCTAssertEqual(h.entry("a")?.headers["Authorization"], "old")
+    XCTAssertEqual(h.coordinator.settings.headerGeneration, 0)
+  }
+
+  func testNullValuedKeysSurviveOnTheBodyTheRowAndTheOutcome() throws {
+    _ = try h.enqueue(h.raw(id: "a", vars: ["status": NSNull(), "n": 1], descriptor: [
+      "url": "https://api.test/x", "dataJson": #"{"status":null}"#])).get()
+    let task = onlyTask()
+    XCTAssertEqual(try String(contentsOf: task.file!), #"{"status":null}"#)
+    let vars = try XCTUnwrap(h.row("a")?["vars"] as? [String: Any])
+    XCTAssertTrue(vars["status"] is NSNull, "the key is there, as JS null")
+    h.complete(task)
+    let settledVars = try XCTUnwrap(h.sink.settled.last?["vars"] as? [String: Any])
+    XCTAssertTrue(settledVars["status"] is NSNull)
+    XCTAssertEqual(settledVars["n"] as? Int, 1)
+  }
+
   func testDataNullSendsTheJSONNullBody() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", data: NSNull())).get()
     let task = onlyTask()
@@ -504,7 +657,23 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(task.header("Content-Type"), "application/json")
   }
 
-  // MARK: - Rows
+  func testRowsCarryLiveBytesAndAFailureKeepsThem() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = onlyTask()
+    h.coordinator.taskProgress(key: task.key, description: task.taskDescription, sent: 3, expected: 7)
+    h.drain()
+    XCTAssertEqual(h.row("a")?["bytesSent"] as? Int64, 3)
+    XCTAssertEqual(h.store.load("a")?.bytesSent, 0, "progress is memory only")
+    h.complete(task, status: 503)
+    XCTAssertEqual(h.row("a")?["bytesSent"] as? Int64, 0, "a new attempt starts from 0")
+    let retry = onlyTask()
+    h.coordinator.taskProgress(key: retry.key, description: retry.taskDescription, sent: 5, expected: 7)
+    h.drain()
+    h.complete(retry, status: 400)
+    XCTAssertEqual(h.sink.settled.last?["bytesSent"] as? Int64, 5, "the failed attempt's live bytes")
+  }
+
+  // MARK: - Rows  // MARK: - Rows
 
   func testGetRequestsRows() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
