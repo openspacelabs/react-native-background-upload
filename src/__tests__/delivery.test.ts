@@ -32,6 +32,8 @@ const completed = (over: Partial<SettledEvent> = {}): SettledEvent => ({
   at: 1000,
   attempts: 2,
   requestId: 'req-9',
+  url: 'https://example.com/items/1',
+  method: 'POST',
   kind: 'completed',
   response: { status: 200, body: '{"ok":true}', bodyTruncated: false },
   state: 'completed',
@@ -46,7 +48,7 @@ const setup = (
   const handlers: Array<(e: unknown) => void> = [];
   const native = {
     getUnacknowledgedEvents: jest.fn(async () => journal),
-    ackEvents: jest.fn(async () => true),
+    ackEvents: jest.fn(async () => undefined),
     onSettled: jest.fn((handler: (e: unknown) => void) => {
       handlers.push(handler);
       return { remove: jest.fn() } as never;
@@ -435,8 +437,58 @@ describe('completed', () => {
         at: 1000,
         attempts: 2,
         requestId: 'req-9',
+        deliveries: 1,
       },
     );
+  });
+
+  it('passes the event deliveries count through meta', async () => {
+    const onSuccess = jest.fn();
+    const onError = jest.fn();
+    const { start, emit } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess, onError },
+    });
+    start();
+    await flush();
+    emit(completed({ eventId: 'a', deliveries: 3 }));
+    emit(
+      completed({
+        eventId: 'b',
+        kind: 'error',
+        state: 'error',
+        response: undefined,
+        error: { errorKind: 'network', message: 'offline' },
+        deliveries: 7,
+      }),
+    );
+    await flush();
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.anything(),
+      { n: 1 },
+      expect.objectContaining({ deliveries: 3 }),
+    );
+    expect(onError).toHaveBeenCalledWith(
+      expect.anything(),
+      { n: 1 },
+      expect.objectContaining({ deliveries: 7 }),
+    );
+  });
+
+  it('treats a missing or malformed deliveries field as 1', async () => {
+    const onSuccess = jest.fn();
+    const { start, emit } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess },
+    });
+    start();
+    await flush();
+    emit(completed({ eventId: 'a' }));
+    emit(completed({ eventId: 'b', deliveries: 0 }));
+    emit(completed({ eventId: 'c', deliveries: 'x' as unknown as number }));
+    await flush();
+    expect(onSuccess).toHaveBeenCalledTimes(3);
+    onSuccess.mock.calls.forEach(([, , meta]) => {
+      expect(meta).toMatchObject({ deliveries: 1 });
+    });
   });
 
   it('parses the JSON body, runs the parser, and passes its result to onSuccess', async () => {
@@ -449,9 +501,26 @@ describe('completed', () => {
     await flush();
     emit(completed());
     await flush();
-    expect(response).toHaveBeenCalledWith({ ok: true });
+    expect(response).toHaveBeenCalledWith({ ok: true }, { n: 1 });
     expect(onSuccess).toHaveBeenCalledWith(true, { n: 1 }, expect.anything());
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+  });
+
+  it('gives the parser the entry vars as its second argument', async () => {
+    const onSuccess = jest.fn();
+    const response = jest.fn(
+      (raw: unknown, vars: { n: number }) =>
+        `${(raw as { ok: boolean }).ok}:${vars.n}`,
+    );
+    const { start, emit } = setup({
+      k: { key: 'k', request: jest.fn(), response, onSuccess },
+    });
+    start();
+    await flush();
+    emit(completed({ vars: { n: 42 } }));
+    await flush();
+    expect(response).toHaveBeenCalledWith({ ok: true }, { n: 42 });
+    expect(onSuccess).toHaveBeenCalledWith('true:42', { n: 42 }, expect.anything());
   });
 
   it('gives the parser undefined when the body is absent or empty', async () => {
@@ -467,8 +536,8 @@ describe('completed', () => {
     );
     await flush();
     expect(response).toHaveBeenCalledTimes(2);
-    expect(response).toHaveBeenNthCalledWith(1, undefined);
-    expect(response).toHaveBeenNthCalledWith(2, undefined);
+    expect(response).toHaveBeenNthCalledWith(1, undefined, { n: 1 });
+    expect(response).toHaveBeenNthCalledWith(2, undefined, { n: 1 });
   });
 
   it('calls onError with errorKind truncated when a parser is set and the body was cut', async () => {

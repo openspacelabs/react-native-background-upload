@@ -4,6 +4,7 @@ import type { AnyDefinition } from './registry';
 import type {
   Json,
   Meta,
+  Method,
   Outcome,
   RawResponse,
   RequestState,
@@ -16,6 +17,7 @@ import type {
  * and a replayed one take the same path here.
  */
 export type SettledEvent = {
+  /** A UUID string that native mints when it journals the outcome. */
   eventId: string;
   id: string;
   key: string;
@@ -24,10 +26,20 @@ export type SettledEvent = {
   at: number;
   attempts: number;
   requestId?: string;
+  /**
+   * Native sets it to 1 on the first emit of an outcome and increments it on
+   * every later delivery of the same eventId, including boot replays. When
+   * native omits it, the JS layer treats it as 1.
+   */
+  deliveries?: number;
   /** The entry's real state, for the unhandled-key row. */
   state: RequestState;
   bytesSent?: number;
   totalBytes?: number;
+  /** The last attempt's target. `partIndex` is set for a chunked upload. */
+  url: string;
+  method: Method;
+  partIndex?: number;
 } & Outcome;
 
 export const HANDLER_WARNING_MS = 30_000;
@@ -150,7 +162,7 @@ export const createDelivery = ({
         response.body === undefined || response.body === ''
           ? undefined
           : JSON.parse(response.body);
-      data = definition.response(parsed);
+      data = definition.response(parsed, vars);
     } catch (e) {
       await definition.onError?.(
         { errorKind: 'unknown', message: errorMessage(e) },
@@ -173,6 +185,10 @@ export const createDelivery = ({
       at: event.at,
       attempts: event.attempts,
       requestId: event.requestId,
+      deliveries:
+        typeof event.deliveries === 'number' && event.deliveries >= 1
+          ? event.deliveries
+          : 1,
     };
     const timer = setTimeout(() => {
       warn(

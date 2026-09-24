@@ -11,6 +11,7 @@ import {
   createRegistry,
   DEFAULT_ENQUEUE_TIMEOUT_MS,
   DEFAULT_LIFETIME_MS,
+  MAX_VARS_BYTES,
   type AnyDefinition,
   type Settings,
 } from './registry';
@@ -34,6 +35,7 @@ export const createUploadClient = (): UploadClient => {
   const settings: Settings = {
     lifetimeMs: DEFAULT_LIFETIME_MS,
     enqueueTimeoutMs: DEFAULT_ENQUEUE_TIMEOUT_MS,
+    maxVarsBytes: MAX_VARS_BYTES,
   };
   const definitions = new Map<string, AnyDefinition>();
   // One entry per subscription, not per function, so the same listener
@@ -66,7 +68,7 @@ export const createUploadClient = (): UploadClient => {
 
   /**
    * One-time setup. Call it at boot, after every define() call. Stores the
-   * lifetime, the headers provider and the retry defaults, forwards the
+   * lifetime, the vars cap, the headers provider and the retry defaults, forwards the
    * lifetime, retry and Android notification settings to native, then starts
    * replaying journaled outcomes. A second call updates the settings and does
    * not replay again. Each call replaces the full configuration.
@@ -87,6 +89,13 @@ export const createUploadClient = (): UploadClient => {
       );
     }
     settings.enqueueTimeoutMs = enqueueTimeoutMs;
+    const maxVarsBytes = options.maxVarsBytes ?? MAX_VARS_BYTES;
+    if (!Number.isFinite(maxVarsBytes) || maxVarsBytes <= 0) {
+      throw new Error(
+        `configure: maxVarsBytes must be a positive number, got ${options.maxVarsBytes}`,
+      );
+    }
+    settings.maxVarsBytes = maxVarsBytes;
     settings.headers = options.headers;
     settings.retry = options.retry;
     const forwarded: Record<string, unknown> = {
@@ -117,16 +126,20 @@ export const createUploadClient = (): UploadClient => {
     native.setWifiOnly(enabled);
 
   /**
-   * Merges the patch into the headers of every queued and parked entry, then
+   * Merges the patch into the headers of every entry not yet forgotten and
    * resumes the entries parked on 'awaiting-auth'. This is how a fresh token
-   * reaches requests that stalled on 401.
+   * reaches requests that stalled on 401. Native bumps a header generation, so
+   * a 401 from an attempt issued under the old headers re-issues at once
+   * instead of parking.
    */
   const updateHeaders = (patch: Record<string, string>): Promise<void> =>
     native.updateHeaders(patch);
 
   /**
-   * The live rows of the queue, read synchronously from native's in-memory
-   * index. Works offline. Completed entries leave after their ack.
+   * Every entry native has not yet forgotten, read synchronously from its
+   * in-memory index. Works offline. Completed and cancelled entries leave
+   * after their ack; an error entry stays until cancel() or a same-id
+   * mutate().
    */
   const getRequests = (filter?: {
     key?: string;
