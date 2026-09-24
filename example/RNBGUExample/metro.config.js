@@ -12,7 +12,7 @@ const config = {
   watchFolders: [path.resolve(__dirname, '../../src')],
   resolver: {
     extraNodeModules: {
-      [pak.name]: path.resolve(__dirname + '/../../src'),
+      [pak.name]: path.resolve(__dirname, '../../src'),
     },
     nodeModulesPaths: [path.resolve(path.join(__dirname, './node_modules'))],
   },

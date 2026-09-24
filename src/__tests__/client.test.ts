@@ -46,6 +46,7 @@ jest.mock('react-native', () => {
 
 import { TurboModuleRegistry } from 'react-native';
 import Upload, { chunkPlan, createUploadClient } from '../index';
+import { createFakeNative } from '../testing';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Same object the module captured at import time.
@@ -586,5 +587,97 @@ describe('end to end', () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
     expect(order).toEqual([`caller ${id}`, `handler ${id}`]);
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+  });
+});
+
+describe('with a fake native', () => {
+  it('runs define, mutate, settle, onSuccess and ack on the fake, not the TurboModule', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const onSuccess = jest.fn();
+    const create = client.define({
+      key: 'item.create',
+      request: ({ n }: { n: number }) => ({
+        url: `https://x/${n}`,
+        method: 'PUT',
+        data: { n, note: null },
+      }),
+      response: (raw) => (raw as { id: string }).id,
+      onSuccess,
+    });
+    client.configure({ headers: () => ({ Authorization: 'Bearer t' }) });
+    const { id } = await create.mutate({ n: 3 }, { id: 'local-3' });
+
+    expect(fake.entries).toEqual([
+      {
+        id: 'local-3',
+        key: 'item.create',
+        vars: { n: 3 },
+        descriptor: {
+          url: 'https://x/3',
+          method: 'PUT',
+          data: { n: 3, note: null },
+          headers: { Authorization: 'Bearer t' },
+          expiresAt: expect.any(Number),
+        },
+        raw: expect.objectContaining({ varsJson: '{"n":3}' }),
+      },
+    ]);
+    expect(client.getRequests({ id })).toEqual([
+      expect.objectContaining({ id, key: 'item.create', state: 'queued' }),
+    ]);
+
+    const event = await fake.settle(id, {
+      kind: 'completed',
+      response: { status: 201, body: '{"id":"srv-9"}' },
+    });
+
+    expect(onSuccess).toHaveBeenCalledWith(
+      'srv-9',
+      { n: 3 },
+      expect.objectContaining({ id, key: 'item.create', deliveries: 1 }),
+    );
+    expect(event).toMatchObject({ url: 'https://x/3', method: 'PUT' });
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+    // An acked completed outcome forgets the row.
+    expect(client.getRequests()).toEqual([]);
+    expect(native.enqueue).not.toHaveBeenCalled();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+  });
+
+  it('replays an outcome settled before configure() when configure() runs', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const onError = jest.fn();
+    const send = client.define({
+      key: 'item.send',
+      request: (_v: null) => ({ url: 'https://x' }),
+      onError,
+    });
+    const { id } = await send.mutate();
+    const acked = fake.settle(id, {
+      kind: 'error',
+      error: { errorKind: 'http', response: { status: 500 } },
+    });
+    await flush();
+    expect(onError).not.toHaveBeenCalled();
+
+    client.configure({});
+    const event = await acked;
+
+    expect(onError).toHaveBeenCalledWith(
+      {
+        errorKind: 'http',
+        message: 'http',
+        response: { status: 500, bodyTruncated: false },
+      },
+      null,
+      expect.objectContaining({ id, deliveries: 1 }),
+    );
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+    // An error row stays until cancel() or a same-id mutate().
+    expect(client.getRequests({ id })).toEqual([
+      expect.objectContaining({ state: 'error' }),
+    ]);
   });
 });
