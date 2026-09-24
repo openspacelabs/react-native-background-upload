@@ -1,7 +1,5 @@
 package ai.openspace.backgroundupload
 
-import java.io.IOException
-
 // Pure classification of terminal upload outcomes. Kept free of Android/React
 // types so it can be unit-tested on a plain JVM — this is the highest-consequence
 // logic in the uploader (it decides success vs failure), so it's covered directly.
@@ -26,14 +24,4 @@ object UploadOutcome {
       rule.status == code &&
         (rule.bodyIncludes == null || body?.contains(rule.bodyIncludes) == true)
     }
-
-  // Classify a thrown error into a stable kind for the JS layer. `fileExists`
-  // is passed in (not read here) to keep this pure; callers should default it to
-  // true when the existence check itself fails, so a flaky file probe reads as a
-  // retryable network error rather than a terminal "file gone".
-  fun errorKind(error: Throwable, fileExists: Boolean): String = when {
-    error is IOException && !fileExists -> "file"
-    error is IOException -> "network"
-    else -> "unknown"
-  }
 }

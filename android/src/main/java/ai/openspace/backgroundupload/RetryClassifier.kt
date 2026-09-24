@@ -60,9 +60,11 @@ object RetryClassifier {
     else -> Verdict.Terminal("unknown", error.message ?: error.javaClass.simpleName)
   }
 
-  /** The live attempt's errorKind for a failure: network, file, or unknown. */
-  fun failureKind(error: Throwable, fileExists: Boolean): String =
-    UploadOutcome.errorKind(error, fileExists)
+  /**
+   * The live attempt's errorKind for a transport failure, from its
+   * [classifyFailure] verdict: file, unknown, or network for a transient one.
+   */
+  fun failureKind(verdict: Verdict): String = (verdict as? Verdict.Terminal)?.errorKind ?: "network"
 
   fun isExpired(now: Long, expiresAt: Long) = now >= expiresAt
 

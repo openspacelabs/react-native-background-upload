@@ -26,10 +26,12 @@ private const val PROGRESS_INTERVAL = 500 // milliseconds
 
 private const val RANGE_COPY_BUFFER = 64 * 1024
 
+/** [truncated] when the body passed [BodyCap.SETTLED_MAX_BYTES] and the rest was not read. */
 data class UploadResponse(
   val code: Int,
   val body: String,
-  val headers: Map<String, String>
+  val headers: Map<String, String>,
+  val truncated: Boolean = false,
 )
 
 /** One request as the worker sends it. [body] is null only for GET and DELETE with no body. */
@@ -104,13 +106,17 @@ private suspend fun awaitResponse(client: OkHttpClient, request: Request): Uploa
       override fun onResponse(call: Call, response: Response) {
         val result = try {
           response.use { res -> // close the response asap
+            // The body unchanged: an empty body stays empty. A substituted
+            // reason phrase would make accept `bodyIncludes` rules match text
+            // the server never sent. The cap applies while it streams in.
+            val body = res.body?.let {
+              BodyCap.read(it.source(), BodyCap.SETTLED_MAX_BYTES, it.contentType()?.charset() ?: Charsets.UTF_8)
+            }
             UploadResponse(
               res.code,
-              // The body unchanged: an empty body stays empty. A substituted
-              // reason phrase would make accept `bodyIncludes` rules match text
-              // the server never sent.
-              res.body?.string().orEmpty(),
-              res.headers.toMultimap().mapValues { it.value.joinToString(", ") }
+              body?.text.orEmpty(),
+              res.headers.toMultimap().mapValues { it.value.joinToString(", ") },
+              body?.truncated ?: false,
             )
           }
         } catch (e: IOException) {

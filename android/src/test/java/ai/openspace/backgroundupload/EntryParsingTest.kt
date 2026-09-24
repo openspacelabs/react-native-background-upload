@@ -3,38 +3,66 @@ package ai.openspace.backgroundupload
 import com.facebook.react.bridge.JavaOnlyArray
 import com.facebook.react.bridge.JavaOnlyMap
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class EntryParsingTest {
 
-  private fun entryMap(descriptor: JavaOnlyMap, vars: Any? = JavaOnlyMap.of("n", 1.0)) =
-    JavaOnlyMap.of("id", "e1", "key", "note", "vars", vars, "descriptor", descriptor)
+  private fun entryMap(descriptor: JavaOnlyMap, varsJson: Any? = """{"n":1}""") =
+    JavaOnlyMap.of("id", "e1", "key", "note", "varsJson", varsJson, "descriptor", descriptor)
 
   private fun base(vararg extra: Any?) =
     JavaOnlyMap.of("url", "https://example.com/items", "expiresAt", 9_000.0, *extra)
 
   @Test
-  fun `a JSON POST parses with defaults`() {
-    val p = EntryParsing.parse(entryMap(base("data", JavaOnlyMap.of("n", 1.0, "text", "hi"))))
+  fun `a JSON POST parses with defaults and keeps the JSON text as JS wrote it`() {
+    val text = """{"text":"hi","n":1,"status":null}"""
+    val p = EntryParsing.parse(entryMap(base("dataJson", text), varsJson = """{"b":2,"a":null}"""))
     assertEquals("e1", p.id)
     assertEquals("note", p.key)
-    assertEquals("""{"n":1}""", p.varsJson)
+    assertEquals("""{"b":2,"a":null}""", p.varsJson) // key order and null values survive
     assertEquals(9_000L, p.expiresAt)
     assertEquals("POST", p.descriptor.method)
-    assertEquals("""{"n":1,"text":"hi"}""", p.descriptor.dataJson)
+    assertEquals(text, p.descriptor.dataJson)
     assertEquals(StagedBody.JSON, p.descriptor.bodyKind)
   }
 
   @Test
-  fun `null vars store as the text null`() {
-    assertEquals("null", EntryParsing.parse(entryMap(base(), vars = null)).varsJson)
+  fun `null vars cross as the text null`() {
+    assertEquals("null", EntryParsing.parse(entryMap(base(), varsJson = "null")).varsJson)
   }
 
   @Test
-  fun `a null data is no body, because the bridge turns undefined into null`() {
-    assertNull(EntryParsing.parse(entryMap(base("data", null))).descriptor.dataJson)
+  fun `a dataJson of null is a real JSON body`() {
+    val d = EntryParsing.parse(entryMap(base("dataJson", "null"))).descriptor
+    assertEquals("null", d.dataJson)
+    assertEquals(StagedBody.JSON, d.bodyKind)
+  }
+
+  @Test
+  fun `no dataJson is no body`() {
+    val d = EntryParsing.parse(entryMap(base())).descriptor
+    assertNull(d.dataJson)
+    assertEquals(StagedBody.NONE, d.bodyKind)
+  }
+
+  @Test
+  fun `a missing or malformed varsJson or dataJson is rejected`() {
+    val cases = listOf(
+      entryMap(base(), varsJson = null),
+      entryMap(base(), varsJson = JavaOnlyMap.of("n", 1.0)), // the old object form
+      entryMap(base(), varsJson = "{n:1}"), // lenient JSON
+      entryMap(base(), varsJson = """{"n":1} trailing"""),
+      entryMap(base("dataJson", "")),
+      entryMap(base("dataJson", "{'a':1}")),
+      entryMap(base("dataJson", JavaOnlyMap.of("a", 1.0))),
+      entryMap(base("data", JavaOnlyMap.of("a", 1.0))), // the old data form would send no body
+    )
+    cases.forEach { m ->
+      assertThrows("$m", EntryParsing.InvalidEntryException::class.java) { EntryParsing.parse(m) }
+    }
   }
 
   @Test
@@ -93,8 +121,10 @@ class EntryParsingTest {
     val cases = listOf(
       JavaOnlyMap.of("url", "https://example.com"), // no expiresAt
       JavaOnlyMap.of("expiresAt", 1.0), // no url and no parts
-      base("data", 1.0, "file", "/a"), // two body kinds
-      base("method", "GET", "data", 1.0), // GET with a body
+      base("dataJson", "1", "file", "/a"), // two body kinds
+      base("method", "GET", "dataJson", "1"), // GET with a body
+      base("method", "GET", "dataJson", "null"), // GET with the JSON body null
+      base("method", "GET", "file", "/a"),
       base("method", "TRACE"),
       JavaOnlyMap.of("url", "not a url", "expiresAt", 1.0),
       base("headers", JavaOnlyMap.of("Bad\nName", "v")),
@@ -109,11 +139,45 @@ class EntryParsingTest {
   }
 
   @Test
+  fun `a GET with no body parses`() {
+    assertEquals("GET", EntryParsing.parse(entryMap(base("method", "GET"))).descriptor.method)
+  }
+
+  @Test
+  fun `a bad header value is rejected with its name and offset, never its value`() {
+    val secret = "Bearer s3cr3t-token"
+    val e = assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.parse(entryMap(base("headers", JavaOnlyMap.of("Authorization", "$secret\n"))))
+    }
+    assertEquals("headers: the value of header 'Authorization' has an invalid character at offset ${secret.length}", e.message)
+    assertFalse(e.message!!.contains("s3cr3t"))
+  }
+
+  @Test
+  fun `a bad header name is rejected with the valid part before the offset only`() {
+    val e = assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.requireValidHeaders(mapOf("Authorization: Bearer s3cr3t" to "v"), "headers")
+    }
+    assertEquals("headers: the header name that starts 'Authorization:' has an invalid character at offset 14", e.message)
+    assertFalse(e.message!!.contains("s3cr3t"))
+    assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.requireValidHeaders(mapOf("" to "v"), "headers")
+    }
+  }
+
+  @Test
+  fun `the header check accepts what OkHttp sends`() {
+    EntryParsing.requireValidHeaders(mapOf("X-Tab" to "a\tb", "X-Tilde" to "~!#", "Content-Range" to "bytes 0-9/10"), "headers")
+    okhttp3.Headers.Builder().add("X-Tab", "a\tb").add("X-Tilde", "~!#")
+  }
+
+  @Test
   fun `an updateHeaders patch is checked like descriptor headers`() {
     assertEquals(mapOf("Authorization" to "Bearer new"), EntryParsing.headerPatch(JavaOnlyMap.of("Authorization", "Bearer new")))
-    assertThrows(EntryParsing.InvalidEntryException::class.java) {
+    val e = assertThrows(EntryParsing.InvalidEntryException::class.java) {
       EntryParsing.headerPatch(JavaOnlyMap.of("Authorization", "Bearer\nnew"))
     }
+    assertFalse(e.message!!.contains("Bearer"))
   }
 
   @Test

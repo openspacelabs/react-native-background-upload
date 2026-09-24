@@ -73,11 +73,11 @@ class ChunkedEngineTest {
   @Test
   fun `a park from one part stops the siblings with the park itself`() {
     // The worker needs the ParkException back, not a CancellationException.
-    val thrown = assertThrows(EntryWorker.ParkException::class.java) {
+    val thrown = assertThrows(EntryRun.ParkException::class.java) {
       runBlocking {
         ChunkedEngine.run((0 until 6).toList()) { index ->
           yield()
-          if (index == 1) throw EntryWorker.ParkException(4)
+          if (index == 1) throw EntryRun.ParkException(4)
           yield()
         }
       }

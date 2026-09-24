@@ -11,36 +11,25 @@ class JsonBridgeTest {
 
   @Test
   fun `integral doubles print as integers, as JSON stringify does`() {
-    assertEquals("""{"n":1,"neg":-3,"zero":0}""", JsonBridge.toJson(mapOf("n" to 1.0, "neg" to -3.0, "zero" to -0.0)))
-    assertEquals("12345678901", JsonBridge.toJson(12_345_678_901.0))
+    assertEquals("1", JsonBridge.numberText(1.0))
+    assertEquals("-3", JsonBridge.numberText(-3.0))
+    assertEquals("0", JsonBridge.numberText(-0.0))
+    assertEquals("12345678901", JsonBridge.numberText(12_345_678_901.0))
   }
 
   @Test
   fun `fractions and very large magnitudes keep a decimal form`() {
-    assertEquals("1.5", JsonBridge.toJson(1.5))
-    assertEquals("0.1", JsonBridge.toJson(0.1))
+    assertEquals("1.5", JsonBridge.numberText(1.5))
+    assertEquals("0.1", JsonBridge.numberText(0.1))
     // Above 2^53 a double can not hold every integer, so it stays a double.
-    assertEquals(1e20, (JsonBridge.parse(JsonBridge.toJson(1e20)) as Double), 0.0)
+    assertEquals(1e20, (JsonBridge.parse(JsonBridge.numberText(1e20)) as Double), 0.0)
   }
 
   @Test
-  fun `nested maps and lists round trip`() {
+  fun `JSON text parses to plain values`() {
     val value = mapOf("a" to listOf(1.0, "x", true, null, mapOf("b" to 2.5)), "c" to mapOf<String, Any?>())
-    val text = JsonBridge.toJson(value)
-    assertEquals("""{"a":[1,"x",true,null,{"b":2.5}],"c":{}}""", text)
-    assertEquals(value, JsonBridge.parse(text))
-  }
-
-  @Test
-  fun `keys are sorted so the same object always gives the same text`() {
-    assertEquals(JsonBridge.toJson(mapOf("b" to 1.0, "a" to 2.0)), JsonBridge.toJson(mapOf("a" to 2.0, "b" to 1.0)))
-  }
-
-  @Test
-  fun `null is the text null, and HTML characters are not escaped`() {
-    assertEquals("null", JsonBridge.toJson(null))
+    assertEquals(value, JsonBridge.parse("""{"a":[1,"x",true,null,{"b":2.5}],"c":{}}"""))
     assertNull(JsonBridge.parse("null"))
-    assertEquals("\"<a&b>\"", JsonBridge.toJson("<a&b>"))
   }
 
   @Test
@@ -77,5 +66,19 @@ class JsonBridgeTest {
     assertEquals("a", out.getArray("list")!!.getString(0))
     assertEquals(true, out.getMap("nested")!!.getBoolean("k"))
     assertEquals(true, out.isNull("none"))
+  }
+
+  @Test
+  fun `isJson accepts one strict JSON value of any kind`() {
+    listOf("null", "1", "-0.5e3", "\"s\"", "true", "[]", "{}", """{"a":[1,null,{"b":"c"}]}""", " {\"a\":1} ").forEach {
+      assertEquals(it, true, JsonBridge.isJson(it))
+    }
+  }
+
+  @Test
+  fun `isJson rejects lenient and malformed text`() {
+    listOf("", " ", "{a:1}", "{'a':1}", "[1,]", "{\"a\":1} x", "undefined", "NaN", "{\"a\":1}{}").forEach {
+      assertEquals(it, false, JsonBridge.isJson(it))
+    }
   }
 }

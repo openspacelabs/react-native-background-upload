@@ -50,7 +50,13 @@ class RetryClassifierTest {
     assertTrue(file is Verdict.Terminal && file.errorKind == "file")
     val other = RetryClassifier.classifyFailure(IllegalArgumentException("bad url"), fileExists = true)
     assertEquals(Verdict.Terminal("unknown", "bad url"), other)
-    assertEquals("network", RetryClassifier.failureKind(IOException(), true))
+  }
+
+  @Test
+  fun `the attempt errorKind of a failure comes from its verdict`() {
+    assertEquals("network", RetryClassifier.failureKind(RetryClassifier.classifyFailure(IOException(), true)))
+    assertEquals("file", RetryClassifier.failureKind(RetryClassifier.classifyFailure(IOException(), false)))
+    assertEquals("unknown", RetryClassifier.failureKind(RetryClassifier.classifyFailure(RuntimeException("boom"), true)))
   }
 
   private val policy = RetryClassifier.Policy(baseMs = 1_000, maxMs = 7_200_000, jitter = 0.0, exempt = defaultExempt)

@@ -33,10 +33,13 @@ object LegacyImport {
   private val gson = Gson()
 
   /** Returns true when the import ran at this launch (no marker yet). */
-  fun runOnce(context: Context, store: QueueStore): Boolean {
-    val marker = File(QueueStore.rootDir(context), MARKER)
+  fun runOnce(context: Context, store: QueueStore): Boolean =
+    runOnce(File(QueueStore.rootDir(context), MARKER), File(context.filesDir, V9_JOURNAL_DIR), store)
+
+  /** [runOnce] over plain files, for the JVM tests. */
+  internal fun runOnce(marker: File, v9Dir: File, store: QueueStore): Boolean {
     if (marker.exists()) return false
-    val complete = import(File(context.filesDir, V9_JOURNAL_DIR), store)
+    val complete = import(v9Dir, store)
     if (complete) {
       runCatching { AtomicFiles.writeText(marker, "1") }
         .onFailure { Diag.error("could not write the v9 import marker", it) }

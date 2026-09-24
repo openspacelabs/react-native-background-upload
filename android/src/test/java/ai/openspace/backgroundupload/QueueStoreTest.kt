@@ -103,14 +103,15 @@ class QueueStoreTest {
   fun `compute holds the lock across load, transform, and save`() {
     // A module transition and a worker's update race. If the lock did not
     // span all three steps, the update could land between load and save and
-    // be erased. Serialized, both effects survive.
+    // be erased. The update must block while the transform runs.
     val s = store()
     s.save(entry(descriptor = desc(url = null, file = "/f", parts = listOf(part(0, 10), part(10, 20)))))
     val inTransform = CountDownLatch(1)
+    val finish = CountDownLatch(1)
     val computing = Thread {
       s.compute("e1") { e ->
         inTransform.countDown()
-        Thread.sleep(300)
+        finish.await(5, TimeUnit.SECONDS)
         e!!.copy(expiresAt = 99_000)
       }
     }.apply { start() }
@@ -118,6 +119,13 @@ class QueueStoreTest {
     val updating = Thread {
       s.update("e1") { e -> e.copy(descriptor = e.descriptor!!.copy(parts = ChunkedParts.withAccepted(e.descriptor.parts!!, 0))) }
     }.apply { start() }
+    // Without the lock the update finishes (TERMINATED) while the transform waits.
+    val deadline = System.currentTimeMillis() + 5_000
+    while (updating.state != Thread.State.BLOCKED && updating.state != Thread.State.TERMINATED &&
+      System.currentTimeMillis() < deadline
+    ) Thread.sleep(5)
+    assertEquals(Thread.State.BLOCKED, updating.state)
+    finish.countDown()
     computing.join()
     updating.join()
     val final = s.load("e1")!!
@@ -155,7 +163,7 @@ class QueueStoreTest {
     s.remove("e1")
     assertNull(s.load("e1"))
     assertFalse(s.entryDir("e1").exists())
-    assertNull(index.get("e1"))
+    assertEquals(emptyList<RequestRow>(), index.snapshot())
   }
 
   @Test
@@ -171,7 +179,7 @@ class QueueStoreTest {
     // A process relaunch: a fresh index loaded from disk.
     val fresh = RequestIndex()
     QueueStore(dir, fresh).loadIndex()
-    assertEquals("error", fresh.get("b")!!.state)
+    assertEquals(listOf("error"), fresh.snapshot().map { it.state })
   }
 
   @Test

@@ -7,10 +7,12 @@ package ai.openspace.backgroundupload
  * | Stored entry                         | Action                                    |
  * | none, no v9 manifest                 | Create                                    |
  * | none, v9 manifest                    | AdoptV9: keep the blob and accepted parts |
- * | legacy row                           | Replace (generation + 1)                  |
+ * | legacy row, v9 manifest              | AdoptV9 (generation + 1)                  |
+ * | legacy row, no manifest              | Replace (generation + 1)                  |
  * | same body, completed, record present | ReEmit: deliveries + 1, no re-run         |
  * | same body, completed, record gone    | Replace (it was acked)                    |
- * | same body, any other state           | Resume (a settled one reopens: gen + 1)   |
+ * | same body, any other state           | Resume (a settled one reopens: gen + 1,   |
+ * |                                      | attempts 0)                               |
  * | different body, running              | RejectRunning (E_RUNNING)                 |
  * | different body, otherwise            | Replace (generation + 1, attempts 0)      |
  */
@@ -18,7 +20,8 @@ object EnqueueRules {
 
   sealed class Action {
     object Create : Action()
-    data class AdoptV9(val manifest: LegacyManifest) : Action()
+    /** [generation] is 1, or the legacy row's + 1. */
+    data class AdoptV9(val manifest: LegacyManifest, val generation: Int) : Action()
     data class ReEmit(val eventId: String) : Action()
     object Resume : Action()
     object Replace : Action()
@@ -31,8 +34,10 @@ object EnqueueRules {
     incoming: Descriptor,
     hasRecord: (eventId: String) -> Boolean,
   ): Action {
-    if (existing == null) return if (v9 != null) Action.AdoptV9(v9) else Action.Create
-    if (existing.legacy) return Action.Replace
+    if (existing == null) return if (v9 != null) Action.AdoptV9(v9, 1) else Action.Create
+    // An imported v9 outcome row. Its v9 chunked manifest, when present, is
+    // the upload's progress: adopt it, as with no row at all.
+    if (existing.legacy) return if (v9 != null) Action.AdoptV9(v9, existing.generation + 1) else Action.Replace
     if (existing.sameBodyAs(incoming)) {
       if (existing.state == EntryState.COMPLETED) {
         val eventId = existing.settledEventId
@@ -100,11 +105,27 @@ object EnqueueRules {
     )
   }
 
+  /** AdoptV9: a new entry over the v9 blob, at [generation]; over a legacy row it keeps the row's createdAt. */
+  fun adopted(
+    p: EntryParsing.Parsed,
+    staged: BodyStaging.Staged,
+    parts: List<Part>?,
+    legacyRow: QueueEntry?,
+    generation: Int,
+    paused: Boolean,
+    headerGeneration: Int,
+    now: Long,
+  ): QueueEntry = created(p, staged, parts, paused, headerGeneration, now).copy(
+    createdAt = legacyRow?.createdAt ?: now,
+    generation = generation,
+  )
+
   /**
    * Same body. New headers, expiresAt, vars, accept, retry, and notification
    * flag replace the stored ones; the body and accepted parts stay. A settled
-   * entry reopens with a fresh generation. A running one stays running (the
-   * worker reads the new headers before its next attempt).
+   * entry reopens with a fresh generation and attempts 0 (attempts count the
+   * current generation). A running one stays running (the worker reads the
+   * new headers before its next attempt).
    */
   fun resumed(
     existing: QueueEntry,
@@ -129,6 +150,7 @@ object EnqueueRules {
         noNotification = p.descriptor.noNotification,
       ),
       state = if (running) EntryState.RUNNING else initialState(paused),
+      attempts = if (reopen) 0 else existing.attempts,
       bytesSent = parts?.let { ChunkedParts.acceptedBytes(it) } ?: if (running) existing.bytesSent else 0L,
       expiresAt = p.expiresAt,
       updatedAt = now,
