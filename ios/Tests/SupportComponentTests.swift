@@ -3,7 +3,7 @@ import XCTest
 
 private func sampleEntry(_ id: String, createdAt: Double, vars: String = #"{"n":1}"#) -> QueueEntry {
   QueueEntry(
-    id: id, key: "k", varsJSON: vars, descriptorJSON: "{}", url: "https://a.test", method: "POST",
+    id: id, key: "k", varsJSON: vars, url: "https://a.test", method: "POST",
     accept: [], retry: nil, bodyKind: .none, bodyPath: "body-1", bodyContentType: nil,
     forceContentType: false, bodyFingerprint: "none", parts: [], incarnation: "i", headers: [:],
     headerGeneration: 0, state: .queued, authParked: false, generation: 1, attempts: 0, bytesSent: 0,
@@ -70,10 +70,10 @@ final class EventJournalTests: XCTestCase {
   func testUnacknowledgedSortedAndSkipsV9() throws {
     journal.append(event("late", at: 5))
     journal.append(event("early", at: 1))
-    let v9 = JournaledEventV9(eventId: "old", id: "u", type: "completed", timestamp: 0)
-    try JSONEncoder().encode(v9).write(to: root.appendingPathComponent("old.json"))
+    V9Journal.write(V9Journal.cancelled(eventId: "old", id: "u", timestamp: 0), eventId: "old", into: root)
     XCTAssertEqual(journal.unacknowledged().map(\.eventId), ["early", "late"])
-    XCTAssertEqual(journal.legacyEvents(), [v9])
+    XCTAssertEqual(journal.legacyEvents(),
+                   [JournaledEventV9(eventId: "old", id: "u", type: "cancelled", timestamp: 0, cancelReason: "user")])
   }
 
   func testPruneKeepsEventsThatRowsName() {
@@ -184,7 +184,7 @@ final class TaskMapTests: XCTestCase {
     let url = makeTempDir().appendingPathComponent("map.json")
     try Data(#"{"s:9":{"id":"old","acceptStatus":[409]},"s:10":{"id":"new","purpose":"future"}}"#.utf8).write(to: url)
     let map = TaskMap(fileURL: url)
-    XCTAssertEqual(map.meta(forKey: "s:9")?.accept, [.init(status: 409, bodyIncludes: nil)])
+    XCTAssertEqual(map.meta(forKey: "s:9")?.id, "old", "an old key is ignored, not fatal")
     XCTAssertNil(map.meta(forKey: "s:9")?.generation)
     XCTAssertNil(map.meta(forKey: "s:10")?.purpose, "an unknown purpose reads as nil")
     map.removeAll { _, meta in meta.generation == nil }
@@ -229,9 +229,9 @@ final class ChunkedEngineTests: XCTestCase {
 final class LegacyImportTests: XCTestCase {
   private func manifest(_ id: String) -> ChunkedManifestV9 {
     ChunkedManifestV9(id: id, parts: [
-      .init(url: "https://s3.test/1", headers: [:], start: 0, end: 5, accepted: true),
-      .init(url: "https://s3.test/2", headers: [:], start: 5, end: 12, accepted: false),
-    ], accept: [], expiresAt: 99, wifiOnly: false, createdAt: 1, incarnation: "inc")
+      .init(url: "https://s3.test/1", start: 0, end: 5, accepted: true),
+      .init(url: "https://s3.test/2", start: 5, end: 12, accepted: false),
+    ], expiresAt: 99, incarnation: "inc")
   }
 
   func testJournalOnly() {
@@ -250,8 +250,8 @@ final class LegacyImportTests: XCTestCase {
     let rows = LegacyImport.plan(events: [JournaledEventV9(eventId: "1", id: "cap", type: "error", timestamp: 3)],
                                  manifests: ["cap": manifest("cap")])
     XCTAssertEqual(rows.count, 1)
-    XCTAssertEqual(rows[0].bytesSent, 5)
-    XCTAssertEqual(rows[0].totalBytes, 12)
+    XCTAssertEqual(rows[0].bytesSent, 0, "legacy rows report 0/0, as on Android")
+    XCTAssertEqual(rows[0].totalBytes, 0)
     XCTAssertEqual(rows[0].bodyPath, "blob")
   }
 
@@ -278,10 +278,10 @@ final class ProgressThrottleTests: XCTestCase {
 
 final class AttemptEventTests: XCTestCase {
   private func input(status: Int? = 200, error: NSError? = nil, accepted: Bool = true,
-                     systemCancel: Bool = false, body: String? = "ok") -> AttemptEvent.Input {
+                     body: String? = "ok") -> AttemptEvent.Input {
     AttemptEvent.Input(id: "i", key: "k", requestId: "r", attempt: 1, url: "https://a.test", method: "PUT",
                        partIndex: 2, statusCode: status, headers: ["h": "v"], body: body, error: error,
-                       accepted: accepted, systemCancel: systemCancel, at: 5)
+                       accepted: accepted, at: 5)
   }
 
   func testOutcomes() {
@@ -296,9 +296,10 @@ final class AttemptEventTests: XCTestCase {
                                        accepted: false))
     XCTAssertEqual(net["errorKind"] as? String, "network")
     XCTAssertNil(net["httpCode"])
-    let cancel = AttemptEvent.build(input(status: nil, accepted: false, systemCancel: true))
-    XCTAssertEqual(cancel["outcome"] as? String, "cancelled")
-    XCTAssertEqual(cancel["cancelReason"] as? String, "system")
+    for event in [ok, http, net] {
+      XCTAssertTrue(["completed", "error"].contains(event["outcome"] as? String), "only completed or error")
+      XCTAssertNil(event["cancelReason"])
+    }
   }
 
   func testBodyCappedAtFourKilobytes() {

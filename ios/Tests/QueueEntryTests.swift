@@ -2,17 +2,30 @@ import XCTest
 @testable import RNBGUCore
 
 final class EnqueueParserTests: XCTestCase {
+  /// The bridge form: vars and data as JSON text. A `data` key in
+  /// `descriptor` becomes `dataJson`.
   private func raw(_ descriptor: [String: Any], vars: Any = ["a": 1]) -> [String: Any] {
     var d = descriptor
     if d["expiresAt"] == nil { d["expiresAt"] = 2_000_000_000_000.0 }
-    return ["id": "id-1", "key": "k", "vars": vars, "descriptor": d]
+    if let data = d.removeValue(forKey: "data") { d["dataJson"] = jsonText(data) }
+    return ["id": "id-1", "key": "k", "varsJson": jsonText(vars), "descriptor": d]
+  }
+
+  private func invalid(_ raw: [String: Any], file: StaticString = #filePath, line: UInt = #line) {
+    XCTAssertThrowsError(try EnqueueParser.parse(raw), file: file, line: line) {
+      XCTAssertTrue($0 is ParseError, file: file, line: line)
+    }
   }
 
   func testDataBodyDefaultsToPost() throws {
-    let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": ["b": 2, "a": 1]]))
+    var r = raw(["url": "https://a.test/x"])
+    var d = r["descriptor"] as! [String: Any]
+    d["dataJson"] = #"{"b":2,"a":1}"#
+    r["descriptor"] = d
+    let p = try EnqueueParser.parse(r)
     XCTAssertEqual(p.method, "POST")
     guard case .data(let json) = p.body else { return XCTFail("expected data") }
-    XCTAssertEqual(json, #"{"a":1,"b":2}"#)
+    XCTAssertEqual(json, #"{"b":2,"a":1}"#, "the text JS built is the body")
     XCTAssertEqual(p.varsJSON, #"{"a":1}"#)
   }
 
@@ -20,23 +33,73 @@ final class EnqueueParserTests: XCTestCase {
     let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "method": "DELETE"]))
     guard case .none = p.body else { return XCTFail("expected none") }
     XCTAssertEqual(p.method, "DELETE")
-    XCTAssertEqual(p.fingerprint, "none")
+    XCTAssertTrue(p.fingerprint.hasPrefix("none"))
   }
 
   func testNullVarsAndNSNullFieldsAreAbsent() throws {
-    let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "file": NSNull(), "form": NSNull()],
-                                        vars: NSNull()))
+    let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "file": NSNull(), "form": NSNull(),
+                                         "dataJson": NSNull()], vars: NSNull()))
     XCTAssertEqual(p.varsJSON, "null")
     guard case .none = p.body else { return XCTFail("NSNull must read as absent") }
   }
 
-  func testDataNullIsAJSONNullBody() throws {
+  func testNullValuedKeysSurviveAsText() throws {
+    let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": ["status": NSNull()]],
+                                        vars: ["a": NSNull()]))
+    XCTAssertEqual(p.varsJSON, #"{"a":null}"#)
+    guard case .data(let json) = p.body else { return XCTFail("expected data") }
+    XCTAssertEqual(json, #"{"status":null}"#)
+  }
+
+  func testDataJsonNullIsAJSONNullBody() throws {
     let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": NSNull(), "file": NSNull()]))
-    guard case .data(let json) = p.body else { return XCTFail("data: null is a body") }
+    guard case .data(let json) = p.body else { return XCTFail("dataJson \"null\" is a body") }
     XCTAssertEqual(json, "null")
-    XCTAssertEqual(p.fingerprint, "data:" + JSONText.sha256("null"))
-    XCTAssertThrowsError(try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": NSNull(),
-                                                      "file": "/tmp/a"])), "two body kinds")
+    invalid(raw(["url": "https://a.test/x", "data": NSNull(), "file": "/tmp/a"]))
+  }
+
+  func testObjectVarsOrDataAndBadJSONTextAreInvalid() {
+    invalid(["id": "i", "key": "k", "vars": ["a": 1], "descriptor": ["url": "https://a.test", "expiresAt": 1]])
+    var withData = raw(["url": "https://a.test"])
+    var d = withData["descriptor"] as! [String: Any]
+    d["data"] = ["x": 1]
+    withData["descriptor"] = d
+    invalid(withData)
+    var badVars = raw(["url": "https://a.test"])
+    badVars["varsJson"] = "{nope"
+    invalid(badVars)
+    d = raw(["url": "https://a.test"])["descriptor"] as! [String: Any]
+    d["dataJson"] = "{nope"
+    invalid(["id": "i", "key": "k", "varsJson": "null", "descriptor": d])
+  }
+
+  func testGetWithABodyIsInvalid() throws {
+    invalid(raw(["url": "https://a.test", "method": "GET", "data": ["a": 1]]))
+    invalid(raw(["url": "https://a.test", "method": "get", "file": "/tmp/a"]))
+    XCTAssertNoThrow(try EnqueueParser.parse(raw(["url": "https://a.test", "method": "GET"])))
+    XCTAssertNoThrow(try EnqueueParser.parse(raw(["url": "https://a.test", "method": "DELETE", "data": ["a": 1]])))
+  }
+
+  func testSchemeMustBeHttpOrHttps() throws {
+    invalid(raw(["url": "ftp://a.test/x"]))
+    invalid(raw(["url": "file:///tmp/x"]))
+    invalid(raw(["url": "https:///nohost"]))
+    invalid(raw(["file": "/tmp/f", "parts": [["url": "javascript://a.test/1", "range": ["start": 0, "end": 1]]]]))
+    XCTAssertNoThrow(try EnqueueParser.parse(raw(["url": "HTTP://a.test/x"])))
+  }
+
+  func testHeaderNamesAndValuesAreValidatedWithoutEchoingTheValue() {
+    invalid(raw(["url": "https://a.test", "headers": ["Bad Name": "x"]]))
+    invalid(raw(["url": "https://a.test", "headers": ["": "x"]]))
+    invalid(raw(["url": "https://a.test", "headers": ["X-A": "secret\r\nX-Injected: 1"]]))
+    invalid(raw(["url": "https://a.test", "headers": ["X-A": "a\nb"]]))
+    invalid(raw(["file": "/tmp/f", "parts": [["url": "https://s3.test/1", "headers": ["X": "a\rb"],
+                                               "range": ["start": 0, "end": 1]]]]))
+    invalid(raw(["url": "https://a.test", "form": [["name": "a", "contentType": "t\r\nX: 1", "string": "s"]]]))
+    XCTAssertThrowsError(try EnqueueParser.headers(["Authorization": "Bearer tok\r\n"])) {
+      XCTAssertFalse($0.localizedDescription.contains("tok"), "the value never reaches the message")
+      XCTAssertTrue($0.localizedDescription.contains("Authorization"))
+    }
   }
 
   func testFormAndFile() throws {
@@ -51,11 +114,11 @@ final class EnqueueParserTests: XCTestCase {
     let file = try EnqueueParser.parse(raw(["url": "https://a.test/x", "file": "file:///tmp/a.bin"]))
     guard case .file(let path) = file.body else { return XCTFail("expected file") }
     XCTAssertEqual(path, "file:///tmp/a.bin")
-    XCTAssertEqual(file.fingerprint, "file:file:///tmp/a.bin")
+    XCTAssertTrue(file.fingerprint.hasPrefix("file:file:///tmp/a.bin"))
   }
 
   func testMissingUrlWithoutPartsThrows() {
-    XCTAssertThrowsError(try EnqueueParser.parse(raw(["data": ["a": 1]])))
+    invalid(raw(["data": ["a": 1]]))
   }
 
   func testPartsNeedNoUrlAndValidateRanges() throws {
@@ -64,27 +127,34 @@ final class EnqueueParserTests: XCTestCase {
     ]]))
     XCTAssertNil(ok.url)
     XCTAssertEqual(ok.parts.count, 1)
-    XCTAssertThrowsError(try EnqueueParser.parse(raw(["file": "/tmp/f", "parts": [
+    invalid(raw(["file": "/tmp/f", "parts": [
       ["url": "https://s3.test/1", "range": ["start": 5, "end": 5]],
-    ]])))
-    XCTAssertThrowsError(try EnqueueParser.parse(raw(["parts": [
+    ]]))
+    invalid(raw(["parts": [
       ["url": "https://s3.test/1", "range": ["start": 0, "end": 5]],
-    ]])), "parts requires file")
+    ]]))
   }
 
   func testTwoBodyKindsThrow() {
-    XCTAssertThrowsError(try EnqueueParser.parse(raw(["url": "https://a.test", "data": [:], "file": "/tmp/a"])))
+    invalid(raw(["url": "https://a.test", "data": [:], "file": "/tmp/a"]))
   }
 
-  func testHeadersKeepStringsAndNumbersOnly() {
-    let h = EnqueueParser.headers(["A": "x", "B": 3, "C": NSNull(), "D": ["nested": 1]])
+  func testHeadersKeepStringsAndNumbersOnly() throws {
+    let h = try EnqueueParser.headers(["A": "x", "B": 3, "C": NSNull(), "D": ["nested": 1]])
     XCTAssertEqual(h, ["A": "x", "B": "3"])
   }
 
   func testDataFingerprintIgnoresKeyOrder() throws {
-    let a = try EnqueueParser.parse(raw(["url": "https://a.test", "data": ["x": 1, "y": ["b": 1, "a": 2]]]))
-    let b = try EnqueueParser.parse(raw(["url": "https://a.test", "data": ["y": ["a": 2, "b": 1], "x": 1]]))
-    let c = try EnqueueParser.parse(raw(["url": "https://a.test", "data": ["x": 2]]))
+    func withText(_ text: String) -> [String: Any] {
+      var r = raw(["url": "https://a.test"])
+      var d = r["descriptor"] as! [String: Any]
+      d["dataJson"] = text
+      r["descriptor"] = d
+      return r
+    }
+    let a = try EnqueueParser.parse(withText(#"{"x":1,"y":{"b":1,"a":2}}"#))
+    let b = try EnqueueParser.parse(withText(#"{"y":{"a":2,"b":1},"x":1}"#))
+    let c = try EnqueueParser.parse(withText(#"{"x":2}"#))
     XCTAssertEqual(a.fingerprint, b.fingerprint)
     XCTAssertNotEqual(a.fingerprint, c.fingerprint)
   }
@@ -121,7 +191,8 @@ final class QueueEntryTests: XCTestCase {
   private func parsed(_ descriptor: [String: Any], id: String = "e1", vars: Any = ["v": 1]) -> ParsedEnqueue {
     var d = descriptor
     if d["expiresAt"] == nil { d["expiresAt"] = 5_000.0 }
-    return try! EnqueueParser.parse(["id": id, "key": "k", "vars": vars, "descriptor": d])
+    if let data = d.removeValue(forKey: "data") { d["dataJson"] = jsonText(data) }
+    return try! EnqueueParser.parse(["id": id, "key": "k", "varsJson": jsonText(vars), "descriptor": d])
   }
 
   private let staged = StagedBody(kind: .parts, relativePath: "blob-1", contentType: nil,

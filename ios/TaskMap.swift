@@ -22,7 +22,6 @@ final class TaskMap {
 
   struct Meta: Codable, Equatable {
     let id: String
-    var accept: [UploadOutcome.AcceptRule]?
     var partIndex: Int?
     var incarnation: String?
     var attempt: Int?
@@ -31,11 +30,10 @@ final class TaskMap {
     var generation: Int?
     var purpose: Purpose?
 
-    init(id: String, accept: [UploadOutcome.AcceptRule]? = nil, partIndex: Int? = nil,
-         incarnation: String? = nil, attempt: Int? = nil, requestId: String? = nil,
-         headerGeneration: Int? = nil, generation: Int? = nil, purpose: Purpose? = nil) {
+    init(id: String, partIndex: Int? = nil, incarnation: String? = nil, attempt: Int? = nil,
+         requestId: String? = nil, headerGeneration: Int? = nil, generation: Int? = nil,
+         purpose: Purpose? = nil) {
       self.id = id
-      self.accept = accept
       self.partIndex = partIndex
       self.incarnation = incarnation
       self.attempt = attempt
@@ -46,9 +44,7 @@ final class TaskMap {
     }
 
     private enum CodingKeys: String, CodingKey {
-      case id, accept, partIndex, incarnation, attempt, requestId, headerGeneration, generation, purpose
-      // Builds before v9 persisted `acceptStatus: [Int]`. Read, never written.
-      case acceptStatus
+      case id, partIndex, incarnation, attempt, requestId, headerGeneration, generation, purpose
     }
 
     init(from decoder: Decoder) throws {
@@ -62,22 +58,6 @@ final class TaskMap {
       generation = try c.decodeIfPresent(Int.self, forKey: .generation)
       // An unknown purpose from a newer build reads as nil.
       purpose = (try? c.decodeIfPresent(String.self, forKey: .purpose)).flatMap { Purpose(rawValue: $0) }
-      accept = try c.decodeIfPresent([UploadOutcome.AcceptRule].self, forKey: .accept)
-        ?? c.decodeIfPresent([Int].self, forKey: .acceptStatus)?
-        .map { UploadOutcome.AcceptRule(status: $0, bodyIncludes: nil) }
-    }
-
-    func encode(to encoder: Encoder) throws {
-      var c = encoder.container(keyedBy: CodingKeys.self)
-      try c.encode(id, forKey: .id)
-      try c.encodeIfPresent(accept, forKey: .accept)
-      try c.encodeIfPresent(partIndex, forKey: .partIndex)
-      try c.encodeIfPresent(incarnation, forKey: .incarnation)
-      try c.encodeIfPresent(attempt, forKey: .attempt)
-      try c.encodeIfPresent(requestId, forKey: .requestId)
-      try c.encodeIfPresent(headerGeneration, forKey: .headerGeneration)
-      try c.encodeIfPresent(generation, forKey: .generation)
-      try c.encodeIfPresent(purpose, forKey: .purpose)
     }
   }
 

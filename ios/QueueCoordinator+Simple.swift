@@ -23,8 +23,17 @@ extension QueueCoordinator {
     }
     guard ready else {
       // Reconcile has not matched the daemon's tasks yet. Keep the queued
-      // state (and the wait) on disk; reconcile issues it.
-      if let delayMs { e.nextAttemptAt = t + Double(delayMs) }
+      // state and the wait on disk; reconcile issues it. A wait follows an
+      // attempt that ran (a completion that landed before reconcile), so
+      // mint its successor now: reconcile keeps a waiting attempt's ordinal,
+      // and must not reuse the one that ran.
+      if let delayMs {
+        if advanceAttempt {
+          e.attempts += 1
+          e.lastRequestId = UUID().uuidString
+        }
+        e.nextAttemptAt = t + Double(delayMs)
+      }
       commit(e)
       return
     }
@@ -44,7 +53,10 @@ extension QueueCoordinator {
     let before = e
     let reuse = !advanceAttempt && e.nextAttemptAt != nil && e.attempts > 0 && e.lastRequestId != nil
     let requestId = reuse ? e.lastRequestId! : UUID().uuidString
-    if !reuse { e.attempts += 1 }
+    if !reuse {
+      e.attempts += 1
+      e.bytesSent = 0 // a new attempt sends from byte 0
+    }
     e.lastRequestId = requestId
     e.lastUrl = urlString
     e.lastPartIndex = nil
@@ -61,7 +73,7 @@ extension QueueCoordinator {
     }
 
     let meta = TaskMap.Meta(
-      id: id, accept: e.accept, attempt: e.attempts, requestId: requestId,
+      id: id, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt)
     let task = transport.upload(
       buildRequest(e, url: url, requestId: requestId), fromFile: body, wifiOnly: settings.wifiOnly,
@@ -100,6 +112,9 @@ extension QueueCoordinator {
     let meta = taskMap.meta(forKey: c.key)
     taskMap.removeKey(c.key)
     liveTasks[c.key] = nil
+    // Runs after the completion moved the entry, so a grace that ends here
+    // sees the new state.
+    defer { replayHandled(c.key) }
     guard let owner = TaskOwner.resolve(description: c.description, meta: meta) else { return }
     if case .part(let id, let part, let incarnation) = owner {
       chunked.partCompleted(id: id, part: part, incarnation: incarnation, key: c.key, meta: meta,
@@ -118,8 +133,12 @@ extension QueueCoordinator {
     // A replaced task that finished before its cancel took effect. Its
     // replacement drives the entry, unless this one landed.
     if meta?.purpose == .superseded && !accepted { return }
-    emitAttempt(e, requestId: meta?.requestId ?? e.lastRequestId, attempt: attempt, completion: c,
-                partIndex: nil, accepted: accepted, systemCancel: cancelled)
+    // A cancel the library did not ask for (the system, a force-quit) is not
+    // an attempt: no event. It retries below.
+    if !cancelled {
+      emitAttempt(e, requestId: meta?.requestId ?? e.lastRequestId, attempt: attempt, completion: c,
+                  partIndex: nil, accepted: accepted)
+    }
 
     guard e.state == .running || e.state == .queued else {
       // A pause raced this completion. An accepted response did land, so
@@ -127,8 +146,7 @@ extension QueueCoordinator {
       if accepted && e.state == .paused { settle(id, .completed(response(c))) }
       return
     }
-    // A cancel the library did not ask for (the system, a force-quit) is a
-    // transient failure, never a 'cancelled' outcome.
+    // A system cancel is a transient failure, never a 'cancelled' outcome.
     if cancelled {
       scheduleRetry(e)
       return
@@ -136,11 +154,11 @@ extension QueueCoordinator {
     let fileExists = store.bodyURL(e).map(FileIO.exists) ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: policy(e),
-      isChunkedPart: false, fileExists: fileExists, now: now(), expiresAt: e.expiresAt))
+      fileExists: fileExists, now: now(), expiresAt: e.expiresAt))
     switch verdict {
     case .accepted:
       settle(id, .completed(response(c)))
-    case .transient, .fileUnreadable:
+    case .transient:
       scheduleRetry(e)
     case .auth:
       if let g = meta?.headerGeneration, g < settings.headerGeneration {
@@ -216,7 +234,7 @@ extension QueueCoordinator {
           e.nextAttemptAt = nil
           self.commit(e)
         }
-        self.lastSent[id] = sent
+        self.index.setBytes(id, sent)
         self.emitProgress(id, sent: sent, total: expected > 0 ? expected : e.totalBytes)
       }
     }
@@ -247,6 +265,8 @@ extension QueueCoordinator {
     n.authParked = true
     n.nextAttemptAt = nil
     commit(n)
+    // The timer may have passed while the entry ran.
+    armExpiry(n)
   }
 
   func response(_ c: TaskCompletion) -> RawResponseRecord {

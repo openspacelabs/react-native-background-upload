@@ -17,8 +17,8 @@ struct StagedBody: Equatable {
 enum StagingError: Error, Equatable {
   /// A source file is gone. Rejects E_FILE_MISSING.
   case fileMissing(String)
-  /// The parts do not tile the file. Rejects E_STORAGE; JS validates, so this
-  /// is a size mismatch between the plan and the real file.
+  /// The parts do not tile the file. Rejects E_INVALID; JS validates the
+  /// plan, so this is a size mismatch between the plan and the real file.
   case invalid(String)
   case io(String)
 }

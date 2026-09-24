@@ -8,22 +8,73 @@ extension QueueCoordinator {
   /// daemon may still replay before it re-issues.
   static let graceMs = 10_000
 
-  /// `completion` runs on the queue once every entry has its tasks again.
-  /// The caller holds the background completion handlers until then, so the
-  /// system cannot suspend the app before the refill enqueues new tasks.
+  /// `completion` runs on the queue once every entry has its tasks again and
+  /// every grace wait has ended. The caller holds the background completion
+  /// handlers until then, so the system cannot suspend the app before the
+  /// refill enqueues new tasks, or in the middle of a grace wait.
   func reconcileAll(completion: @escaping () -> Void) {
     queue.async {
       self.transport.allTasks { tasks in
         self.queue.async {
           self.reconcile(tasks)
-          completion()
+          self.whenGraceEnds(completion)
         }
       }
     }
   }
 
+  /// One open grace wait: the TaskMap keys whose completion may still
+  /// replay, and what to do when the wait ends.
+  struct Grace {
+    let token: UUID
+    var keys: Set<String>
+    let resolve: () -> Void
+  }
+
+  /// Runs `block` now when no grace wait is open, or when the last one ends.
+  func whenGraceEnds(_ block: @escaping () -> Void) {
+    if graces.isEmpty {
+      block()
+    } else {
+      afterGrace.append(block)
+    }
+  }
+
+  /// Opens a grace wait for `keys`. It ends when the completion of every key
+  /// was handled, or after `graceMs`, whichever comes first. Then `resolve`
+  /// runs. Does nothing when a wait with this name is open.
+  func openGrace(_ name: String, keys: Set<String>, resolve: @escaping () -> Void) {
+    guard graces[name] == nil else { return }
+    let token = UUID()
+    graces[name] = Grace(token: token, keys: keys, resolve: resolve)
+    schedule(Self.graceMs) { [weak self] in self?.endGrace(name, token: token) }
+  }
+
+  /// A completion was handled for `key`. A wait with no key left ends now,
+  /// so the background completion handler does not wait out the timer.
+  func replayHandled(_ key: String) {
+    for (name, grace) in graces where grace.keys.contains(key) {
+      graces[name]?.keys.remove(key)
+      if graces[name]?.keys.isEmpty == true { endGrace(name, token: grace.token) }
+    }
+  }
+
+  /// Closes one wait, runs its resolve, and releases the held blocks when no
+  /// wait is open. The token stops the timer of a wait that already ended
+  /// from closing a newer wait with the same name.
+  private func endGrace(_ name: String, token: UUID) {
+    guard let grace = graces[name], grace.token == token else { return }
+    graces[name] = nil
+    grace.resolve()
+    guard graces.isEmpty else { return }
+    let blocks = afterGrace
+    afterGrace = []
+    blocks.forEach { $0() }
+  }
+
   func reconcile(_ tasks: [UploadTask]) {
     ready = true
+    repairLostSettles()
     sweepOrphanedOutcomes()
     var simpleLive: Set<String> = []
     var partTasks: [String: [ChunkedCoordinator.LiveTask]] = [:]
@@ -70,25 +121,21 @@ extension QueueCoordinator {
   /// it was lost. The TaskMap tells them apart: its key goes when a
   /// completion is handled.
   private func withoutTask(_ e: QueueEntry) {
-    let pending = !taskMap.keys(where: {
+    let pending = taskMap.keys(where: {
       $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
-    }).isEmpty
-    guard pending else {
+    })
+    guard !pending.isEmpty else {
       // No task was ever made for a waiting attempt: it never ran, so it
       // keeps its ordinal and request id.
       reissue(e, advanceAttempt: false)
       return
     }
-    guard !graceChecks.contains(e.id) else { return }
-    graceChecks.insert(e.id)
-    schedule(Self.graceMs) { [weak self] in
-      guard let self else { return }
-      self.graceChecks.remove(e.id)
-      guard let current = self.index.entry(e.id), current.state == e.state,
+    openGrace(e.id, keys: Set(pending)) { [weak self] in
+      guard let self, let current = self.index.entry(e.id), current.state == e.state,
             current.generation == e.generation, current.attempts == e.attempts,
             !self.liveTasks.values.contains(where: { $0.id == e.id }) else { return }
-      // No replay came: the task is lost. Its key would send every later
-      // launch through this wait again.
+      // No replay moved the entry: the task is lost. Its key would send
+      // every later launch through this wait again.
       self.taskMap.removeAll { _, m in
         m.id == e.id && m.generation == e.generation && m.attempt == e.attempts
       }

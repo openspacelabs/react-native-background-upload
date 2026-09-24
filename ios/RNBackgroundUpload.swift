@@ -43,6 +43,10 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   // lock that guards the delegate.
   private static let delegateLock = NSLock()
   private static weak var eventDelegate: RNFileUploaderEventDelegate?
+  // true from the registered module's first journal drain (its JS listener
+  // is attached by then) until that module goes away. Guarded by
+  // delegateLock. A settle with no listener is journaled at deliveries 0.
+  private static var listening = false
 
   // AppDelegate stores the system completion handler here per session id.
   private static let bgHandlerLock = NSLock()
@@ -68,6 +72,7 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     transport.createSessions(delegate: self)
     observeAppState()
     // Claim the completion-handler deferral BEFORE the reconcile is queued.
+    // The release waits for the reconcile and for every grace wait it opens.
     // A relaunch reaches here inside the init of `shared`, and the AppDelegate
     // hook finishes that init before it stores the handler, so the claim
     // always precedes any drain.
@@ -82,6 +87,8 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     _ = shared
     delegateLock.lock()
     eventDelegate = delegate
+    // A new module has no JS listener until its own drain.
+    listening = false
     delegateLock.unlock()
   }
 
@@ -92,13 +99,28 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   @objc public static func clearEventDelegate(_ delegate: RNFileUploaderEventDelegate) {
     delegateLock.lock()
     defer { delegateLock.unlock() }
-    if eventDelegate === delegate { eventDelegate = nil }
+    if eventDelegate === delegate {
+      eventDelegate = nil
+      listening = false
+    }
   }
 
   fileprivate static var currentDelegate: RNFileUploaderEventDelegate? {
     delegateLock.lock()
     defer { delegateLock.unlock() }
     return eventDelegate
+  }
+
+  fileprivate static var canDeliver: Bool {
+    delegateLock.lock()
+    defer { delegateLock.unlock() }
+    return listening && eventDelegate != nil
+  }
+
+  fileprivate static func markListening() {
+    delegateLock.lock()
+    defer { delegateLock.unlock() }
+    if eventDelegate != nil { listening = true }
   }
 
   // MARK: - Module methods (called from the TurboModule shell)
@@ -293,6 +315,8 @@ private final class DelegateSink: EventSink {
   func emitProgress(_ body: [String: Any]) { RNBackgroundUpload.currentDelegate?.emitProgress(body) }
   func emitAttempt(_ body: [String: Any]) { RNBackgroundUpload.currentDelegate?.emitAttempt(body) }
   func emitSettled(_ body: [String: Any]) { RNBackgroundUpload.currentDelegate?.emitSettled(body) }
+  func canDeliver() -> Bool { RNBackgroundUpload.canDeliver }
+  func listenerReady() { RNBackgroundUpload.markListening() }
 }
 
 /// The two background sessions: one that may use cellular, one Wi-Fi only.

@@ -1,10 +1,10 @@
 import Foundation
 
 /// Builds the live `attempt` event: one HTTP attempt before the library
-/// interprets it for retry. `outcome` follows the v8 taxonomy: 'completed'
-/// only for a 2xx or a matching accept rule; any other response is 'error'
-/// with errorKind 'http'; a transport failure is 'error' with its kind; a
-/// cancel the library did not ask for is 'cancelled' with 'system'.
+/// interprets it for retry. `outcome` is 'completed' for a 2xx or a matching
+/// accept rule. Any other response is 'error' with errorKind 'http'. A
+/// transport failure is 'error' with its kind. A cancel of any kind (pause,
+/// cancel, supersede, the system) is not an attempt: the caller emits none.
 enum AttemptEvent {
   struct Input {
     var id: String
@@ -19,7 +19,6 @@ enum AttemptEvent {
     var body: String?
     var error: NSError?
     var accepted: Bool
-    var systemCancel: Bool
     var at: Double
   }
 
@@ -36,10 +35,7 @@ enum AttemptEvent {
       m["responseBody"] = body ?? ""
       m["responseBodyTruncated"] = truncated
     }
-    if i.systemCancel {
-      m["outcome"] = "cancelled"
-      m["cancelReason"] = "system"
-    } else if let error = i.error {
+    if let error = i.error {
       m["outcome"] = "error"
       m["errorKind"] = RetryClassifier.errorKind(for: error)
       m["errorMessage"] = error.localizedDescription

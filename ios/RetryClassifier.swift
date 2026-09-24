@@ -10,8 +10,6 @@ enum RetryClassifier {
     case terminalHttp
     /// The payload is gone. A retry can never succeed.
     case fileMissing
-    /// The payload exists but cannot be read now (iOS before first unlock).
-    case fileUnreadable
     case expired
   }
 
@@ -21,10 +19,6 @@ enum RetryClassifier {
     var error: NSError?
     var accept: [UploadOutcome.AcceptRule]
     var policy: RetryPolicy
-    /// Changes nothing: a chunked definition sets `exempt: []`, so the
-    /// terminal row applies through the policy. It is here so a test can pin
-    /// the part-404 case.
-    var isChunkedPart: Bool
     var fileExists: Bool
     var now: Double
     var expiresAt: Double
@@ -32,14 +26,22 @@ enum RetryClassifier {
 
   /// A cancellation (NSURLErrorCancelled) never reaches here: the caller
   /// handles it from the task's recorded purpose.
+  /// Past expiresAt only a transient result becomes `expired`; a real
+  /// response keeps its own class.
   static func classify(_ i: Input) -> Class {
+    let verdict = classifyResult(i)
+    return verdict == .transient && i.now >= i.expiresAt ? .expired : verdict
+  }
+
+  private static func classifyResult(_ i: Input) -> Class {
     if i.error == nil, let code = i.statusCode,
        UploadOutcome.isAccepted(code, body: i.body, accept: i.accept) {
       return .accepted
     }
-    if i.now >= i.expiresAt { return .expired }
     if let error = i.error {
-      if errorKind(for: error) == "file" { return i.fileExists ? .fileUnreadable : .fileMissing }
+      // A file that exists but cannot be read now (iOS before first unlock)
+      // is transient.
+      if errorKind(for: error) == "file" { return i.fileExists ? .transient : .fileMissing }
       return .transient
     }
     guard let code = i.statusCode else { return .transient }

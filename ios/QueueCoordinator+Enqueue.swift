@@ -12,7 +12,7 @@ extension QueueCoordinator {
     do {
       p = try EnqueueParser.parse(raw)
     } catch {
-      throw EnqueueError.storage("enqueue: \(error.localizedDescription)")
+      throw EnqueueError.invalid("enqueue: \(error.localizedDescription)")
     }
     if let existing = index.entry(p.id) {
       if existing.legacy {
@@ -79,8 +79,10 @@ extension QueueCoordinator {
     if existing.bodyFingerprint == p.fingerprint && !existing.legacy {
       switch existing.state {
       case .completed:
-        // Rule 7: re-emit the journaled outcome. Do not run again.
-        if let eventId = existing.settledEventId, let event = redeliver(eventId) {
+        // Rule 7: re-emit the journaled outcome. Do not run again. With no
+        // listener yet, the drain delivers it.
+        if sink?.canDeliver() == true, let eventId = existing.settledEventId,
+           let event = redeliver(eventId) {
           sink?.emitSettled(event.bridged)
         }
         return (p.id, false)
@@ -101,8 +103,9 @@ extension QueueCoordinator {
         return (p.id, !paused)
 
       case .awaitingAuth:
-        // Fresh headers came with the call: leave the parking spot.
-        var n = existing.resumed(with: p, resetBudget: true, now: now())
+        // Fresh headers came with the call: leave the parking spot. Same
+        // generation, so attempts keep counting.
+        var n = existing.resumed(with: p, resetBudget: false, now: now())
         n.authParked = false
         n.state = paused ? .paused : .queued
         try saveOrThrow(n)
@@ -117,6 +120,12 @@ extension QueueCoordinator {
         try saveOrThrow(n)
         publish(n)
         armExpiry(n)
+        if ready, !paused, n.state == .queued, !n.isChunked, let at = n.nextAttemptAt, at > now() {
+          // A simple retry waiting out its backoff: the caller asks again,
+          // so retry now. The waiting attempt never ran: keep its ordinal.
+          cancelTasks(n.id, purpose: .superseded)
+          issue(n.id, delayMs: nil, advanceAttempt: false)
+        }
         return (p.id, false)
       }
     }
@@ -174,7 +183,9 @@ extension QueueCoordinator {
       return try body()
     } catch StagingError.fileMissing(let path) {
       throw EnqueueError.fileMissing(path)
-    } catch StagingError.invalid(let message), StagingError.io(let message) {
+    } catch StagingError.invalid(let message) {
+      throw EnqueueError.invalid("enqueue: \(message)")
+    } catch StagingError.io(let message) {
       throw EnqueueError.storage("enqueue: \(message)")
     }
   }

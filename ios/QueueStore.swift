@@ -154,16 +154,6 @@ final class QueueStore {
     }
   }
 
-  /// Manifests with no entry.json next to them: dormant until a same-id
-  /// enqueue adopts them. Not rows, never scheduled.
-  func allDormantManifests() -> [ChunkedManifestV9] {
-    queue.sync {
-      subdirectories()
-        .filter { !FileIO.exists($0.appendingPathComponent(Self.entryName)) }
-        .compactMap { Self.readManifest($0.appendingPathComponent(Self.manifestName)) }
-    }
-  }
-
   func removeV9Manifest(_ id: String) {
     queue.sync { _ = try? FileManager.default.removeItem(at: fileURL(id, Self.manifestName)) }
   }

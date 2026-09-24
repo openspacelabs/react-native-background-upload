@@ -2,26 +2,21 @@ import Foundation
 
 /// The v9 chunked manifest (`manifest.json`), kept only to read the files a
 /// v9 build left behind. Decode only; v10 never writes it. A same-id enqueue
-/// with the same parts adopts its accepted flags, incarnation and blob.
+/// with the same parts adopts its accepted flags, incarnation and blob. The
+/// legacy row reads expiresAt and the byte counts. Other v9 keys are ignored.
 struct ChunkedManifestV9: Codable, Equatable {
   struct Part: Codable, Equatable {
     let url: String
-    var headers: [String: String]
     let start: Int64
     let end: Int64
-    var accepted: Bool = false
-    var rejections: Int?
+    var accepted: Bool
 
     var size: Int64 { end - start }
   }
 
   let id: String
   var parts: [Part]
-  var accept: [UploadOutcome.AcceptRule]
   var expiresAt: Double
-  var wifiOnly: Bool
-  let createdAt: Double
-  var stalled: Bool = false
   var incarnation: String
 
   /// v9 wrote the moved bytes at this fixed name.
