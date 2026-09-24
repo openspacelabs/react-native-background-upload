@@ -54,7 +54,9 @@ export interface Spec extends TurboModule {
   resume(): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. Settled
   // entry: forget now: row, bytes, and its unacknowledged outcomes. Unknown
-  // id: resolve, no-op.
+  // id: resolve, no-op. If the journal or the store cannot be written,
+  // cancel rejects with E_STORAGE and changes nothing; the caller may call
+  // again.
   cancel(id: string): Promise<void>;
   // Persisted natively. Applies to queued and future entries.
   setWifiOnly(enabled: boolean): Promise<void>;

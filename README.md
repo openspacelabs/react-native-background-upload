@@ -327,7 +327,9 @@ entry past `expiresAt` settles `error` with `errorKind: 'expired'` at
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
-unacknowledged outcomes. An unknown id resolves and does nothing.
+unacknowledged outcomes. An unknown id resolves and does nothing. If the
+journal or the store cannot be written, `cancel()` rejects with `E_STORAGE` and changes
+nothing; the caller may call again.
 
 ### `setWifiOnly(enabled): Promise<void>`
 Persisted natively. Applies to queued and future entries.
