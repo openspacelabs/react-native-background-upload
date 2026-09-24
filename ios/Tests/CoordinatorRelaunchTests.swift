@@ -169,6 +169,36 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertEqual(fresh.entry("a")?.settledEventId, eventId)
   }
 
+  /// A cancel on a settled entry that died after the directory was set
+  /// aside: the next launch finishes it.
+  func testRelaunchFinishesACancelThatDiedAfterTheSetAside() throws {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(h.transport.live[0], status: 400)
+    _ = try h.store.setAside("a")
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    XCTAssertNil(fresh.row("a"))
+    XCTAssertTrue(fresh.journal.unacknowledged().isEmpty, "its outcome goes with it")
+    XCTAssertTrue(fresh.store.setAsideDirectories().isEmpty)
+  }
+
+  /// Same, but the outcome files still cannot be deleted: the row comes
+  /// back, so no outcome is left without its row.
+  func testRelaunchPutsASetAsideRowBackWhenItsEventsCannotBeDeleted() throws {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(h.transport.live[0], status: 400)
+    _ = try h.store.setAside("a")
+    setReadOnly(h.journal.root, true)
+    defer { setReadOnly(h.journal.root, false) }
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    XCTAssertEqual(fresh.row("a")?["state"] as? String, "error")
+    XCTAssertEqual(fresh.journal.unacknowledged().count, 1)
+    XCTAssertTrue(fresh.store.setAsideDirectories().isEmpty)
+  }
+
   func testAckBeforeReconcileForgetsARowWhoseSettleSaveFailed() throws {
     let eventId = try settleWithFailedSave { h, task in h.complete(task) }
     let fresh = Harness(root: h.root) // no boot: the ack runs first

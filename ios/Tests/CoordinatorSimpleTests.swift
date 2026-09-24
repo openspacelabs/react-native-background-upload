@@ -251,6 +251,71 @@ final class CoordinatorSimpleTests: XCTestCase {
     h.cancel("unknown") // no-op
   }
 
+  func testCancelWhoseJournalWriteFailsRejectsStorageAndChangesNothing() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = onlyTask()
+    let states = h.sink.states.count, progress = h.sink.progress.count, timers = h.timers.count
+    setReadOnly(h.journal.root, true)
+    defer { setReadOnly(h.journal.root, false) }
+    let rejected = try XCTUnwrap(h.cancel("a"))
+    XCTAssertEqual(rejected.code, "E_STORAGE")
+    XCTAssertTrue(rejected.message.contains("'a'"), rejected.message)
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertEqual(h.store.load("a")?.state, .running)
+    XCTAssertNil(h.entry("a")?.settledEventId)
+    XCTAssertFalse(task.cancelled, "the work keeps running")
+    XCTAssertEqual(h.sink.states.count, states)
+    XCTAssertEqual(h.sink.progress.count, progress)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    XCTAssertTrue(h.coordinator.pendingJournal.isEmpty)
+    XCTAssertEqual(h.timers.count, timers, "no journal retry is scheduled")
+    XCTAssertTrue(h.unacknowledged().isEmpty)
+  }
+
+  func testCancelAgainAfterTheJournalIsWritableSettlesWithOneRecord() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = onlyTask()
+    setReadOnly(h.journal.root, true)
+    XCTAssertEqual(h.cancel("a")?.code, "E_STORAGE")
+    setReadOnly(h.journal.root, false)
+    XCTAssertNil(h.cancel("a"))
+    XCTAssertTrue(task.cancelled)
+    XCTAssertEqual(h.entry("a")?.state, .cancelled)
+    XCTAssertEqual(h.sink.settled.count, 1)
+    let records = h.journal.unacknowledged()
+    XCTAssertEqual(records.count, 1, "one record")
+    XCTAssertEqual(records.first?.kind, .cancelled)
+    XCTAssertEqual(records.first?.eventId, h.sink.settled.first?["eventId"] as? String)
+    XCTAssertTrue(h.coordinator.pendingJournal.isEmpty)
+  }
+
+  func testCancelSettledWhoseDirectoryCannotMoveRejectsStorageAndKeepsAll() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 400)
+    setReadOnly(h.store.root, true)
+    defer { setReadOnly(h.store.root, false) }
+    XCTAssertEqual(h.cancel("a")?.code, "E_STORAGE")
+    XCTAssertEqual(h.row("a")?["state"] as? String, "error")
+    XCTAssertEqual(h.store.load("a")?.state, .error)
+    XCTAssertEqual(h.journal.unacknowledged().count, 1)
+  }
+
+  func testCancelSettledWhoseEventsCannotBeDeletedPutsTheRowBack() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 400)
+    setReadOnly(h.journal.root, true)
+    XCTAssertEqual(h.cancel("a")?.code, "E_STORAGE")
+    XCTAssertEqual(h.row("a")?["state"] as? String, "error")
+    XCTAssertEqual(h.store.load("a")?.state, .error, "the directory is back")
+    XCTAssertEqual(h.journal.unacknowledged().count, 1)
+    setReadOnly(h.journal.root, false)
+    XCTAssertNil(h.cancel("a"))
+    XCTAssertNil(h.row("a"))
+    XCTAssertFalse(FileIO.exists(h.store.dir("a")))
+    XCTAssertTrue(h.journal.unacknowledged().isEmpty)
+    XCTAssertTrue(h.store.setAsideDirectories().isEmpty, "nothing left aside")
+  }
+
   // MARK: - Retry, backoff, expiry
 
   func testTransientSchedulesADelayedTask() throws {
