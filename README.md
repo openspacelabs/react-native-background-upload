@@ -191,6 +191,21 @@ notification. That notification is also the worker's foreground-service
 notification, so a silent request runs as an ordinary background worker and
 the OS may defer or restart it. Reserve it for small payloads.
 
+### Android platform notes
+
+**Headless time limit.** On API 31 and later, a WorkManager run that starts
+from the background usually cannot start its foreground service. The run
+then has JobScheduler's limit of about 10 minutes. A single body (`data`,
+`form`, `file`) that does not finish in that time starts again from byte 0
+at the next run, after a growing backoff. A body that needs more than
+10 minutes headless cannot finish that way. Use `parts` for large bodies:
+accepted parts are kept across runs. iOS has no equal limit.
+
+**Backups.** The queue store (`files/rnbgupload-chunked/`) and the journal
+(`files/rnbgupload-settled/`) hold request headers, including auth tokens,
+and staged bodies. Set `android:allowBackup="false"` in the host app, or
+exclude those two directories in its backup rules.
+
 # Reliable delivery
 
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
