@@ -47,8 +47,9 @@ Added:
   replaces the definition and warns in development.
 - **`mutate(vars, { id? })`**: runs `request(vars)` once, merges the configured
   headers under the descriptor's, validates the descriptor (at most one of
-  `data` / `form` / `file`, none for a bodiless DELETE; `parts` only with `file`; parts must tile the
-  file; no field outside the descriptor shape), defaults `expiresAt` to now +
+  `data` / `form` / `file`, none for a bodiless DELETE; no body on a GET;
+  `parts` only with `file`; parts must tile the file; no field outside the
+  descriptor shape), defaults `expiresAt` to now +
   `lifetimeMs`, and resolves when the entry is durable. `vars` is any
   JSON-serializable object, so generated API request types work as they are;
   `mutate()` rejects vars or `data` that do not serialize (a cycle, a function,
@@ -56,7 +57,7 @@ Added:
   definition whose `request` takes no vars calls `mutate()` with no arguments.
   It resolves after the row and every staged body copy are on disk, so the
   caller may delete its source file then; native failures reject with
-  `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`.
+  `E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`.
 - **Request bodies**: JSON (`data`), multipart (`form`), whole file (`file`),
   and chunked (`file` + `parts`). All under one entry shape and one id.
 - **Delivery rules**: dedupe by event id; the outcomes of one id deliver in
@@ -65,15 +66,16 @@ Added:
   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`;
   a handler that has not settled after 30 s logs a warning. No ordering is
   promised between different ids.
-- **`Meta.deliveries`**: how many times an outcome has reached JS, including
-  boot replays. A handler that keeps throwing sees it grow; the library never
-  gives up on its own, so the app decides a poison policy.
+- **`Meta.deliveries`**: counts deliveries that reached a JS listener: 1 on
+  the first, +1 per replay. A handler that keeps throwing sees it grow; the
+  library never gives up on its own, so the app decides a poison policy.
 - **`RequestRow.nextAttemptAt`**: epoch ms, set while an entry waits out a
   retry backoff. `getRequests()` returns every entry native has not yet
   forgotten, so completed and cancelled rows appear until their ack.
 - **`pause()` / `resume()`** for the whole queue, **`updateHeaders(patch)`** to
   re-auth parked entries, and the **`attempt`** event with one row per HTTP
-  attempt before interpretation.
+  attempt. Its `outcome` is `completed` or `error`; pause, cancel, and
+  supersede emit none.
 
 Removed:
 - `startUpload`, `startChunkedUpload` (native), `cancelUpload`,
