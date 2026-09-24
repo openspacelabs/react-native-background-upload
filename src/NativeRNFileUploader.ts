@@ -16,13 +16,24 @@ export interface Spec extends TurboModule {
   // Android persists the notification config, so a headless WorkManager
   // relaunch (no JS) can read it. Each call replaces the full configuration.
   configure(options: CodegenTypes.UnsafeObject): void;
-  // Persists { id, key, vars, descriptor } and schedules it. Resolves AFTER
-  // the row and every staged body copy are durably on disk (tmp file +
-  // rename), never on the network. The caller may delete its source file
-  // once mutate() resolves. Every failure path rejects with a code:
-  // E_RUNNING, E_FILE_MISSING, E_STORAGE.
+  // Persists { id, key, varsJson, descriptor } and schedules it. varsJson is
+  // JSON.stringify(vars). descriptor.dataJson is JSON.stringify(data) and
+  // replaces data; a bodiless request omits it. Both cross as strings
+  // because React Native on iOS drops object keys whose value is null, so
+  // { status: null } would arrive as {}. Native parses them. dataJson
+  // "null" is the JSON body null, a real body, not an absent one.
   //
-  // Same id, again:
+  // Resolves AFTER the row and every staged body copy are durably on disk
+  // (tmp file + rename), never on the network. Staging copies a `file` body
+  // and form `path` parts, so a large file takes longer. The caller may
+  // delete its source file once mutate() resolves. Every failure path
+  // rejects with a code: E_INVALID, E_RUNNING, E_FILE_MISSING, E_STORAGE.
+  // E_INVALID is malformed input native cannot send: non-http(s) URL, header
+  // names or values the platform HTTP client rejects, a GET with a body,
+  // parts that do not tile the moved file.
+  //
+  // Same id, again. The body is data/form/file/parts, and a different url or
+  // method is a different body.
   // - Same body: resume. New headers, expiresAt and vars replace the stored
   //   ones.
   // - Different body (data/form/file/parts) and the entry is NOT running
@@ -38,15 +49,17 @@ export interface Spec extends TurboModule {
   // The resolved value is the entry's id. The JS layer does not read it.
   enqueue(entry: CodegenTypes.UnsafeObject): Promise<string>;
   // Whole-queue pause. No outcome is produced; live rows move to 'paused'.
+  // A paused entry past expiresAt settles error/expired at resume.
   pause(): Promise<void>;
   resume(): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. Settled
-  // entry: forget now, row and bytes. Unknown id: resolve, no-op.
+  // entry: forget now: row, bytes, and its unacknowledged outcomes. Unknown
+  // id: resolve, no-op.
   cancel(id: string): Promise<void>;
   // Persisted natively. Applies to queued and future entries.
   setWifiOnly(enabled: boolean): Promise<void>;
   // Merges the patch into every entry not yet forgotten and bumps a header
-  // generation. A 401/403 from an attempt issued under an older generation
+  // generation. The patch also replaces same-named headers a part carries. A 401/403 from an attempt issued under an older generation
   // re-issues at once instead of parking. Parking emits one 'state' event per
   // entry.
   updateHeaders(patch: CodegenTypes.UnsafeObject): Promise<void>;
@@ -75,15 +88,20 @@ export interface Spec extends TurboModule {
     bytesSent: number;
     totalBytes: number;
   }>;
-  // One HTTP attempt before interpretation, in the AttemptEvent shape.
-  // Live-only: never journaled, never replayed.
+  // One HTTP attempt, in the AttemptEvent shape. outcome 'completed' is an
+  // accepted response. Any other HTTP response is 'error' with errorKind
+  // 'http'. A transport failure is 'error' with its own errorKind. Pause,
+  // cancel, and supersede emit no attempt event. Live-only: never journaled,
+  // never replayed.
   readonly onAttempt: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
   // The journaled terminal outcome, emitted after the journal write, in the
   // ./delivery SettledEvent shape: { eventId, id, key, vars, at, attempts,
   // requestId?, deliveries, state, bytesSent?, totalBytes?, url, method,
   // partIndex? } plus the outcome fields. eventId is a UUID string native
-  // mints. deliveries is 1 on the first emit and increments on every later
-  // delivery of the same eventId, including boot replays. No ordering
+  // mints. deliveries counts deliveries that reached a JS listener: 1 on the
+  // first, +1 per replay; an outcome journaled while no listener exists
+  // starts at 0 and is not emitted live. When the field is missing, the JS
+  // layer treats it as 1. No ordering
   // guarantee between different ids; the JS layer orders one id's outcomes.
   // ./delivery routes it to the definition's handlers.
   readonly onSettled: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;

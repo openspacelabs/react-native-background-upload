@@ -85,7 +85,8 @@ export type RequestDescriptor = {
   headers?: Record<string, string>;
   /**
    * JSON body. Any JSON-serializable value. At most one of `data`, `form`,
-   * `file`. None is a bodiless request.
+   * `file`. None is a bodiless request. `null` is the JSON body `null`, not
+   * an absent body. A GET takes no body.
    */
   data?: unknown;
   /** multipart/form-data body. */
@@ -126,18 +127,25 @@ export type OutcomeError = {
 
 /**
  * Handler context. `at` is the native outcome time. `requestId` is the last
- * attempt's X-Request-Id. `deliveries` counts how many times this outcome has
- * reached JS: 1 on the first delivery, more after a handler rejection, an app
- * death before the ack, or a boot replay. A handler that keeps throwing sees
- * it grow. The library never gives up on its own, so the app decides a poison
+ * attempt's X-Request-Id. A handler that keeps throwing sees `deliveries`
+ * grow. The library never gives up on its own, so the app decides a poison
  * policy from this number.
  */
 export type Meta = {
   id: string;
   key: string;
   at: number;
+  /**
+   * Attempts in the current generation. A same-id `mutate()` that reopens
+   * the entry starts a new generation.
+   */
   attempts: number;
   requestId?: string;
+  /**
+   * Counts deliveries that reached a JS listener: 1 on the first, +1 per
+   * replay. An outcome journaled while no listener exists starts at 0 and is
+   * not emitted live, so its first delivery, at the boot replay, is 1.
+   */
   deliveries: number;
 };
 
@@ -167,6 +175,10 @@ export type RequestRow = {
   state: RequestState;
   bytesSent: number;
   totalBytes: number;
+  /**
+   * Attempts in the current generation. A same-id `mutate()` that reopens
+   * the entry starts a new generation.
+   */
   attempts: number;
   updatedAt: number;
   /** Epoch ms. Set while the entry waits out a retry backoff. */
@@ -186,7 +198,13 @@ export type ProgressEvent = {
   totalBytes: number;
 };
 
-/** One HTTP attempt, before the library interprets it. Response body is capped at 4 KB. */
+/**
+ * One HTTP attempt, before the library settles the entry. `completed` is an
+ * accepted response: 2xx, or a matching `accept` rule. Any other HTTP
+ * response is `error` with `errorKind: 'http'`. A transport failure is
+ * `error` with its own `errorKind`. Pause, cancel, and supersede emit no
+ * attempt event. The response body is capped at 4 KB.
+ */
 export type AttemptEvent = {
   id: string;
   key: string;
@@ -195,14 +213,13 @@ export type AttemptEvent = {
   url: string;
   method: Method;
   partIndex?: number;
-  outcome: 'completed' | 'error' | 'cancelled';
+  outcome: 'completed' | 'error';
   httpCode?: number;
   responseBody?: string;
   responseBodyTruncated?: boolean;
   responseHeaders?: Record<string, string>;
   errorKind?: ErrorKind;
   errorMessage?: string;
-  cancelReason?: CancelReason;
   /** Native stamp, epoch ms. */
   at: number;
 };
@@ -300,8 +317,11 @@ export type ConfigureOptions = {
   /** Called at `mutate()`. The descriptor's headers merge over the result. */
   headers?: () => Record<string, string>;
   /**
-   * Default 10 s. How long `mutate()` waits for the native write before it
-   * rejects. A watchdog for a native bug, not a tuning knob.
+   * Default 10 s. How long `mutate()` waits for native enqueue before it
+   * rejects. Enqueue includes the time to stage a copy of a `file` body and
+   * of form `path` parts, so a large file takes longer. A timeout means
+   * native did not answer, not that the request failed. A watchdog for a
+   * native bug, not a tuning knob.
    */
   enqueueTimeoutMs?: number;
   android?: Partial<AndroidNotificationConfig>;

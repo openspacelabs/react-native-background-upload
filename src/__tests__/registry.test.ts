@@ -81,7 +81,7 @@ describe('define', () => {
 });
 
 describe('mutate', () => {
-  it('runs request(vars) exactly once and enqueues { id, key, vars, descriptor }', async () => {
+  it('runs request(vars) exactly once and enqueues { id, key, varsJson, descriptor }', async () => {
     const { define, enqueue, lastEntry } = setup();
     const request = jest.fn(jsonPost);
     const create = define({ key: 'item.create', request });
@@ -92,10 +92,46 @@ describe('mutate', () => {
     expect(lastEntry()).toMatchObject({
       id: 'local-7',
       key: 'item.create',
-      vars: { n: 7 },
-      descriptor: { url: 'https://example.com/items/7', data: { n: 7 } },
+      varsJson: '{"n":7}',
+      descriptor: { url: 'https://example.com/items/7', dataJson: '{"n":7}' },
     });
+    expect(lastEntry()).not.toHaveProperty('vars');
+    expect(lastEntry().descriptor).not.toHaveProperty('data');
     expect(result).toEqual({ id: 'local-7' });
+  });
+
+  it('sends vars and data as JSON strings, so null-valued keys survive the bridge', async () => {
+    const { define, lastEntry } = setup();
+    const patch = define({
+      key: 'k',
+      request: (vars: { status: string | null }) => ({
+        url: 'https://x',
+        method: 'PATCH',
+        data: { status: vars.status, tags: [null] },
+      }),
+    });
+    await patch.mutate({ status: null });
+    expect(lastEntry().varsJson).toBe('{"status":null}');
+    expect(lastEntry().descriptor.dataJson).toBe(
+      '{"status":null,"tags":[null]}',
+    );
+  });
+
+  it('sends data: null as the JSON body "null" and omits dataJson without a body', async () => {
+    const { define, lastEntry } = setup();
+    const withNull = define({
+      key: 'null-body',
+      request: (_vars: null) => ({ url: 'https://x', data: null }),
+    });
+    await withNull.mutate();
+    expect(lastEntry().descriptor.dataJson).toBe('null');
+    const bodiless = define({
+      key: 'bodiless',
+      request: (_vars: null) => ({ url: 'https://x', method: 'DELETE' }),
+    });
+    await bodiless.mutate();
+    expect(lastEntry().descriptor).not.toHaveProperty('dataJson');
+    expect(lastEntry().descriptor).not.toHaveProperty('data');
   });
 
   it('stores null vars for a mutate() with no arguments', async () => {
@@ -104,9 +140,9 @@ describe('mutate', () => {
     const ping = define({ key: 'ping', request });
     await ping.mutate();
     expect(request).toHaveBeenCalledWith(null);
-    expect(lastEntry().vars).toBeNull();
+    expect(lastEntry().varsJson).toBe('null');
     await ping.mutate(undefined, { id: 'fixed' });
-    expect(lastEntry()).toMatchObject({ id: 'fixed', vars: null });
+    expect(lastEntry()).toMatchObject({ id: 'fixed', varsJson: 'null' });
   });
 
   it('resolves with the entry id, not the id native returns', async () => {
@@ -245,7 +281,7 @@ describe('mutate', () => {
       );
     });
 
-    it('accepts a class instance and passes it through unchanged', async () => {
+    it('accepts a class instance and sends its fields without its methods', async () => {
       class Point {
         constructor(public x: number, public y: number) {}
         norm() {
@@ -255,15 +291,14 @@ describe('mutate', () => {
       const { send, lastEntry } = anyVars();
       const point = new Point(1, 2);
       await expect(send.mutate(point)).resolves.toBeDefined();
-      // Only validated. Native stringifies, which drops the method.
-      expect(lastEntry().vars).toBe(point);
+      expect(lastEntry().varsJson).toBe('{"x":1,"y":2}');
     });
 
     it('accepts nested undefined fields and an array', async () => {
       const { send, lastEntry } = anyVars();
       const vars = { title: undefined, ids: ['a'] as readonly string[] };
       await expect(send.mutate(vars)).resolves.toBeDefined();
-      expect(lastEntry().vars).toBe(vars);
+      expect(lastEntry().varsJson).toBe('{"ids":["a"]}');
       await expect(send.mutate([1, 2])).resolves.toBeDefined();
     });
   });
@@ -325,11 +360,48 @@ describe('mutate', () => {
       ).rejects.toThrow(/data is not JSON-serializable/);
     });
 
-    it('passes data with nested undefined fields through unchanged', async () => {
+    it('drops nested undefined fields from data, as JSON.stringify does', async () => {
       const data = { title: undefined, value: { any: 1 } };
       const { promise, enqueue } = mutateWith({ url: 'https://x', data });
       await expect(promise).resolves.toBeDefined();
-      expect(enqueue.mock.calls[0][0].descriptor.data).toBe(data);
+      expect(enqueue.mock.calls[0][0].descriptor.dataJson).toBe(
+        '{"value":{"any":1}}',
+      );
+    });
+
+    it('rejects a GET with a body and accepts a GET without one', async () => {
+      await expect(
+        mutateWith({ url: 'https://x', method: 'GET', data: {} }).promise,
+      ).rejects.toThrow('mutate: a GET request cannot have a body; got data');
+      await expect(
+        mutateWith({ url: 'https://x', method: 'GET', file: '/f' }).promise,
+      ).rejects.toThrow(/GET request cannot have a body; got file/);
+      await expect(
+        mutateWith({
+          url: 'https://x',
+          method: 'GET',
+          form: [{ name: 'a', contentType: 'text/plain', string: 'b' }],
+        }).promise,
+      ).rejects.toThrow(/GET request cannot have a body; got form/);
+      const { promise, enqueue } = mutateWith({
+        url: 'https://x',
+        method: 'GET',
+      });
+      await expect(promise).resolves.toBeDefined();
+      expect(enqueue).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts a DELETE with a body', async () => {
+      const { promise, enqueue } = mutateWith({
+        url: 'https://x',
+        method: 'DELETE',
+        data: { ids: ['a'] },
+      });
+      await expect(promise).resolves.toBeDefined();
+      expect(enqueue.mock.calls[0][0].descriptor).toMatchObject({
+        method: 'DELETE',
+        dataJson: '{"ids":["a"]}',
+      });
     });
 
     it('rejects a form part without exactly one of string, path', async () => {
@@ -704,7 +776,7 @@ describe('enqueue watchdog', () => {
     expect(warn).not.toHaveBeenCalled();
     await jest.advanceTimersByTimeAsync(1);
     expect(await outcome).toMatch(
-      /native enqueue for "item.create" \(id [^)]+\) did not settle within 10000 ms/,
+      /native enqueue for "item.create" \(id [^)]+\) did not settle within 10000 ms\. Native did not answer; the entry may still be persisted\.$/,
     );
     expect(warn).toHaveBeenCalledTimes(1);
   });

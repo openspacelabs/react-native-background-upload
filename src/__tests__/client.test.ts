@@ -507,10 +507,10 @@ describe('end to end', () => {
     expect(native.enqueue).toHaveBeenCalledWith({
       id: 'local-3',
       key: 'item.create',
-      vars: { n: 3 },
+      varsJson: '{"n":3}',
       descriptor: {
         url: 'https://x/3',
-        data: { n: 3 },
+        dataJson: '{"n":3}',
         headers: { Authorization: 'Bearer t' },
         expiresAt: expect.any(Number),
       },

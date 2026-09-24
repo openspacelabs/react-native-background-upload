@@ -13,9 +13,11 @@ import type {
 
 export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 /**
- * How long mutate() waits for native enqueue() before it rejects. The native
- * write is one synchronous disk write, so this is a watchdog for a native
- * bug (a path that never settles), not a tuning knob.
+ * How long mutate() waits for native enqueue() before it rejects. Enqueue
+ * includes the time to stage a copy of a `file` body and of form `path`
+ * parts, so a large file takes longer. A timeout means native did not
+ * answer, not that the request failed. This is a watchdog for a native path
+ * that never settles, not a tuning knob.
  */
 export const DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000;
 /**
@@ -77,12 +79,24 @@ export const withTimeout = <T>(
     );
   });
 
-/** What crosses to native `enqueue()`. */
+/**
+ * The descriptor as it crosses to native. `dataJson` is `JSON.stringify(data)`
+ * and replaces `data`. It is absent for a bodiless request.
+ */
+export type NativeDescriptor = Omit<RequestDescriptor, 'data'> & {
+  dataJson?: string;
+};
+
+/**
+ * What crosses to native `enqueue()`. `vars` and `data` cross as JSON
+ * strings, because React Native on iOS drops object keys whose value is
+ * null. Native parses them.
+ */
 export type EnqueueEntry = {
   id: string;
   key: string;
-  vars: Vars;
-  descriptor: RequestDescriptor;
+  varsJson: string;
+  descriptor: NativeDescriptor;
 };
 
 // The registry stores definitions of every shape under one map. The generic
@@ -162,12 +176,15 @@ const serializeVars = (vars: unknown): string => {
   return serialized;
 };
 
-const validateData = (data: unknown): void => {
-  if (stringifyForNative(data, 'data') === undefined) {
+/** The JSON that native sends as the body. `null` is the JSON body `null`. */
+const serializeData = (data: unknown): string => {
+  const serialized = stringifyForNative(data, 'data');
+  if (serialized === undefined) {
     throw new Error(
       `mutate: data must be a JSON-serializable value, got ${typeof data}`,
     );
   }
+  return serialized;
 };
 
 /** UTF-8 length of a string that JSON.stringify produced. */
@@ -397,8 +414,9 @@ const mergeHeaders = (
  * Rejects a malformed descriptor before it crosses the bridge. Then native
  * never persists an entry that cannot run. Nested objects are checked for
  * unknown keys too, so a misspelled field cannot be dropped in silence.
+ * Returns the descriptor in its bridge form, with `data` as `dataJson`.
  */
-export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
+export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
   if (!isPlainObject(descriptor)) {
     throw new Error('mutate: request() must return a descriptor object');
   }
@@ -407,7 +425,8 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
   const kinds = (['data', 'form', 'file'] as const).filter(
     (kind) => d[kind] !== undefined,
   );
-  // No body is valid: a DELETE, or a POST that carries its meaning in the URL.
+  // No body is valid: a GET, a DELETE, or a POST that carries its meaning in
+  // the URL.
   if (kinds.length > 1) {
     throw new Error(
       `mutate: the descriptor must set at most one of data, form, file; got ${kinds.join(
@@ -432,14 +451,17 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
       )}`,
     );
   }
+  // A DELETE may carry a body, because some APIs take one.
+  if (d.method === 'GET' && kinds.length > 0) {
+    throw new Error(
+      `mutate: a GET request cannot have a body; got ${kinds.join(', ')}`,
+    );
+  }
   if (d.headers !== undefined && !isPlainObject(d.headers)) {
     throw new Error('mutate: headers must be a plain object when present');
   }
   if (d.file !== undefined && (typeof d.file !== 'string' || !d.file)) {
     throw new Error('mutate: file must be a non-empty path');
-  }
-  if (d.data !== undefined) {
-    validateData(d.data);
   }
   if (d.form !== undefined) {
     validateForm(d.form);
@@ -464,7 +486,8 @@ export const validateDescriptor = (descriptor: unknown): RequestDescriptor => {
       `mutate: expiresAt must be a finite epoch-ms timestamp, got ${d.expiresAt}`,
     );
   }
-  return d;
+  const { data, ...rest } = d;
+  return data === undefined ? rest : { ...rest, dataJson: serializeData(data) };
 };
 
 /**
@@ -509,7 +532,8 @@ export const createRegistry = ({
       // A no-vars definition calls mutate() with nothing; native stores null.
       const vars = (input === undefined ? null : input) as V;
       const settings = getSettings();
-      const bytes = utf8ByteLength(serializeVars(vars));
+      const varsJson = serializeVars(vars);
+      const bytes = utf8ByteLength(varsJson);
       if (bytes > settings.maxVarsBytes) {
         throw new Error(
           `mutate: vars for "${key}" is ${bytes} bytes; the limit is ${settings.maxVarsBytes} (configure().maxVarsBytes)`,
@@ -529,23 +553,25 @@ export const createRegistry = ({
       const entry: EnqueueEntry = {
         id: options?.id ?? uuidV4(),
         key,
-        vars,
+        varsJson,
         descriptor: {
           ...descriptor,
           headers: mergeHeaders(provided, descriptor.headers),
           expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
         },
       };
-      // Watchdog. Native enqueue() is one synchronous write, so a promise that
-      // never settles is a native bug. Turn it into a rejection with a name,
-      // and let delivery for this id proceed instead of waiting forever. If
-      // native did persist the entry, its outcome still reaches the handlers,
-      // and a same-id retry resumes instead of duplicating.
+      // Watchdog. Turn a native enqueue() that never settles into a rejection
+      // with a name, and let delivery for this id proceed instead of waiting
+      // forever. Enqueue includes the time to stage a copy of a `file` body
+      // and of form `path` parts, so a large file takes longer. A timeout
+      // means native did not answer, not that the request failed. If native
+      // did persist the entry, its outcome still reaches the handlers, and a
+      // same-id retry resumes instead of duplicating.
       const pending = withTimeout(
         native.enqueue(entry),
         settings.enqueueTimeoutMs,
         () => {
-          const message = `mutate: native enqueue for "${key}" (id ${entry.id}) did not settle within ${settings.enqueueTimeoutMs} ms`;
+          const message = `mutate: native enqueue for "${key}" (id ${entry.id}) did not settle within ${settings.enqueueTimeoutMs} ms. Native did not answer; the entry may still be persisted.`;
           warn(message);
           return new Error(message);
         },

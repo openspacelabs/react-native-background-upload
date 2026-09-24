@@ -104,8 +104,9 @@ outcome at the next launch.
 
 ## The request descriptor
 
-`request(vars)` returns a plain object. Set at most one body kind. A DELETE, or a
-POST whose meaning is in the URL, sets none.
+`request(vars)` returns a plain object. Set at most one body kind. A GET sets
+none, and `mutate()` rejects a GET with a body. A DELETE, or a POST whose
+meaning is in the URL, may also set none.
 A field outside this table makes `mutate()` reject and name the field, because
 TypeScript does not flag a misspelled key on an inferred arrow return.
 
@@ -114,7 +115,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `url` | Required unless `parts` is set. |
 | `method` | `POST` (default), `PUT`, `PATCH`, `DELETE`, `GET`. With `parts` it applies to every part. |
 | `headers` | Merged over `configure().headers()`, names matched without regard to case. Every chunked part inherits the result. |
-| `data` | JSON body. Any JSON-serializable value. |
+| `data` | JSON body. Any JSON-serializable value. `null` sends the JSON body `null`; omit `data` for no body. |
 | `form` | `multipart/form-data`: `[{ name, contentType, string }]` or `[{ name, contentType, path, fileName? }]`. File parts are copied. |
 | `file` | Whole file body. Copied. Moved when `parts` is set. |
 | `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
@@ -122,6 +123,10 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
 | `retry` | Per-request override of the `configure()` retry defaults. |
 | `android` | `{ noNotification?: boolean }`. See Silent uploads. |
+
+`vars` and `data` cross to native as JSON strings, and native parses them.
+React Native on iOS drops object keys whose value is `null`, so a string is
+the only form in which `{ status: null }` arrives intact.
 
 ### Chunked uploads
 
@@ -162,7 +167,9 @@ const captureFile = uploads.define({
 are deleted after a `completed` outcome is acknowledged, or on `cancel()`.
 Nothing else deletes them.
 
-**Same id, again.** `mutate()` with an id that exists:
+**Same id, again.** The body is `data`, `form`, `file`, or `parts`, and a
+different `url` or `method` counts as a different body. `mutate()` with an
+id that exists:
 
 - Same body: resume. New headers, `expiresAt`, and `vars` replace the stored
   ones.
@@ -189,18 +196,25 @@ the OS may defer or restart it. Reserve it for small payloads.
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
    attempt. `mutate()` resolves after the row and every staged body copy are
    durably on disk (temp file plus rename), so the caller may delete its
-   source file then. A native failure rejects with a code: `E_RUNNING`,
-   `E_FILE_MISSING`, or `E_STORAGE`.
+   source file then. A native failure rejects with a code: `E_INVALID`,
+   `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`. `E_INVALID` is malformed
+   input native cannot send: a non-http(s) URL, header names or values the
+   platform HTTP client rejects, a GET with a body, or parts that do not
+   tile the moved file.
 2. **Journal before emit, ack after the handler.** Every terminal outcome is
    journaled natively, then delivered. The library acknowledges after the
    handler's promise resolves. A rejection, or app death before the ack,
    redelivers at the next launch. A handler that has not settled after 30 s
-   gets a console warning and keeps waiting. `Meta.deliveries` counts the
-   deliveries of one outcome, including boot replays, so a handler that
-   keeps throwing sees it grow. The library never gives up on its own; the
-   app decides a poison policy from that number.
-3. **One outcome per settle cycle.** `pause()` produces none. A same-id
-   `mutate()` on a settled entry reopens it, and it settles once more.
+   gets a console warning and keeps waiting. `Meta.deliveries` counts
+   deliveries that reached a JS listener: 1 on the first, +1 per replay. An
+   outcome journaled while no listener exists starts at 0 and is not emitted
+   live. A handler that keeps throwing sees the number grow. The library
+   never gives up on its own; the app decides a poison policy from that
+   number.
+3. **One outcome per settle cycle.** `pause()` produces none. A paused entry
+   past `expiresAt` settles `error` with `errorKind: 'expired'` at
+   `resume()`. A same-id `mutate()` on a settled entry reopens it, and it
+   settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
@@ -272,8 +286,11 @@ is replaced, with a warning in development. A `cancelled` outcome calls no
 handler.
 
 `Meta` is `{ id, key, at, attempts, requestId?, deliveries }`; `at` is the
-native outcome time. `deliveries` is 1 on the first delivery of an outcome and
-grows by one on every redelivery, including a boot replay.
+native outcome time. `attempts` counts attempts in the current generation; a
+same-id `mutate()` that reopens the entry starts a new one. `deliveries`
+counts deliveries that reached a JS listener: 1 on the first, +1 per replay.
+An outcome journaled while no listener exists starts at 0 and is not emitted
+live, so its first delivery, at the boot replay, is 1.
 
 ### `mutate(vars, { id? }): Promise<{ id }>`
 
@@ -281,8 +298,9 @@ Runs `request(vars)` once, merges `configure().headers()` under the
 descriptor's headers, validates the descriptor, defaults `expiresAt`, and
 persists the entry. Resolves with the id after the row and every staged body
 copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
-field, a missing file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a
-running entry with a different body (`E_RUNNING`), or `vars` over
+field, a GET with a body, input native cannot send (`E_INVALID`), a missing
+file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running entry
+with a different body (`E_RUNNING`), or `vars` over
 `maxVarsBytes` (1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a definition
 whose `request` takes no vars, call `mutate()` with no arguments; native stores
 `null`.
@@ -298,23 +316,26 @@ outcomes. A second call updates the settings and does not replay again.
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
-| `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when the native write has not settled by then. A watchdog for a native bug, not a tuning knob. |
+| `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when native enqueue has not settled by then. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, so a large file takes longer. A timeout means native did not answer, not that the request failed. A watchdog for a native bug, not a tuning knob. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(): Promise<void>` and `resume(): Promise<void>`
-Whole-queue pause. No outcome is produced; live rows show `paused`.
+Whole-queue pause. No outcome is produced; live rows show `paused`. A paused
+entry past `expiresAt` settles `error` with `errorKind: 'expired'` at
+`resume()`.
 
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
-its ack. A settled entry is forgotten now, row and bytes. An unknown id
-resolves and does nothing.
+its ack. A settled entry is forgotten now: row, bytes, and its
+unacknowledged outcomes. An unknown id resolves and does nothing.
 
 ### `setWifiOnly(enabled): Promise<void>`
 Persisted natively. Applies to queued and future entries.
 
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and
-resumes the entries parked on `awaiting-auth`. This is how a fresh token
+resumes the entries parked on `awaiting-auth`. The patch also replaces
+same-named headers a part carries. This is how a fresh token
 reaches requests that stalled on 401. Each call bumps a header generation: a
 401 or 403 from an attempt issued under an older generation re-issues at once
 instead of parking. Parking emits one `state` event per entry.
@@ -356,7 +377,7 @@ Fires when the Android progress notification is pressed. No event data.
 | --- | --- |
 | `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key has no definition. A consumer's reducer is one upsert. |
 | `progress` | `{ id, bytesSent, totalBytes }`, byte-weighted across a chunked upload's parts. |
-| `attempt` | One HTTP attempt before interpretation: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, cancelReason?, at }`. Live-only; never journaled or replayed. |
+| `attempt` | One HTTP attempt: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, at }`. `outcome` is `completed` for an accepted response (2xx or a matching `accept` rule). Any other HTTP response is `error` with `errorKind: 'http'`; a transport failure is `error` with its own `errorKind`. Pause, cancel, and supersede emit no attempt event. Live-only; never journaled or replayed. |
 
 Terminal outcomes do not appear here. They go to the definition's handlers.
 

@@ -27,9 +27,9 @@ export type SettledEvent = {
   attempts: number;
   requestId?: string;
   /**
-   * Native sets it to 1 on the first emit of an outcome and increments it on
-   * every later delivery of the same eventId, including boot replays. When
-   * native omits it, the JS layer treats it as 1.
+   * Counts deliveries that reached a JS listener: 1 on the first, +1 per
+   * replay. An outcome journaled while no listener exists starts at 0 and is
+   * not emitted live. When native omits it, the JS layer treats it as 1.
    */
   deliveries?: number;
   /** The entry's real state, for the unhandled-key row. */

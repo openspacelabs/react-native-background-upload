@@ -270,3 +270,10 @@ void nested.mutate({ inner: { b: 1 }, ids: ['x'] });
 // The client's define is the same overloaded signature.
 declare const define: typeof client.define;
 expectType<typeof client.define>(define);
+
+// An attempt is completed or error. Pause, cancel and supersede emit none.
+client.addListener('attempt', (e) => {
+  assertEqual<typeof e.outcome, 'completed' | 'error'>(true);
+  // @ts-expect-error an attempt event carries no cancelReason
+  void e.cancelReason;
+});
