@@ -1,721 +1,329 @@
 import Foundation
 
-/// Runs chunked uploads against the background sessions. It keeps the sliding
-/// window of part tasks enqueued with the daemon. It evaluates the outcome of
-/// each part. After a relaunch, it reconciles the durable [ChunkedManifest]
-/// with the tasks that the daemon still holds.
+/// Runs chunked entries against the background sessions: keeps the sliding
+/// window of part tasks enqueued with the daemon, evaluates each part's
+/// outcome, and after a relaunch rebuilds the window from the tasks the
+/// daemon still holds.
 ///
-/// Every state transition occurs on one serial queue. The queue enforces the
-/// invariants that the design marks binding: at most [ChunkedEngine.window]
-/// part tasks are enqueued per upload, and never two for the same part index.
-/// `inFlight` maps each enqueued part to the task key that owns it. Only
-/// refill, on this queue, creates tasks.
+/// Every call runs on the QueueCoordinator's serial queue, which enforces the
+/// binding invariants: at most ChunkedEngine.window part tasks per entry, and
+/// never two for one part index. `inFlight` maps each enqueued part to the
+/// key of the one task that owns it. Only enqueuePart creates part tasks.
+///
+/// The entry (QueueEntry) is the durable truth: parts, accepted flags,
+/// incarnation. Terminals go through QueueCoordinator.settle.
 final class ChunkedCoordinator {
+  struct LiveTask {
+    let task: UploadTask
+    let part: Int
+    let incarnation: String?
+  }
 
-  // The singleton that owns the background sessions. It outlives this object.
-  // Both live for the whole process.
-  private unowned let uploader: RNBackgroundUpload
-
-  private let queue = DispatchQueue(label: "ai.openspace.rnbgupload.chunked")
-
-  // partIndex -> the TaskMap key of the one task that may be in flight for it.
-  // The key lets us tell a superseded task's late completion (possible around
-  // a relaunch reconcile) apart from the live task's completion.
+  private unowned let q: QueueCoordinator
+  // id -> part index -> the task key that owns it.
   private var inFlight: [String: [Int: String]] = [:]
-  // The uploads whose in-flight set we rebuild from the daemon now. Refill is
-  // blocked until the rebuild lands. Thus a stale snapshot can never
-  // double-enqueue. The token makes overlapping reconciles safe: only the
-  // latest reconcile may apply its snapshot. An earlier snapshot could miss
-  // tasks enqueued after it was taken. To apply it would re-enqueue their
-  // part indexes.
-  private var reconcileToken: [String: UUID] = [:]
-  private var cooldownUntil: [String: [Int: Double]] = [:] // epoch ms
-  private var transientAttempts: [String: [Int: Int]] = [:]
-  private var expiryArmed: Set<String> = []
-  // The in-flight bytes per part index. They feed the byte-weighted
-  // aggregate progress.
+  // id -> part index -> bytes sent by its live task. Feeds the byte-weighted
+  // progress.
   private var partSent: [String: [Int: Int64]] = [:]
-  // A cache of the stored manifests, refreshed on every load. The progress
-  // path reads it. Thus didSendBodyData never touches the disk.
-  private var manifests: [String: ChunkedManifest] = [:]
+  // id -> part index -> when its delayed task begins (epoch ms), until it
+  // begins. When every part in the window waits, the row shows the earliest
+  // as nextAttemptAt.
+  private var partBeginAt: [String: [Int: Double]] = [:]
 
-  private static let progressThrottle: TimeInterval = 0.5 // seconds, per upload
-  private let progressLock = NSLock()
-  private var lastProgressAt: [String: TimeInterval] = [:]
-
-  init(uploader: RNBackgroundUpload) {
-    self.uploader = uploader
+  init(_ coordinator: QueueCoordinator) {
+    q = coordinator
   }
 
-  private func nowMs() -> Double { Date().timeIntervalSince1970 * 1000 }
+  // MARK: - Called by QueueCoordinator
 
-  // MARK: - Entry points (module methods)
+  /// queued -> running, then fill the window.
+  func start(_ id: String) {
+    guard var e = q.index.entry(id), e.isChunked, e.state == .queued || e.state == .running,
+          !q.settings.paused else { return }
+    if e.state == .queued {
+      e.state = .running
+      e.nextAttemptAt = nil
+      q.commit(e)
+    }
+    refill(id)
+  }
 
-  /// Starts, or resumes, a chunked upload. The durable manifest makes the call
-  /// idempotent. A first call takes ownership of the source file (an O(1)
-  /// rename into the library's directory) and saves the manifest BEFORE any
-  /// task is enqueued. A new call with the same id reconciles instead. The
-  /// same parts resume: the stored headers are replaced, and accepted parts
-  /// are skipped. Different parts recreate the upload, per the design's rule
-  /// (see ChunkedManifest.reconciled). Crash recovery, resume after a stop,
-  /// and resume with fresh auth are all this same call.
-  ///
-  /// Every rejection-type validation runs BEFORE the source is consumed. The
-  /// parse throws first, and a reconcile never touches the source (`path` is
-  /// ignored once a manifest exists). One rejection is possible after the
-  /// move: the manifest save can fail. That leaves the blob adoptable. A
-  /// retry with the same id finds the blob at the blob path and proceeds (see
-  /// takeOwnership).
-  func startUpload(_ options: [String: Any],
-                   resolve: @escaping (String) -> Void,
-                   reject: @escaping (String) -> Void) {
-    queue.async {
-      do {
-        let incoming = try ChunkedManifest.parse(options, createdAt: self.nowMs())
-        let id = incoming.id
-        let manifest: ChunkedManifest
-        if let existing = ChunkedStore.load(id) {
-          // "Running" per the design's recreate rule: not stalled (no
-          // journaled terminal error or cancel that awaits this resume) and
-          // not past its deadline. Everything else rejects a different parts
-          // array. That includes part tasks live with the daemon, and
-          // finished-but-unacked.
-          let running = !existing.stalled && !existing.isExpired(self.nowMs())
-          manifest = try existing.reconciled(
-            with: incoming, running: running, blobSize: ChunkedStore.blobSize(id))
-          if manifest.incarnation != existing.incarnation {
-            // This is a recreate. The in-flight byte counts belong to the
-            // replaced parts. reconcileLocked below cancels the old
-            // incarnation's tasks, and does not adopt them. enqueuePart
-            // sweeps its temp files.
-            self.partSent[id] = nil
-          }
-        } else {
-          guard let path = options["path"] as? String else {
-            throw ChunkedManifest.ParseError(message: "Missing 'path'")
-          }
-          try self.takeOwnership(path: path, id: id)
-          // The same rule as recreate, and as Android's validatedForCreate:
-          // the parts must tile [0, blob size) exactly. A partial or
-          // overlapping cover would silently upload wrong bytes. This throws
-          // BEFORE the manifest is saved and before anything is enqueued.
-          // Thus the moved blob stays adoptable by a corrected retry with the
-          // same id (see takeOwnership).
-          let blobSize = ChunkedStore.blobSize(id)
-          guard ChunkedManifest.tilesExactly(incoming.parts, size: blobSize) else {
-            throw ChunkedManifest.ParseError(
-              message: "chunked upload '\(id)' parts must tile exactly [0, \(blobSize))")
-          }
-          manifest = incoming
+  /// Forgets the window. The caller cancels the tasks.
+  func stop(_ id: String) {
+    inFlight[id] = nil
+    partSent[id] = nil
+    partBeginAt[id] = nil
+  }
+
+  /// Relaunch: adopt the daemon's live part tasks of the current
+  /// incarnation, one per part index. Cancel the rest (a replaced plan, an
+  /// accepted part, a duplicate: concurrent PUTs of one partNum are unsafe on
+  /// the server). Then refill.
+  func reconcile(_ id: String, tasks: [LiveTask]) {
+    guard let e = q.index.entry(id) else { return }
+    var live: [Int: String] = [:]
+    for t in tasks {
+      let keep = t.incarnation == e.incarnation && e.parts.indices.contains(t.part)
+        && !e.parts[t.part].accepted && live[t.part] == nil
+      if keep {
+        live[t.part] = t.task.key
+        q.liveTasks[t.task.key] = (id, t.task)
+        if let begin = t.task.beginAt.map({ $0.timeIntervalSince1970 * 1000 }), begin > q.now() {
+          partBeginAt[id, default: [:]][t.part] = begin
         }
-        try ChunkedStore.save(manifest)
-        self.manifests[id] = manifest
-        // A fresh call gets a fresh retry budget. The persisted per-part
-        // rejection counts reset in the parts rebuild above (reconciled or
-        // parse).
-        self.transientAttempts[id] = nil
-        self.cooldownUntil[id] = nil
-        self.reconcileLocked(id, resumedByStart: true)
-        resolve(id)
-      } catch {
-        reject(error.localizedDescription)
+      } else {
+        q.taskMap.setPurpose(.superseded, forKey: t.task.key, id: id)
+        t.task.cancel()
       }
     }
+    inFlight[id] = live
+    // Part files of accepted parts with no live task are orphans.
+    for i in e.parts.indices where e.parts[i].accepted && live[i] == nil {
+      q.store.removePartFile(id, i)
+    }
+    start(id)
+    updateWait(id)
   }
 
-  /// Rebuilds every stored upload's in-flight set from the daemon, and then
-  /// refills. Called when the sessions are created or recreated: an app
-  /// relaunch, a JS reload, or the background-wake path through
-  /// `RNBackgroundUpload.shared`.
-  func reconcileAll() {
-    // Claim the system's background completion handlers BEFORE the reconcile
-    // is queued. After a relaunch, the replayed didCompleteWithError callbacks
-    // run unowned and never refill. Thus this chain is the only refill.
-    // Nothing else stops urlSessionDidFinishEvents from handing the system
-    // its handler, and the app its suspension, before one new part task is
-    // enqueued. The risk is largest exactly when every enqueued part finished
-    // while the app was dead: zero daemon tasks left, no future wake, and a
-    // silent stall. The claim provably precedes any drain: a relaunch reaches
-    // this point inside the init of `shared`, and the AppDelegate hook
-    // finishes that init before it stores the handler.
-    RNBackgroundUpload.deferBackgroundCompletionHandlers()
-    queue.async {
-      let group = DispatchGroup()
-      for manifest in ChunkedStore.all() {
-        self.manifests[manifest.id] = manifest
-        group.enter()
-        self.reconcileLocked(manifest.id, resumedByStart: false) { group.leave() }
+  // MARK: - Delegate hooks
+
+  func partCompleted(id: String, part: Int, incarnation: String?, key: String, meta: TaskMap.Meta?,
+                     completion c: TaskCompletion) {
+    let owned = inFlight[id]?[part] == key
+    if owned {
+      inFlight[id]?[part] = nil
+      partSent[id]?[part] = nil
+      partBeginAt[id]?[part] = nil
+    }
+    // Every path below may change the window; a settle or park makes this
+    // a no-op.
+    defer { updateWait(id) }
+    guard var e = q.index.entry(id), e.isChunked, !e.legacy else {
+      if owned { q.store.removePartFile(id, part) }
+      return
+    }
+    // A late callback from a replaced plan: its response is about ranges and
+    // urls this entry no longer describes. Write nothing from it.
+    guard incarnation == e.incarnation, e.parts.indices.contains(part) else {
+      if owned { refill(id) }
+      return
+    }
+    let cancelled = RetryClassifier.isCancellation(c.error)
+    if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
+    let accepted = c.error == nil
+      && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
+    q.emitAttempt(e, requestId: meta?.requestId, attempt: meta?.attempt ?? e.attempts, completion: c,
+                  partIndex: part, accepted: accepted, systemCancel: cancelled)
+    e.lastRequestId = meta?.requestId ?? e.lastRequestId
+    e.lastUrl = e.parts[part].url
+    e.lastPartIndex = part
+
+    // Accept first, whatever the entry's state: the server holds these bytes
+    // now. Losing the flag would re-send a part the server already has.
+    if accepted {
+      e = e.withPartAccepted(part)
+      q.commit(e, emit: false)
+      q.store.removePartFile(id, part)
+      guard e.state == .running else { return }
+      if e.allAccepted {
+        q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
+      } else {
+        emitProgress(e)
+        refill(id)
       }
-      group.notify(queue: self.queue) {
-        // Every upload's post-reconcile refill has resumed its tasks. The
-        // handlers can drain now.
-        RNBackgroundUpload.releaseBackgroundCompletionHandlers()
+      return
+    }
+
+    // A failure of a task this process does not own is a relaunch replay or
+    // a superseded duplicate. The live task, or the reconcile refill, drives
+    // the part. The part file stays for reuse.
+    guard owned, e.state == .running else { return }
+    q.index.upsert(e)
+    if e.parts[part].accepted {
+      refill(id)
+      return
+    }
+    if cancelled {
+      retryPart(e, part)
+      return
+    }
+    let blobExists = e.bodyPath.map { FileIO.exists(q.store.fileURL(id, $0)) } ?? false
+    let verdict = RetryClassifier.classify(RetryClassifier.Input(
+      statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: q.policy(e),
+      isChunkedPart: true, fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt))
+    switch verdict {
+    case .accepted:
+      break // handled above
+    case .transient, .fileUnreadable:
+      retryPart(e, part)
+    case .auth:
+      if let g = meta?.headerGeneration, g < q.settings.headerGeneration {
+        _ = enqueuePart(id, part, delayMs: nil)
+      } else {
+        // Park the whole entry: the other parts would get the same answer.
+        q.park(e)
       }
+    case .terminalHttp:
+      q.settle(id, .error(OutcomeErrorRecord(
+        errorKind: "http", message: "HTTP \(c.statusCode ?? 0) on part \(part)",
+        response: q.response(c), partIndex: part)))
+    case .fileMissing:
+      q.settle(id, .fileError("the chunked source blob is missing", partIndex: part))
+    case .expired:
+      q.settle(id, .expired)
     }
   }
 
-  /// Cancels a chunked upload. It journals one 'cancelled' (user) terminal
-  /// and stalls the upload. The manifest and the bytes are kept. Thus the
-  /// next startUpload resumes. Completion receives nil when the id has no
-  /// manifest (not a chunked upload). It receives false when nothing runs
-  /// (the upload is already terminal).
-  func cancel(_ id: String, completion: @escaping (Bool?) -> Void) {
-    queue.async {
-      guard let manifest = self.latest(id) else { completion(nil); return }
-      if manifest.stalled || manifest.allAccepted { completion(false); return }
-      var entry = JournaledEvent(
-        eventId: UUID().uuidString, id: id, type: "cancelled", timestamp: self.nowMs())
-      entry.cancelReason = "user"
-      self.stall(id, entry: entry)
-      completion(true)
-    }
-  }
-
-  /// An explicit release. It cancels the in-flight part tasks, with no
-  /// terminal event: the consumer lets go, and awaits no outcome. It deletes
-  /// the manifest, the moved bytes, and all part temp files.
-  func remove(_ id: String, completion: @escaping () -> Void) {
-    queue.async {
-      if self.latest(id) != nil { self.cancelTasks(for: id) }
-      ChunkedStore.remove(id)
-      self.clearState(id)
-      completion()
-    }
-  }
-
-  /// The one moment when the library may delete a chunked upload's bytes: the
-  /// consumer acknowledged its 'completed' terminal event.
-  func releaseCompleted(_ ids: [String], completion: @escaping () -> Void) {
-    queue.async {
-      for id in ids {
-        ChunkedStore.remove(id)
-        self.clearState(id)
+  /// A delayed part retry is about to start. Rebuild its request from the
+  /// entry's current headers, or cancel it when the entry moved on.
+  func partWillBegin(id: String, part: Int, incarnation: String?, key: String,
+                     meta: TaskMap.Meta?) -> URLRequest? {
+    // Before the first reconcile nothing is owned yet; accept the task if the
+    // entry wants it. Reconcile then adopts or cancels it.
+    let ownedOrUnknown = !q.ready || inFlight[id]?[part] == key
+    guard let e = q.index.entry(id), e.isChunked, incarnation == e.incarnation,
+          e.parts.indices.contains(part), !e.parts[part].accepted, e.state == .running,
+          !q.settings.paused, ownedOrUnknown, let url = URL(string: e.parts[part].url) else {
+      q.taskMap.setPurpose(.superseded, forKey: key, id: id)
+      q.liveTasks[key] = nil
+      if inFlight[id]?[part] == key {
+        inFlight[id]?[part] = nil
+        partBeginAt[id]?[part] = nil
+        updateWait(id)
       }
-      completion()
+      return nil
     }
+    partBeginAt[id]?[part] = nil
+    updateWait(id)
+    q.taskMap.setHeaderGeneration(q.settings.headerGeneration, forKey: key)
+    return q.buildRequest(e, url: url, requestId: meta?.requestId ?? UUID().uuidString,
+                          partHeaders: e.parts[part].headers)
   }
-
-  /// The chunked rows for getAllUploads: one aggregate row per manifest. The
-  /// part tasks are transport detail. bytesSent counts accepted parts only.
-  /// That is the durable number.
-  func snapshots(completion: @escaping ([[String: Any]]) -> Void) {
-    queue.async {
-      let rows = ChunkedStore.all().map { manifest -> [String: Any] in
-        let state: String
-        if manifest.allAccepted {
-          state = "completed"
-        } else if manifest.stalled {
-          state = "error"
-        } else if !(self.inFlight[manifest.id] ?? [:]).isEmpty {
-          state = "running"
-        } else {
-          state = "pending"
-        }
-        return ["id": manifest.id,
-                "state": state,
-                "bytesSent": manifest.acceptedBytes,
-                "totalBytes": manifest.totalBytes]
-      }
-      completion(rows)
-    }
-  }
-
-  // MARK: - Delegate hooks (called by RNBackgroundUpload)
 
   func partProgress(id: String, part: Int, incarnation: String?, sent: Int64) {
-    let now = Date().timeIntervalSince1970
-    progressLock.lock()
-    if let last = lastProgressAt[id], now - last < Self.progressThrottle {
-      progressLock.unlock()
+    guard let e = q.index.entry(id), e.incarnation == incarnation, e.state == .running else { return }
+    partSent[id, default: [:]][part] = sent
+    // A delayed part that began while the app was dead reports progress
+    // before any willBegin.
+    if partBeginAt[id]?.removeValue(forKey: part) != nil { updateWait(id) }
+    emitProgress(q.index.entry(id) ?? e)
+  }
+
+  // MARK: - Window
+
+  /// Fills the window back up. Called after every part completion (the
+  /// background-wake refill that keeps the upload moving while the app is
+  /// dead), at start, and at the end of every reconcile.
+  func refill(_ id: String) {
+    guard q.ready, !q.settings.paused, let e = q.index.entry(id), e.isChunked,
+          e.state == .running else { return }
+    if e.allAccepted {
+      q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
       return
     }
-    lastProgressAt[id] = now
-    progressLock.unlock()
-    queue.async {
-      // A removed or replaced incarnation's task must not feed the aggregate.
-      guard let manifest = self.manifests[id], manifest.incarnation == incarnation else { return }
-      self.partSent[id, default: [:]][part] = sent
-      self.emitAggregateProgress(id, manifest)
-    }
-  }
-
-  /// One part task finished (a foreground or background-wake delegate
-  /// callback). We evaluate the accept rules, update the manifest, delete the
-  /// temp file, and refill the window. It is synchronous on purpose: the
-  /// journal write for a terminal outcome must land before the delegate
-  /// callback returns. The simple-upload path obeys the same rule.
-  func handlePartCompletion(id: String, part: Int, incarnation: String?, taskKey: String,
-                            statusCode: Int?, headers: [String: String],
-                            body: String?, error: NSError?) {
-    queue.sync {
-      TaskMap.removeKey(taskKey)
-      let owned = inFlight[id]?[part] == taskKey
-      if owned {
-        inFlight[id]?[part] = nil
-        partSent[id]?[part] = nil
-      }
-      guard var manifest = latest(id) else {
-        // The upload was removed (removeUpload, or a completed ack) while
-        // this task was in flight. There is nothing left to report.
-        if owned { ChunkedStore.removePartFile(id, part) }
-        return
-      }
-      // A late callback from a removed-then-recreated or replaced
-      // incarnation. Its response is about byte ranges and URLs that this
-      // manifest no longer describes. Thus nothing about it, the accept flag
-      // included, may be written into the current manifest. Its temp file has
-      // the old token in its name. The sweep removes it when the current plan
-      // next materializes this index.
-      guard incarnation == manifest.incarnation else {
-        if owned { refill(id) }
-        return
-      }
-      // A part index that the manifest does not know (corrupt task metadata)
-      // must not crash the delegate. Drop the task's outcome and let refill
-      // plan again.
-      guard manifest.parts.indices.contains(part) else {
-        if owned { refill(id) }
-        return
-      }
-
-      // Accept evaluation comes first. The server holds these bytes now,
-      // regardless of a concurrent stall or a superseded task in the same
-      // incarnation. If we lose the flag, we re-send a part that the server
-      // already has.
-      if error == nil, let statusCode,
-         UploadOutcome.isAccepted(statusCode, body: body, accept: manifest.accept) {
-        manifest = updateManifest(id) { $0.withPartAccepted(part) }
-          ?? manifest.withPartAccepted(part)
-        transientAttempts[id]?[part] = nil
-        cooldownUntil[id]?[part] = nil
-        if owned { ChunkedStore.removePartFile(id, part) }
-        // A stalled upload keeps the flag but reports nothing more. The
-        // journaled terminal stands until the next startUpload resume. That
-        // resume finds all parts accepted and completes without a re-send.
-        guard !manifest.stalled else { return }
-        if manifest.allAccepted {
-          finalizeCompleted(id, manifest, reemit: false)
-        } else {
-          emitAggregateProgress(id, manifest)
-          if owned { refill(id) }
-        }
-        return
-      }
-
-      // A superseded task's failure carries no policy weight. The live task
-      // for this part drives the retries. But an UNOWNED task with no live
-      // replacement is a relaunch replay that runs before reconcile rebuilds
-      // ownership. If we drop its deterministic HTTP rejection, the part gets
-      // a fresh retry budget on every system wake. So count it, and let it
-      // trip the budget. The in-flight reconcile does the re-enqueueing.
-      guard owned else {
-        if inFlight[id]?[part] == nil, !manifest.stalled, !manifest.parts[part].accepted,
-           error == nil, let code = statusCode, !ChunkedEngine.isTransientHttp(code) {
-          recordRejection(id, part: part, manifest: manifest, code: code,
-                          headers: headers, body: body, scheduleRetryInBudget: false)
-        }
-        return
-      }
-      ChunkedStore.removePartFile(id, part) // the retry builds the file again
-      // This is a duplicate of a part that a superseded task already
-      // delivered. The part is settled, whatever this task's outcome was. Its
-      // failure must not burn retries.
-      if manifest.parts[part].accepted {
-        if !manifest.stalled { refill(id) }
-        return
-      }
-      // A terminal is already journaled (a cancel, or a sibling part's
-      // stall). Swallow the fallout.
-      guard !manifest.stalled else { return }
-
-      if let error, error.domain == NSURLErrorDomain, error.code == NSURLErrorCancelled {
-        // A user cancel journals and stalls in cancel() before the tasks are
-        // torn down. Thus a cancel here, with no stall, comes from the
-        // system. Retry it like a transient failure.
-        scheduleTransientRetry(id, part: part)
-        return
-      }
-
-      if manifest.isExpired(nowMs()) {
-        stall(id, entry: expiredEntry(id))
-        return
-      }
-
-      if let error {
-        if RNBackgroundUpload.errorKind(for: error) == "file",
-           !FileManager.default.fileExists(atPath: ChunkedStore.blobURL(id).path) {
-          stall(id, entry: errorEntry(
-            id: id, error: "chunked source blob missing", errorKind: "file", partIndex: part))
-        } else {
-          // This includes a lost temp part file. The retry rebuilds it from
-        // the blob.
-          scheduleTransientRetry(id, part: part)
-        }
-        return
-      }
-
-      let code = statusCode ?? 0
-      if ChunkedEngine.isTransientHttp(code) {
-        scheduleTransientRetry(id, part: part)
-        return
-      }
-      recordRejection(id, part: part, manifest: manifest, code: code,
-                      headers: headers, body: body, scheduleRetryInBudget: true)
-    }
-  }
-
-  /// The identity of a chunked part task, or nil for a simple upload's task.
-  /// taskDescription is primary. The persisted TaskMap entry, written before
-  /// the task first resumed, is the durable fallback. `incarnation` is the
-  /// manifest token that the task was created under. It is nil only for
-  /// corrupt metadata, and the consumers treat nil as a mismatch.
-  static func partRef(_ session: URLSession, _ task: URLSessionTask)
-    -> (id: String, part: Int, incarnation: String?)? {
-    if let ref = ChunkedEngine.parseTaskDescription(task.taskDescription) { return ref }
-    if let meta = TaskMap.meta(forKey: TaskMap.key(session, task)), let part = meta.partIndex {
-      return (meta.id, part, meta.incarnation)
-    }
-    return nil
-  }
-
-  // MARK: - Window (all on `queue`)
-
-  /// Rebuilds inFlight for one upload from the daemon's live tasks, and then
-  /// refills. A task in the .completed or .canceling state is NOT live: its
-  /// delegate callback, replayed after a relaunch, settles it. A part with no
-  /// live task simply enqueues again. Accept evaluation absorbs a
-  /// completed-but-unreported duplicate. We never guess.
-  /// `completion` fires, on `queue`, when this reconcile has settled: the
-  /// refill ran, or a newer reconcile superseded this one. reconcileAll gates
-  /// the background completion handlers on it.
-  private func reconcileLocked(_ id: String, resumedByStart: Bool,
-                               completion: (() -> Void)? = nil) {
-    let token = UUID()
-    reconcileToken[id] = token
-    enumerateAllTasks { tasks in
-      self.queue.async {
-        defer { completion?() }
-        guard self.reconcileToken[id] == token else { return } // superseded
-        let manifest = self.latest(id)
-        var live: [Int: String] = [:]
-        for (session, task) in tasks {
-          guard let ref = Self.partRef(session, task), ref.id == id,
-                task.state == .running || task.state == .suspended else { continue }
-          if ref.incarnation != manifest?.incarnation || live[ref.part] != nil {
-            // Never adopt a task from a replaced incarnation. Its bytes and
-            // URL belong to the old plan, and the token check in
-            // handlePartCompletion drops its late completion. Never adopt a
-            // second live task for one part index: concurrent PUTs of one
-            // partNum are verified unsafe on the server side.
-            task.cancel()
-          } else {
-            live[ref.part] = TaskMap.key(session, task)
-          }
-        }
-        self.inFlight[id] = live
-        self.reconcileToken[id] = nil
-        if let manifest {
-          // Temp files for accepted parts with no live task are orphans.
-          for index in manifest.parts.indices
-          where manifest.parts[index].accepted && live[index] == nil {
-            ChunkedStore.removePartFile(id, index)
-          }
-        }
-        self.refill(id, resumedByStart: resumedByStart)
-      }
-    }
-  }
-
-  /// Fills the window back up to [ChunkedEngine.window] enqueued part tasks.
-  /// Called after every part completion (the background-wake refill that the
-  /// design's liveness rationale requires), after a retry cooldown, and at
-  /// the end of every reconcile.
-  private func refill(_ id: String, resumedByStart: Bool = false) {
-    guard reconcileToken[id] == nil, let manifest = latest(id) else { return }
-    // Stalled wins, even over all-accepted. The journaled terminal stands
-    // until an explicit startUpload resume. The resume clears the stall,
-    // lands here again, and completes without a re-send.
-    guard !manifest.stalled else { return }
-    if manifest.allAccepted {
-      finalizeCompleted(id, manifest, reemit: resumedByStart)
+    if q.now() >= e.expiresAt {
+      q.settle(id, .expired)
       return
     }
-    let now = nowMs()
-    if manifest.isExpired(now) {
-      stall(id, entry: expiredEntry(id))
-      return
-    }
-    armExpiryCheck(id, expiresAt: manifest.expiresAt)
-    // A blob shorter than a part's range can never finish. Report a terminal
-    // 'file' now, not a surprise when the window reaches the short part
-    // later. A retry cannot help, because the bytes are not there. Thus this
-    // stalls, and awaits removeUpload or a recreate whose tiling rule fits
-    // the real size.
-    let blobSize = ChunkedStore.blobSize(id)
-    if let short = manifest.parts.indices.first(where: { manifest.parts[$0].end > blobSize }) {
-      stall(id, entry: errorEntry(
-        id: id,
-        error: "source blob is \(blobSize) bytes; part \(short) needs "
-          + "[\(manifest.parts[short].start), \(manifest.parts[short].end))",
-        errorKind: "file", partIndex: short))
+    // A blob shorter than a part can never finish: report it now.
+    let blobSize = e.bodyPath.flatMap { FileIO.size(q.store.fileURL(id, $0)) } ?? 0
+    if let short = e.parts.indices.first(where: { e.parts[$0].end > blobSize }) {
+      q.settle(id, .fileError(
+        "source blob is \(blobSize) bytes; part \(short) needs "
+          + "[\(e.parts[short].start), \(e.parts[short].end))", partIndex: short))
       return
     }
     let flight = Set((inFlight[id] ?? [:]).keys)
-    let cooling = Set((cooldownUntil[id] ?? [:]).filter { $0.value > now }.keys)
-    for index in ChunkedEngine.indexesToEnqueue(
-      pending: manifest.pendingIndexes(), inFlight: flight, cooling: cooling) {
-      if !enqueuePart(id, index, manifest) { return } // stalled inside
+    for index in ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight) {
+      if !enqueuePart(id, index, delayMs: nil) { return } // settled or deferred inside
     }
   }
 
-  private func enqueuePart(_ id: String, _ index: Int, _ manifest: ChunkedManifest) -> Bool {
-    let part = manifest.parts[index]
+  // MARK: - Private
+
+  /// One part task. Write-ahead: the attempt count is saved first; the
+  /// TaskMap entry is written before resume. Returns false when the entry
+  /// settled instead, or when the save failed: then no task exists and a
+  /// refill runs after a backoff.
+  private func enqueuePart(_ id: String, _ index: Int, delayMs: Int?) -> Bool {
+    guard var e = q.index.entry(id), e.parts.indices.contains(index) else { return false }
+    let part = e.parts[index]
     guard let url = URL(string: part.url) else {
-      stall(id, entry: errorEntry(
-        id: id, error: "part \(index) url is not a valid URL", errorKind: "unknown",
-        partIndex: index))
+      q.settle(id, .error(OutcomeErrorRecord(
+        errorKind: "unknown", message: "part \(index) url is not valid", partIndex: index)))
       return false
     }
-    // A background session can upload only from a file. Thus each enqueued
-    // part gets a temp file that holds exactly its byte range. The transient
-    // disk usage stays at window × partSize, not a second full copy of the
-    // source.
-    let partFile: URL
+    let file: URL
     do {
-      partFile = try ChunkedStore.writePartFile(
-        id: id, index: index, start: part.start, end: part.end,
-        incarnation: manifest.incarnation)
+      file = try q.store.writePartFile(
+        id: id, blob: e.bodyPath ?? ChunkedManifestV9.blobName, index: index, start: part.start,
+        end: part.end, incarnation: e.incarnation)
     } catch {
-      stall(id, entry: errorEntry(
-        id: id, error: "cannot materialize part \(index): \(error.localizedDescription)",
-        errorKind: "file", partIndex: index))
+      q.settle(id, .fileError("cannot build part \(index): \(error.localizedDescription)", partIndex: index))
       return false
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "PUT"
-    // Unchanged, per the protocol-as-data rule. The library adds nothing.
-    for (key, value) in part.headers {
-      request.setValue(value, forHTTPHeaderField: key)
+    e.attempts += 1
+    guard q.commitAhead(e, emit: false) else {
+      let backoff = RetryClassifier.backoffMs(
+        attempt: max(part.rejections, 1), policy: q.policy(e), random: q.random)
+      q.schedule(max(delayMs ?? 0, backoff)) { [weak self] in self?.refill(id) }
+      return false
     }
-    let session = uploader.session(wifiOnly: manifest.wifiOnly)
-    let task = session.uploadTask(with: request, fromFile: partFile)
-    task.taskDescription = ChunkedEngine.taskDescription(
-      id: id, part: index, incarnation: manifest.incarnation)
-    let key = TaskMap.key(session, task)
-    TaskMap.set(TaskMap.Meta(id: id, accept: nil, partIndex: index,
-                             incarnation: manifest.incarnation), forKey: key)
-    inFlight[id, default: [:]][index] = key
-    task.resume()
+
+    let requestId = UUID().uuidString
+    let meta = TaskMap.Meta(
+      id: id, partIndex: index, incarnation: e.incarnation, attempt: e.attempts,
+      requestId: requestId, headerGeneration: q.settings.headerGeneration,
+      generation: e.generation, purpose: .attempt)
+    let task = q.transport.upload(
+      q.buildRequest(e, url: url, requestId: requestId, partHeaders: part.headers),
+      fromFile: file, wifiOnly: q.settings.wifiOnly,
+      description: ChunkedEngine.taskDescription(id: id, part: index, incarnation: e.incarnation),
+      beginAt: delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) },
+      beforeResume: { key in self.q.taskMap.set(meta, forKey: key) })
+    inFlight[id, default: [:]][index] = task.key
+    q.liveTasks[task.key] = (id, task)
+    if let delayMs {
+      partBeginAt[id, default: [:]][index] = q.now() + Double(delayMs)
+    } else {
+      partBeginAt[id]?[index] = nil
+    }
     return true
   }
 
-  // MARK: - Terminal transitions (all on `queue`)
-
-  /// Journals the terminal, marks the upload stalled, and cancels its
-  /// in-flight tasks. The stall is durable: relaunch reconciliation must not
-  /// resume the upload; only startUpload may. The manifest and the bytes are
-  /// kept. Every non-completed terminal leaves the consumer its recovery
-  /// options.
-  private func stall(_ id: String, entry: JournaledEvent) {
-    _ = updateManifest(id) { manifest in
-      var next = manifest
-      next.stalled = true
-      return next
-    }
-    cancelTasks(for: id)
-    partSent[id] = nil
-    cooldownUntil[id] = nil
-    RNBackgroundUpload.journalAndEmit(entry)
-  }
-
-  private func finalizeCompleted(_ id: String, _ manifest: ChunkedManifest, reemit: Bool) {
-    for index in manifest.parts.indices { ChunkedStore.removePartFile(id, index) }
-    partSent[id] = nil
-    // A resume of a finished-but-unacked upload must not mint a second
-    // terminal event. Emit the journaled event again. Thus a live listener
-    // still hears it, with the eventId that the consumer will ack.
-    if let existing = EventJournal.unacknowledgedEntries()
-      .first(where: { $0.id == id && $0.type == "completed" }) {
-      if reemit { RNBackgroundUpload.emitEvent(existing) }
+  /// A transient part failure: the next task is created now with a
+  /// backoff delay, so it holds the part's window slot and the daemon starts
+  /// it on time even while the app is dead.
+  private func retryPart(_ e: QueueEntry, _ part: Int) {
+    var n = e
+    n.parts[part].rejections += 1
+    let delay = RetryClassifier.backoffMs(
+      attempt: n.parts[part].rejections, policy: q.policy(n), random: q.random)
+    if q.now() + Double(delay) >= n.expiresAt {
+      q.settle(n.id, .expired)
       return
     }
-    // There are no response fields, because no single response represents N
-    // accepted parts. The blob is deleted only when this event is ACKED (see
-    // ackEvents).
-    RNBackgroundUpload.journalAndEmit(
-      JournaledEvent(eventId: UUID().uuidString, id: id, type: "completed", timestamp: nowMs()))
+    q.commit(n, emit: false)
+    _ = enqueuePart(n.id, part, delayMs: delay)
   }
 
-  // MARK: - Retry scheduling (all on `queue`)
-
-  /// Counts one non-transient HTTP rejection against the budget of `part`.
-  /// The count lives in the manifest, persisted best-effort like the accepted
-  /// flag. Thus it survives process death and can trip across wakes. A resume
-  /// or a recreate resets it (ChunkedManifest.reconciled rebuilds the parts
-  /// from the incoming call). Over budget: journal the terminal 'http' and
-  /// stall. In budget: schedule the backoff retry when this callback owns the
-  /// part. For an unowned replay, the reconcile already in flight does the
-  /// re-enqueueing.
-  private func recordRejection(_ id: String, part: Int, manifest: ChunkedManifest,
-                               code: Int, headers: [String: String], body: String?,
-                               scheduleRetryInBudget: Bool) {
-    let count = (manifest.parts[part].rejections ?? 0) + 1
-    _ = updateManifest(id) { $0.withPartRejections(part, count) }
-    if count > ChunkedEngine.partHttpRetries {
-      let (capped, truncated) = EventJournal.capBody(body)
-      var entry = errorEntry(
-        id: id, error: "HTTP \(code) on part \(part)", errorKind: "http", partIndex: part)
-      entry.responseCode = code
-      entry.responseBody = capped
-      entry.responseBodyTruncated = truncated
-      entry.responseHeaders = headers
-      stall(id, entry: entry)
-    } else if scheduleRetryInBudget {
-      scheduleRetry(id, part: part, attempt: count)
-    }
+  /// Sets nextAttemptAt to the earliest begin date when every part in the
+  /// window is a delayed task that has not begun, and clears it otherwise.
+  /// The state stays running. Emits `state` only on a change.
+  private func updateWait(_ id: String) {
+    guard var e = q.index.entry(id), e.isChunked, e.state == .running else { return }
+    let flight = inFlight[id] ?? [:]
+    let waits = partBeginAt[id] ?? [:]
+    let next = !flight.isEmpty && flight.keys.allSatisfy { waits[$0] != nil }
+      ? flight.keys.compactMap { waits[$0] }.min() : nil
+    guard next != e.nextAttemptAt else { return }
+    e.nextAttemptAt = next
+    q.commit(e)
   }
 
-  private func scheduleTransientRetry(_ id: String, part: Int) {
-    let attempt = (transientAttempts[id]?[part] ?? 0) + 1
-    transientAttempts[id, default: [:]][part] = attempt
-    scheduleRetry(id, part: part, attempt: attempt)
-  }
-
-  private func scheduleRetry(_ id: String, part: Int, attempt: Int) {
-    let delayMs = ChunkedEngine.backoffMs(attempt: attempt)
-    cooldownUntil[id, default: [:]][part] = nowMs() + Double(delayMs)
-    queue.asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in
-      guard let self else { return }
-      self.cooldownUntil[id]?[part] = nil
-      self.refill(id)
-    }
-  }
-
-  // Expiry is evaluated on every transition. But an upload whose tasks all
-  // wait (for connectivity, or for backoff) would pass its deadline silently
-  // while the app is alive. Thus we arm one timer at the deadline. When a
-  // resume extended expiresAt, the stale timer's refill is a no-op that arms
-  // the timer again.
-  private func armExpiryCheck(_ id: String, expiresAt: Double) {
-    guard !expiryArmed.contains(id) else { return }
-    expiryArmed.insert(id)
-    let delayMs = Int(min(max(expiresAt - nowMs(), 0) + 100, 7 * 24 * 3_600_000))
-    queue.asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in
-      guard let self else { return }
-      self.expiryArmed.remove(id)
-      self.refill(id)
-    }
-  }
-
-  // MARK: - Helpers
-
-  // The stored copy is the truth. A reconcile can have replaced the headers
-  // or expiresAt. The cache exists for the progress path, and as a fallback
-  // when a read fails in flight.
-  private func latest(_ id: String) -> ChunkedManifest? {
-    guard let manifest = ChunkedStore.load(id) else {
-      manifests[id] = nil
-      return nil
-    }
-    manifests[id] = manifest
-    return manifest
-  }
-
-  private func updateManifest(
-    _ id: String, _ transform: (ChunkedManifest) -> ChunkedManifest
-  ) -> ChunkedManifest? {
-    // Here the save is best-effort, unlike in startUpload. A lost accepted
-    // flag only causes a re-send of a part, and the server absorbs the
-    // duplicate through the accept rules. That is better than a failed upload
-    // that the server in fact took.
-    let next = ChunkedStore.update(id, transform) ?? manifests[id].map(transform)
-    if let next { manifests[id] = next }
-    return next
-  }
-
-  private func takeOwnership(path: String, id: String) throws {
-    let source = URL(string: path) ?? URL(fileURLWithPath: path)
-    let blob = ChunkedStore.blobURL(id)
-    let fm = FileManager.default
-    guard fm.fileExists(atPath: source.path) else {
-      // A crash between the move and the manifest save leaves the bytes at
-      // the blob path with no manifest. Adopt the bytes. Do not fail the
-      // retry.
-      if fm.fileExists(atPath: blob.path) { return }
-      throw ChunkedManifest.ParseError(
-        message: "chunked source file does not exist: \(source.path)")
-    }
-    try fm.createDirectory(at: ChunkedStore.uploadDir(id), withIntermediateDirectories: true)
-    try? fm.removeItem(at: blob)
-    // This is an O(1) rename on the same volume. Across volumes, FileManager
-    // falls back to a copy.
-    try fm.moveItem(at: source, to: blob)
-  }
-
-  private func emitAggregateProgress(_ id: String, _ manifest: ChunkedManifest) {
-    let total = manifest.totalBytes
-    guard total > 0 else { return }
-    let sent = min(manifest.acceptedBytes + (partSent[id]?.values.reduce(0, +) ?? 0), total)
-    RNBackgroundUpload.emitProgress(id: id, progress: 100.0 * Float(sent) / Float(total))
-  }
-
-  private func clearState(_ id: String) {
-    inFlight[id] = nil
-    reconcileToken[id] = nil // discards any pending reconcile snapshot
-    partSent[id] = nil
-    cooldownUntil[id] = nil
-    transientAttempts[id] = nil
-    manifests[id] = nil
-    // A removed-then-recreated id must be able to arm its own expiry
-    // deadline, which is possibly earlier. It must not wait out the stale
-    // timer.
-    expiryArmed.remove(id)
-    progressLock.lock()
-    lastProgressAt[id] = nil // without this, one entry per id stays forever
-    progressLock.unlock()
-  }
-
-  private func cancelTasks(for id: String) {
-    enumerateAllTasks { tasks in
-      for (session, task) in tasks where Self.partRef(session, task)?.id == id {
-        task.cancel()
-      }
-    }
-  }
-
-  // Always examine both sessions. A resume can change wifiOnly while earlier
-  // part tasks continue where they started.
-  private func enumerateAllTasks(
-    _ completion: @escaping ([(URLSession, URLSessionTask)]) -> Void
-  ) {
-    let sessions = [uploader.session(wifiOnly: false), uploader.session(wifiOnly: true)]
-    let group = DispatchGroup()
-    let lock = NSLock()
-    var collected: [(URLSession, URLSessionTask)] = []
-    for session in sessions {
-      group.enter()
-      session.getAllTasks { tasks in
-        lock.lock()
-        collected.append(contentsOf: tasks.map { (session, $0) })
-        lock.unlock()
-        group.leave()
-      }
-    }
-    group.notify(queue: .global()) { completion(collected) }
-  }
-
-  private func expiredEntry(_ id: String) -> JournaledEvent {
-    errorEntry(id: id, error: "upload expired before every part was accepted",
-               errorKind: "expired")
-  }
-
-  private func errorEntry(id: String, error: String, errorKind: String,
-                          partIndex: Int? = nil) -> JournaledEvent {
-    var entry = JournaledEvent(
-      eventId: UUID().uuidString, id: id, type: "error", timestamp: nowMs())
-    entry.error = error
-    entry.errorKind = errorKind
-    entry.partIndex = partIndex
-    return entry
+  private func emitProgress(_ e: QueueEntry) {
+    guard e.totalBytes > 0 else { return }
+    let sent = min(e.acceptedBytes + (partSent[e.id]?.values.reduce(0, +) ?? 0), e.totalBytes)
+    q.emitProgress(e.id, sent: sent, total: e.totalBytes)
   }
 }

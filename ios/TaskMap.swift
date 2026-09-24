@@ -1,44 +1,53 @@
 import Foundation
 
-// Durable "<sessionId>:<taskIdentifier>" -> { id, accept, partIndex } mapping.
-//
-// Apple documents `taskDescription` only as an uninterpreted app string with no
-// guarantee it survives process death, and DTS guidance is to persist task
-// metadata externally keyed by the (stable) taskIdentifier. taskDescription
-// stays the primary id. This map is the durable fallback. Thus a task
-// observed after a relaunch is never orphaned under an unknown id, and the
-// accept rules are still known when a task completes after the original
-// startUpload options are gone. Chunked part tasks carry `partIndex`. Their
-// accept rules live in the manifest, so `accept` is nil for them.
-//
-// Synchronous serial-queue access; a single JSON file.
-enum TaskMap {
-  struct Meta: Codable {
+/// Durable "<sessionId>:<taskIdentifier>" -> Meta mapping.
+///
+/// Apple documents `taskDescription` only as an app string with no promise
+/// that it survives process death, and DTS guidance is to persist task
+/// metadata keyed by the stable taskIdentifier. taskDescription stays the
+/// primary owner; this map is the durable fallback. Both are written before
+/// the task resumes.
+///
+/// It also records why the library cancelled a task (`purpose`), so the
+/// NSURLErrorCancelled callback can tell a pause or a supersede (no outcome)
+/// from a cancel the system made (a transient retry).
+///
+/// One JSON file, cached in memory, written through on every change.
+final class TaskMap {
+  enum Purpose: String, Codable {
+    case attempt
+    case pause
+    case superseded
+  }
+
+  struct Meta: Codable, Equatable {
     let id: String
-    // All are optional. Thus entries that older builds persisted still
-    // decode.
     var accept: [UploadOutcome.AcceptRule]?
     var partIndex: Int?
-    // Chunked part tasks only: the manifest incarnation that the task was
-    // created under. It mirrors the taskDescription encoding (see
-    // ChunkedEngine).
     var incarnation: String?
+    var attempt: Int?
+    var requestId: String?
+    var headerGeneration: Int?
+    var generation: Int?
+    var purpose: Purpose?
 
-    init(id: String, accept: [UploadOutcome.AcceptRule]?, partIndex: Int?,
-         incarnation: String? = nil) {
+    init(id: String, accept: [UploadOutcome.AcceptRule]? = nil, partIndex: Int? = nil,
+         incarnation: String? = nil, attempt: Int? = nil, requestId: String? = nil,
+         headerGeneration: Int? = nil, generation: Int? = nil, purpose: Purpose? = nil) {
       self.id = id
       self.accept = accept
       self.partIndex = partIndex
       self.incarnation = incarnation
+      self.attempt = attempt
+      self.requestId = requestId
+      self.headerGeneration = headerGeneration
+      self.generation = generation
+      self.purpose = purpose
     }
 
     private enum CodingKeys: String, CodingKey {
-      case id, accept, partIndex, incarnation
-      // Earlier builds persisted `acceptStatus: [Int]` where this build
-      // persists `accept` rules. The key is read, and never written. Thus a
-      // task that an older build enqueued keeps its accept rules when it
-      // completes under this build. This is the same legacy mapping as
-      // Android's Upload.normalized().
+      case id, accept, partIndex, incarnation, attempt, requestId, headerGeneration, generation, purpose
+      // Builds before v9 persisted `acceptStatus: [Int]`. Read, never written.
       case acceptStatus
     }
 
@@ -47,6 +56,12 @@ enum TaskMap {
       id = try c.decode(String.self, forKey: .id)
       partIndex = try c.decodeIfPresent(Int.self, forKey: .partIndex)
       incarnation = try c.decodeIfPresent(String.self, forKey: .incarnation)
+      attempt = try c.decodeIfPresent(Int.self, forKey: .attempt)
+      requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+      headerGeneration = try c.decodeIfPresent(Int.self, forKey: .headerGeneration)
+      generation = try c.decodeIfPresent(Int.self, forKey: .generation)
+      // An unknown purpose from a newer build reads as nil.
+      purpose = (try? c.decodeIfPresent(String.self, forKey: .purpose)).flatMap { Purpose(rawValue: $0) }
       accept = try c.decodeIfPresent([UploadOutcome.AcceptRule].self, forKey: .accept)
         ?? c.decodeIfPresent([Int].self, forKey: .acceptStatus)?
         .map { UploadOutcome.AcceptRule(status: $0, bodyIncludes: nil) }
@@ -58,48 +73,93 @@ enum TaskMap {
       try c.encodeIfPresent(accept, forKey: .accept)
       try c.encodeIfPresent(partIndex, forKey: .partIndex)
       try c.encodeIfPresent(incarnation, forKey: .incarnation)
+      try c.encodeIfPresent(attempt, forKey: .attempt)
+      try c.encodeIfPresent(requestId, forKey: .requestId)
+      try c.encodeIfPresent(headerGeneration, forKey: .headerGeneration)
+      try c.encodeIfPresent(generation, forKey: .generation)
+      try c.encodeIfPresent(purpose, forKey: .purpose)
     }
   }
 
-  private static let queue = DispatchQueue(label: "ai.openspace.rnbgupload.taskmap")
+  static let shared = TaskMap(
+    fileURL: FileIO.applicationSupport().appendingPathComponent("RNFileUploaderTaskMap.json"))
+
+  let fileURL: URL
+  private let queue = DispatchQueue(label: "ai.openspace.rnbgupload.taskmap")
+  private var cache: [String: Meta]
+
+  init(fileURL: URL) {
+    self.fileURL = fileURL
+    try? FileManager.default.createDirectory(
+      at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    cache = Self.read(fileURL)
+  }
 
   static func key(_ session: URLSession, _ task: URLSessionTask) -> String {
     "\(session.configuration.identifier ?? ""):\(task.taskIdentifier)"
   }
 
-  private static var fileURL: URL {
-    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-    return base.appendingPathComponent("RNFileUploaderTaskMap.json")
-  }
-
-  static func set(_ meta: Meta, forKey key: String) {
+  func set(_ meta: Meta, forKey key: String) {
     queue.sync {
-      var map = read()
-      map[key] = meta
-      write(map)
+      cache[key] = meta
+      write()
     }
   }
 
-  static func meta(forKey key: String) -> Meta? {
-    queue.sync { read()[key] }
+  func meta(forKey key: String) -> Meta? {
+    queue.sync { cache[key] }
   }
 
-  static func removeKey(_ key: String) {
+  func removeKey(_ key: String) {
     queue.sync {
-      var map = read()
-      map.removeValue(forKey: key)
-      write(map)
+      guard cache.removeValue(forKey: key) != nil else { return }
+      write()
     }
   }
 
-  private static func read() -> [String: Meta] {
-    guard let data = try? Data(contentsOf: fileURL) else { return [:] }
+  /// Records why the library is about to cancel a task. Creates the entry
+  /// when the task has none (a v9 task).
+  func setPurpose(_ purpose: Purpose, forKey key: String, id: String) {
+    queue.sync {
+      var meta = cache[key] ?? Meta(id: id)
+      meta.purpose = purpose
+      cache[key] = meta
+      write()
+    }
+  }
+
+  func setHeaderGeneration(_ generation: Int, forKey key: String) {
+    queue.sync {
+      guard cache[key] != nil else { return }
+      cache[key]?.headerGeneration = generation
+      write()
+    }
+  }
+
+  func keys(where predicate: (Meta) -> Bool) -> [String] {
+    queue.sync { cache.filter { predicate($0.value) }.map(\.key) }
+  }
+
+  func removeAll(where predicate: (String, Meta) -> Bool) {
+    queue.sync {
+      let before = cache.count
+      cache = cache.filter { !predicate($0.key, $0.value) }
+      if cache.count != before { write() }
+    }
+  }
+
+  // Caller holds `queue`.
+  private func write() {
+    guard let data = try? JSONEncoder().encode(cache) else { return }
+    do {
+      try FileIO.writeAtomically(data, to: fileURL)
+    } catch {
+      NSLog("[RNFileUploader] task map write failed: \(error.localizedDescription)")
+    }
+  }
+
+  private static func read(_ url: URL) -> [String: Meta] {
+    guard let data = try? Data(contentsOf: url) else { return [:] }
     return (try? JSONDecoder().decode([String: Meta].self, from: data)) ?? [:]
-  }
-
-  private static func write(_ map: [String: Meta]) {
-    guard let data = try? JSONEncoder().encode(map) else { return }
-    try? data.write(to: fileURL, options: .atomic)
   }
 }
