@@ -14,12 +14,22 @@ data class RetryDefaults(
 
 /** Queue-wide settings. They live next to the entries, in `settings.json`. */
 data class QueueSettings(
+  /** The queue's Wi-Fi setting. An entry whose descriptor sets wifiOnly ignores it. */
   val wifiOnly: Boolean = false,
+  /** The whole-queue pause gate. */
   val paused: Boolean = false,
+  /** The keys paused by pause({ keys }). An entry is paused under the gate or its key. */
+  val pausedKeys: Set<String> = emptySet(),
   /** +1 per updateHeaders(). A 401 from an attempt sent under an older value re-issues at once. */
   val headerGeneration: Int = 0,
   val retry: RetryDefaults = RetryDefaults(),
-)
+) {
+  /** Whether an entry of [key] is paused: the gate is on, or its key is in the set. */
+  fun isPaused(key: String) = paused || key in pausedKeys
+
+  /** The Wi-Fi rule of one attempt: the entry's own value, else the queue's. */
+  fun wifiOnlyFor(entry: QueueEntry) = entry.descriptor?.wifiOnly ?: wifiOnly
+}
 
 /**
  * Reads and writes [QueueSettings]. The value is cached after the first read.
@@ -77,7 +87,7 @@ class QueueSettingsStore(private val file: File) {
   }
 
   // Gson does not run constructors, so absent fields read as null or 0.
-  @Suppress("SENSELESS_COMPARISON", "USELESS_ELVIS")
+  @Suppress("SENSELESS_COMPARISON", "USELESS_ELVIS", "UNNECESSARY_SAFE_CALL")
   private fun validated(s: QueueSettings?): QueueSettings {
     if (s == null) return QueueSettings()
     val d = RetryDefaults()
@@ -85,6 +95,7 @@ class QueueSettingsStore(private val file: File) {
     return QueueSettings(
       wifiOnly = s.wifiOnly,
       paused = s.paused,
+      pausedKeys = s.pausedKeys?.toSet() ?: emptySet(),
       headerGeneration = s.headerGeneration,
       retry = if (r == null) d else RetryDefaults(
         baseMs = if (r.baseMs > 0) r.baseMs else d.baseMs,

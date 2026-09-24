@@ -277,3 +277,23 @@ client.addListener('attempt', (e) => {
   // @ts-expect-error an attempt event carries no cancelReason
   void e.cancelReason;
 });
+
+// pause and resume take an optional scope of keys.
+void client.pause();
+void client.pause({ keys: ['capture.upload'] });
+void client.resume({});
+// @ts-expect-error keys is a list of strings
+void client.pause({ keys: 'capture.upload' });
+// @ts-expect-error the scope field is keys, not key
+void client.resume({ key: ['capture.upload'] });
+
+// wifiOnly on a descriptor is a boolean.
+client.define({
+  key: 'wifi.only',
+  request: (_vars: null) => ({ url: 'https://x', wifiOnly: true }),
+});
+client.define({
+  key: 'wifi.only.bad',
+  // @ts-expect-error wifiOnly is a boolean
+  request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
+});

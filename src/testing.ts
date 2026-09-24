@@ -11,6 +11,9 @@
  * settle() journals an outcome and emits it, and ackEvents() forgets a
  * completed or cancelled row. It emits a 'state' row for each of these
  * transitions, as native does. It never sends HTTP and never retries.
+ * pause() and resume() keep the whole-queue gate and the paused-keys set,
+ * and move rows between 'paused' and 'queued' as native does. It records
+ * setWifiOnly() and a descriptor's wifiOnly but has no network to gate.
  *
  * The fake does not model the same-id rules of enqueue() (resume, replace,
  * E_RUNNING, re-emit). A second enqueue() on an id only overwrites its row.
@@ -27,6 +30,7 @@ import type {
   ErrorKind,
   Json,
   OutcomeError,
+  PauseScope,
   ProgressEvent,
   RawResponse,
   RequestDescriptor,
@@ -98,8 +102,9 @@ export type FakeNative = Spec & {
   /** The arguments of the calls that have no other record. */
   readonly calls: {
     configure: object[];
-    pause: number;
-    resume: number;
+    /** The scope of each pause() call, as it crossed to native. */
+    pause: PauseScope[];
+    resume: PauseScope[];
     cancel: string[];
     setWifiOnly: boolean[];
     updateHeaders: Record<string, string>[];
@@ -154,7 +159,8 @@ export type FakeNative = Spec & {
    */
   failNext: (method: FailableMethod, code: string, message?: string) => void;
   /**
-   * Clears entries, rows, journal, calls, acks and queued failures. A
+   * Clears entries, rows, journal, calls, acks, the pause state and queued
+   * failures. A
    * settle() that still waits for its ack resolves now, so it cannot reject
    * later inside another test. Keeps the subscriptions, because a client subscribes one time, at its first
    * configure(). New eventIds never repeat old ones, so delivery's dedupe
@@ -246,12 +252,17 @@ export const createFakeNative = (
   const ackedEventIds: string[] = [];
   const calls: FakeNative['calls'] = {
     configure: [],
-    pause: 0,
-    resume: 0,
+    pause: [],
+    resume: [],
     cancel: [],
     setWifiOnly: [],
     updateHeaders: [],
   };
+  // The pause model: the whole-queue gate and the paused-keys set.
+  let pausedAll = false;
+  const pausedKeys = new Set<string>();
+  const isPaused = (key: string): boolean =>
+    pausedAll || pausedKeys.has(key);
   const failures = new Map<FailableMethod, Error[]>();
   const ackWaiters = new Map<string, () => void>();
 
@@ -413,7 +424,7 @@ export const createFakeNative = (
           id: raw.id,
           key: raw.key,
           vars,
-          state: 'queued',
+          state: isPaused(raw.key) ? 'paused' : 'queued',
           bytesSent: 0,
           totalBytes: prior?.totalBytes ?? 0,
           attempts: 0,
@@ -422,21 +433,38 @@ export const createFakeNative = (
         return raw.id;
       }),
 
-    pause: () =>
+    pause: (input) =>
       run('pause', () => {
-        calls.pause += 1;
+        const scope = input as PauseScope;
+        calls.pause.push({ ...scope });
+        if (scope.keys === undefined) {
+          pausedAll = true;
+        } else {
+          scope.keys.forEach((key) => pausedKeys.add(key));
+        }
         rows.forEach((row) => {
-          if (LIVE_STATES.includes(row.state) && row.state !== 'paused') {
+          if (
+            LIVE_STATES.includes(row.state) &&
+            row.state !== 'paused' &&
+            isPaused(row.key)
+          ) {
             setRow({ ...row, state: 'paused', updatedAt: Date.now() });
           }
         });
       }),
 
-    resume: () =>
+    // A row stays paused while the other scope still pauses it.
+    resume: (input) =>
       run('resume', () => {
-        calls.resume += 1;
+        const scope = input as PauseScope;
+        calls.resume.push({ ...scope });
+        if (scope.keys === undefined) {
+          pausedAll = false;
+        } else {
+          scope.keys.forEach((key) => pausedKeys.delete(key));
+        }
         rows.forEach((row) => {
-          if (row.state === 'paused') {
+          if (row.state === 'paused' && !isPaused(row.key)) {
             setRow({ ...row, state: 'queued', updatedAt: Date.now() });
           }
         });
@@ -566,8 +594,10 @@ export const createFakeNative = (
       journal.length = 0;
       ackedEventIds.length = 0;
       calls.configure.length = 0;
-      calls.pause = 0;
-      calls.resume = 0;
+      calls.pause.length = 0;
+      calls.resume.length = 0;
+      pausedAll = false;
+      pausedKeys.clear();
       calls.cancel.length = 0;
       calls.setWifiOnly.length = 0;
       calls.updateHeaders.length = 0;

@@ -115,18 +115,95 @@ describe('queue controls', () => {
     const fake = createFakeNative();
     await fake.enqueue(entry());
     fake.seedRows([row()]);
-    await fake.pause();
+    await fake.pause({});
     expect(fake.getRequests().map((r) => (r as RequestRow).state)).toEqual([
       'paused',
       'error',
     ]);
-    await fake.resume();
+    await fake.resume({});
     expect(fake.getRequests().map((r) => (r as RequestRow).state)).toEqual([
       'queued',
       'error',
     ]);
-    expect(fake.calls.pause).toBe(1);
-    expect(fake.calls.resume).toBe(1);
+    expect(fake.calls.pause).toEqual([{}]);
+    expect(fake.calls.resume).toEqual([{}]);
+  });
+
+  describe('key-scoped pause', () => {
+    const states = (fake: ReturnType<typeof createFakeNative>) =>
+      Object.fromEntries(
+        fake.getRequests().map((r) => [
+          (r as RequestRow).id,
+          (r as RequestRow).state,
+        ]),
+      );
+
+    const twoKeys = async () => {
+      const fake = createFakeNative();
+      await fake.enqueue(entry({ id: 'cap', key: 'capture' }));
+      await fake.enqueue(entry({ id: 'note', key: 'note' }));
+      return fake;
+    };
+
+    it('pauses only the entries of the given keys, with one state event each', async () => {
+      const fake = await twoKeys();
+      const events: RequestRow[] = [];
+      fake.onState((r) => {
+        events.push(r as RequestRow);
+      });
+      await fake.pause({ keys: ['capture'] });
+      expect(states(fake)).toEqual({ cap: 'paused', note: 'queued' });
+      expect(events.map((e) => [e.id, e.state])).toEqual([['cap', 'paused']]);
+      await fake.resume({ keys: ['capture'] });
+      expect(states(fake)).toEqual({ cap: 'queued', note: 'queued' });
+      expect(fake.calls.pause).toEqual([{ keys: ['capture'] }]);
+      expect(fake.calls.resume).toEqual([{ keys: ['capture'] }]);
+    });
+
+    it('keeps a key-paused entry paused when the whole queue resumes', async () => {
+      const fake = await twoKeys();
+      await fake.pause({ keys: ['capture'] });
+      await fake.pause({});
+      expect(states(fake)).toEqual({ cap: 'paused', note: 'paused' });
+      await fake.resume({});
+      expect(states(fake)).toEqual({ cap: 'paused', note: 'queued' });
+    });
+
+    it('keeps an entry paused when its key resumes but the gate is on', async () => {
+      const fake = await twoKeys();
+      await fake.pause({ keys: ['capture'] });
+      await fake.pause({});
+      await fake.resume({ keys: ['capture'] });
+      expect(states(fake)).toEqual({ cap: 'paused', note: 'paused' });
+      await fake.resume({});
+      expect(states(fake)).toEqual({ cap: 'queued', note: 'queued' });
+    });
+
+    it('starts an entry paused when its scope is paused at enqueue', async () => {
+      const fake = createFakeNative();
+      await fake.pause({ keys: ['capture'] });
+      await fake.enqueue(entry({ id: 'cap', key: 'capture' }));
+      await fake.enqueue(entry({ id: 'note', key: 'note' }));
+      expect(states(fake)).toEqual({ cap: 'paused', note: 'queued' });
+      await fake.pause({});
+      await fake.enqueue(entry({ id: 'late', key: 'note' }));
+      expect(states(fake).late).toBe('paused');
+    });
+
+    it('an empty keys list changes nothing', async () => {
+      const fake = await twoKeys();
+      await fake.pause({ keys: [] });
+      expect(states(fake)).toEqual({ cap: 'queued', note: 'queued' });
+    });
+
+    it('reset() clears the pause state', async () => {
+      const fake = createFakeNative();
+      await fake.pause({});
+      await fake.pause({ keys: ['capture'] });
+      fake.reset();
+      await fake.enqueue(entry({ id: 'cap', key: 'capture' }));
+      expect(states(fake)).toEqual({ cap: 'queued' });
+    });
   });
 
   it('settles a live entry cancelled on cancel(), as native does', async () => {
@@ -381,7 +458,7 @@ describe('reset', () => {
     fake.onSettled(settled);
     await fake.enqueue(entry());
     fake.configure({});
-    await fake.pause();
+    await fake.pause({});
     const before = fake.buildSettled('a', { kind: 'completed' }).eventId;
     fake.failNext('cancel', 'E_STORAGE');
     fake.reset();
@@ -391,8 +468,8 @@ describe('reset', () => {
     expect(fake.ackedEventIds).toEqual([]);
     expect(fake.calls).toEqual({
       configure: [],
-      pause: 0,
-      resume: 0,
+      pause: [],
+      resume: [],
       cancel: [],
       setWifiOnly: [],
       updateHeaders: [],
