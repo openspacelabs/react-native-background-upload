@@ -2,6 +2,7 @@ package ai.openspace.backgroundupload
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -10,6 +11,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CyclicBarrier
 
 class WorkerOpsTest {
   @get:Rule
@@ -23,15 +25,28 @@ class WorkerOpsTest {
   private var now = 20_000L
   private lateinit var ops: WorkerOps
   private lateinit var controller: QueueController
+  private val listener = Any()
+  private lateinit var journalDir: File
 
   @Before
   fun setUp() {
     val root = tmp.newFolder("queue")
     store = QueueStore(root, RequestIndex())
-    journal = EventJournal(tmp.newFolder("journal"))
+    journalDir = tmp.newFolder("journal")
+    journal = EventJournal(journalDir, retryLater = { _, _ -> })
     settings = QueueSettingsStore(File(root, "settings.json"))
     ops = WorkerOps(store, journal, settings, events, scheduler) { now }
     controller = QueueController(store, journal, settings, events, scheduler, { false }, { now })
+    journal.drain(listener) // JS is subscribed
+  }
+
+  private fun <T> withJournalReadOnly(block: () -> T): T {
+    journalDir.setWritable(false)
+    try {
+      return block()
+    } finally {
+      journalDir.setWritable(true)
+    }
   }
 
   private val ok = UploadResponse(200, """{"id":7}""", mapOf("x" to "y"))
@@ -43,6 +58,30 @@ class WorkerOpsTest {
     assertEquals(EntryState.RUNNING, e.state)
     assertNull(e.nextAttemptAt)
     assertEquals(listOf("state:e1:running"), events.log)
+  }
+
+  @Test
+  fun `begin applies a record of the entry's own generation and does not run it again`() {
+    // The process died between the journal write and the store transition,
+    // and WorkManager runs the entry again before any boot sweep.
+    val own = "00000000-0000-0000-0000-000000000021"
+    val older = "00000000-0000-0000-0000-000000000022"
+    store.save(entry(state = EntryState.RUNNING, generation = 2))
+    journal.append(record(older, generation = 2, at = 1))
+    journal.append(record(own, generation = 2, at = 2))
+    assertNull(ops.begin("e1"))
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(own, e.settledEventId)
+    assertEquals(listOf(own), journal.unacknowledged().map { it.eventId }) // the extra one is acked
+    assertEquals(listOf("state:e1:completed"), events.log)
+  }
+
+  @Test
+  fun `begin runs an entry whose only record is of an older generation`() {
+    store.save(entry(state = EntryState.QUEUED, generation = 2))
+    journal.append(record("00000000-0000-0000-0000-000000000023", generation = 1))
+    assertEquals(EntryState.RUNNING, ops.begin("e1")!!.state)
   }
 
   @Test
@@ -90,13 +129,94 @@ class WorkerOpsTest {
   }
 
   @Test
-  fun `a settle with JS dead starts at 0 deliveries, so the first replay is 1`() {
-    events.live = false
+  fun `a settle with no listener starts at 0 deliveries, so the first replay is 1`() {
+    journal.stopListening(listener)
     store.save(entry(state = EntryState.RUNNING))
     assertTrue(ops.settle("e1", 1, Settlement.Completed(ok, "u", "POST")))
     assertEquals(0, journal.unacknowledged().single().deliveries)
     assertEquals(listOf("state:e1:completed"), events.log) // nothing to emit to
-    assertEquals(1, controller.unacknowledged().single().deliveries)
+    assertEquals(1, controller.unacknowledged(listener).single().deliveries)
+  }
+
+  @Test
+  fun `a settle whose journal can not write holds the record, settles, and emits`() {
+    store.save(entry(state = EntryState.RUNNING))
+    assertTrue(withJournalReadOnly { ops.settle("e1", 1, Settlement.Completed(ok, "u", "POST")) })
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertTrue(journal.isHeld(e.settledEventId!!))
+    assertEquals(listOf("settled:e1:completed", "state:e1:completed"), events.log)
+    // The sweep does not forget a row whose record is held, and the ack does.
+    controller.sweep()
+    assertNotNull(store.load("e1"))
+    controller.ack(listOf(e.settledEventId!!))
+    assertNull(store.load("e1"))
+  }
+
+  @Test
+  fun `a settle whose store write fails leaves the record for the next run to apply`() {
+    store.save(entry(state = EntryState.RUNNING))
+    val dir = store.entryDir("e1")
+    dir.setWritable(false)
+    val stood = try {
+      ops.settle("e1", 1, Settlement.Completed(ok, "u", "POST"))
+    } finally {
+      dir.setWritable(true)
+    }
+    assertTrue(stood)
+    assertEquals(EntryState.RUNNING, store.load("e1")!!.state)
+    val record = journal.unacknowledged().single()
+    assertEquals(listOf("settled:e1:completed"), events.log) // no state event: the row did not change
+    // WorkManager runs it again: begin applies the record, no second send.
+    assertNull(ops.begin("e1"))
+    assertEquals(record.eventId, store.load("e1")!!.settledEventId)
+  }
+
+  @Test
+  fun `a settle after a cancel whose save failed applies the cancel, not a second outcome`() {
+    // cancel() journaled its record, then its entry save failed: the entry
+    // is still running, and its request comes back.
+    val cancelId = "00000000-0000-0000-0000-000000000041"
+    store.save(entry(state = EntryState.RUNNING))
+    journal.append(record(cancelId, kind = EventJournal.KIND_CANCELLED))
+    assertFalse(ops.settle("e1", 1, Settlement.Completed(ok, "u", "POST")))
+    val e = store.load("e1")!!
+    assertEquals(EntryState.CANCELLED, e.state)
+    assertEquals(cancelId, e.settledEventId)
+    assertEquals(listOf(cancelId), journal.unacknowledged().map { it.eventId })
+    assertEquals(listOf("state:e1:cancelled"), events.log) // no second outcome
+  }
+
+  @Test
+  fun `a live settle goes to the listener that drained, not the newest module`() {
+    store.save(entry(id = "a", state = EntryState.RUNNING))
+    ops.settle("a", 1, Settlement.Completed(ok, "u", "POST"))
+    // A reload: the next module's JS drains and takes over.
+    val next = Any()
+    controller.unacknowledged(next)
+    store.save(entry(id = "b", state = EntryState.RUNNING))
+    ops.settle("b", 1, Settlement.Completed(ok, "u", "POST"))
+    assertEquals(2, events.listeners.size)
+    assertTrue(events.listeners[0] === listener)
+    assertTrue(events.listeners[1] === next)
+  }
+
+  @Test
+  fun `a settle over the journal cap spares every record a row names`() {
+    val small = EventJournal(tmp.newFolder("small"), maxEntries = 2)
+    val smallOps = WorkerOps(store, small, settings, events, scheduler) { now }
+    val named = "00000000-0000-0000-0000-000000000031"
+    small.append(record(named, id = "done"))
+    store.save(entry(id = "done", state = EntryState.ERROR, settledEventId = named))
+    File(tmp.root, "small/$named.json").setLastModified(1_000)
+    small.append(record("00000000-0000-0000-0000-000000000032", id = "orphan"))
+    File(tmp.root, "small/00000000-0000-0000-0000-000000000032.json").setLastModified(2_000)
+    store.save(entry(state = EntryState.RUNNING))
+    smallOps.settle("e1", 1, Settlement.Completed(ok, "u", "POST"))
+    val left = small.unacknowledged().map { it.eventId }
+    assertTrue(left.contains(named))
+    assertTrue(left.contains(store.load("e1")!!.settledEventId))
+    assertEquals(2, left.size)
   }
 
   @Test
@@ -120,12 +240,30 @@ class WorkerOpsTest {
   }
 
   @Test
-  fun `a response that lands during pause still settles`() {
+  fun `an accepted response that lands during pause still settles`() {
     store.save(entry(state = EntryState.PAUSED))
-    assertTrue(ops.settle("e1", 1, Settlement.Failed("http", "HTTP 400", ok.copy(code = 400), null, "u", "POST")))
-    val e = store.load("e1")!!
-    assertEquals(EntryState.ERROR, e.state)
-    assertEquals("http", journal.unacknowledged().single().errorKind)
+    assertTrue(ops.settle("e1", 1, Settlement.Completed(ok, "u", "POST")))
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `a failure that lands during pause does not settle`() {
+    store.save(entry(state = EntryState.PAUSED))
+    assertFalse(ops.settle("e1", 1, Settlement.Failed("http", "HTTP 400", ok.copy(code = 400), null, "u", "POST")))
+    assertEquals(EntryState.PAUSED, store.load("e1")!!.state)
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+    assertEquals(emptyList<String>(), events.log)
+  }
+
+  @Test
+  fun `a failed simple settle keeps the live bytes, and a chunked one keeps its accepted bytes`() {
+    store.save(entry(state = EntryState.RUNNING))
+    ops.settle("e1", 1, Settlement.Failed("http", "HTTP 400", ok.copy(code = 400), null, "u", "POST", bytesSent = 5))
+    assertEquals(5, store.load("e1")!!.bytesSent)
+    assertEquals(5, journal.unacknowledged().single().bytesSent)
+    store.save(entry(id = "c", state = EntryState.RUNNING).copy(bytesSent = 10))
+    ops.settle("c", 1, Settlement.Failed("file", "gone", null, 1, "u", "PUT"))
+    assertEquals(10, store.load("c")!!.bytesSent)
   }
 
   @Test
@@ -268,16 +406,29 @@ class WorkerOpsTest {
   // MARK: - deliveries
 
   @Test
-  fun `JS that subscribes between the check and the append still gets the outcome live with deliveries 1`() {
-    // canDeliver() is false at the record build and true right after the append.
-    val answers = ArrayDeque(listOf(false, true))
-    val flipping = object : QueueEvents by events {
-      override fun canDeliver() = answers.removeFirstOrNull() ?: true
+  fun `a settle racing the first drain reaches JS exactly once with deliveries 1`() {
+    // The drain sets the listener and scans under one journal lock, and the
+    // append decides 0 or 1 under it. Either the drain returns the record,
+    // or the settle emits it live; never both, never neither.
+    repeat(200) { i ->
+      val id = "race-$i"
+      val owner = Any()
+      journal.stopListening(listener)
+      journal.stopListening(owner)
+      store.save(entry(id = id, state = EntryState.RUNNING))
+      events.records.clear()
+      val start = CyclicBarrier(2)
+      var drained: List<EventJournal.SettledRecord> = emptyList()
+      val drain = Thread { start.await(); drained = controller.unacknowledged(owner).filter { it.id == id } }
+      drain.start()
+      start.await()
+      ops.settle(id, 1, Settlement.Completed(ok, "u", "POST"))
+      drain.join()
+      val live = events.records.filter { it.id == id }
+      val seen = drained + live
+      assertEquals("iteration $i", 1, seen.size)
+      assertEquals("iteration $i", 1, seen.single().deliveries)
+      journal.ack(listOf(seen.single().eventId))
     }
-    val flipOps = WorkerOps(store, journal, settings, flipping, scheduler) { now }
-    store.save(entry(state = EntryState.RUNNING))
-    assertTrue(flipOps.settle("e1", 1, Settlement.Completed(ok, "u", "POST")))
-    assertEquals(1, journal.unacknowledged().single().deliveries)
-    assertEquals(1, events.records.single().deliveries)
   }
 }

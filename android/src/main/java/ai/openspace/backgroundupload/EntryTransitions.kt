@@ -76,9 +76,37 @@ object EntryTransitions {
     updatedAt = now,
   )
 
-  /** Whether a worker of [generation] may still settle [e]. Not after a cancel, a replace, or a settle. */
-  fun canSettle(e: QueueEntry?, generation: Int) =
-    e != null && e.generation == generation && e.isLive
+  /**
+   * Whether a worker of [generation] may still settle [e]. Not after a
+   * cancel, a replace, or a settle. Under pause only an [accepted] response
+   * settles: the server already took it. A failure waits for resume, which
+   * runs the entry again.
+   */
+  fun canSettle(e: QueueEntry?, generation: Int, accepted: Boolean) =
+    e != null && e.generation == generation && e.isLive && (accepted || e.state != EntryState.PAUSED)
+
+  /** The entry state a journal record puts its entry in. */
+  fun stateOf(record: EventJournal.SettledRecord): EntryState =
+    EntryState.values().firstOrNull { it.wire == record.state } ?: EntryState.ERROR
+
+  /** A settled entry, and the other records of its life to ack. */
+  data class Journaled(val entry: QueueEntry, val extraEventIds: List<String>)
+
+  /**
+   * A live entry with a journal record of its own generation: the settle
+   * journaled, then its store write was lost (a process death, a failed
+   * save). Apply the newest record; do not run the request again. Null when
+   * there is no such record. The boot sweep and a worker's begin share it.
+   */
+  fun journaledSettle(e: QueueEntry, records: List<EventJournal.SettledRecord>, now: Long): Journaled? {
+    if (!e.isLive || e.legacy) return null
+    val own = records.filter { it.id == e.id && it.generation == e.generation }
+    val latest = own.maxByOrNull { it.at } ?: return null
+    return Journaled(
+      toSettled(e, stateOf(latest), latest.eventId, latest.bytesSent, now),
+      own.filter { it !== latest }.map { it.eventId },
+    )
+  }
 
   /** Whether a worker of [generation] still owns the running entry. */
   fun isOwnedRun(e: QueueEntry?, generation: Int) =

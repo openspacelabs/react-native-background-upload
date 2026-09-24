@@ -36,8 +36,6 @@ class RequestIndex {
     rows.remove(id)
   }
 
-  fun get(id: String): RequestRow? = rows[id]
-
   /** Oldest first, then by id. */
   fun snapshot(): List<RequestRow> =
     rows.values.sortedWith(compareBy<RequestRow> { it.createdAt }.thenBy { it.id })

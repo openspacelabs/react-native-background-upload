@@ -10,12 +10,35 @@ class EntryTransitionsTest {
 
   @Test
   fun `a settle on a cancelled entry or an older generation is not allowed`() {
-    assertTrue(EntryTransitions.canSettle(entry(state = EntryState.RUNNING), 1))
-    assertTrue(EntryTransitions.canSettle(entry(state = EntryState.PAUSED), 1)) // an in-flight response under pause
-    assertFalse(EntryTransitions.canSettle(entry(state = EntryState.CANCELLED), 1))
-    assertFalse(EntryTransitions.canSettle(entry(state = EntryState.COMPLETED), 1))
-    assertFalse(EntryTransitions.canSettle(entry(state = EntryState.RUNNING, generation = 2), 1))
-    assertFalse(EntryTransitions.canSettle(null, 1))
+    for (accepted in listOf(true, false)) {
+      assertTrue(EntryTransitions.canSettle(entry(state = EntryState.RUNNING), 1, accepted))
+      assertTrue(EntryTransitions.canSettle(entry(state = EntryState.AWAITING_AUTH), 1, accepted)) // the expiry wake
+      assertFalse(EntryTransitions.canSettle(entry(state = EntryState.CANCELLED), 1, accepted))
+      assertFalse(EntryTransitions.canSettle(entry(state = EntryState.COMPLETED), 1, accepted))
+      assertFalse(EntryTransitions.canSettle(entry(state = EntryState.RUNNING, generation = 2), 1, accepted))
+      assertFalse(EntryTransitions.canSettle(null, 1, accepted))
+    }
+  }
+
+  @Test
+  fun `under pause only an accepted response settles`() {
+    assertTrue(EntryTransitions.canSettle(entry(state = EntryState.PAUSED), 1, accepted = true))
+    assertFalse(EntryTransitions.canSettle(entry(state = EntryState.PAUSED), 1, accepted = false))
+  }
+
+  @Test
+  fun `a live entry with a record of its own generation settles from the newest one`() {
+    val live = entry(state = EntryState.RUNNING, generation = 2)
+    val older = record("00000000-0000-0000-0000-0000000000a1", generation = 2, at = 1)
+    val newest = record("00000000-0000-0000-0000-0000000000a2", kind = EventJournal.KIND_ERROR, generation = 2, at = 2)
+    val otherLife = record("00000000-0000-0000-0000-0000000000a3", generation = 1, at = 3)
+    val otherId = record("00000000-0000-0000-0000-0000000000a4", id = "x", generation = 2, at = 4)
+    val j = EntryTransitions.journaledSettle(live, listOf(older, newest, otherLife, otherId), now = 9)!!
+    assertEquals(EntryState.ERROR, j.entry.state)
+    assertEquals(newest.eventId, j.entry.settledEventId)
+    assertEquals(listOf(older.eventId), j.extraEventIds)
+    assertNull(EntryTransitions.journaledSettle(live, listOf(otherLife, otherId), 9))
+    assertNull(EntryTransitions.journaledSettle(entry(state = EntryState.ERROR, generation = 2), listOf(newest), 9))
   }
 
   @Test
@@ -84,9 +107,12 @@ class EnqueueRulesTest {
   @Test
   fun `the same-id table`() {
     assertEquals(EnqueueRules.Action.Create, decide(null))
-    val v9 = LegacyManifest("e1", "/b", listOf(part(0, 10)), emptyList(), 1, false, 1)
-    assertEquals(EnqueueRules.Action.AdoptV9(v9), decide(null, v9 = v9))
-    assertEquals(EnqueueRules.Action.Replace, decide(entry(legacy = true, descriptor = null, body = null)))
+    val v9 = LegacyManifest("e1", listOf(part(0, 10)), emptyList())
+    assertEquals(EnqueueRules.Action.AdoptV9(v9, 1), decide(null, v9 = v9))
+    val legacy = entry(legacy = true, descriptor = null, body = null)
+    assertEquals(EnqueueRules.Action.Replace, decide(legacy))
+    // A legacy row over a v9 manifest: adopt it, one generation up.
+    assertEquals(EnqueueRules.Action.AdoptV9(v9, 2), decide(legacy, v9 = v9))
     assertEquals(EnqueueRules.Action.ReEmit("ev"), decide(entry(state = EntryState.COMPLETED, settledEventId = "ev")))
     assertEquals(EnqueueRules.Action.Replace, decide(entry(state = EntryState.COMPLETED, settledEventId = "ev"), hasRecord = false))
     EntryState.values().filter { it != EntryState.COMPLETED }.forEach { state ->
@@ -128,11 +154,21 @@ class EnqueueRulesTest {
   }
 
   @Test
-  fun `resume of a settled entry reopens it with a fresh generation`() {
-    val next = EnqueueRules.resumed(entry(state = EntryState.ERROR, settledEventId = "ev", generation = 2), parsed(), false, 0, 9)
+  fun `resume of a settled entry reopens it with a fresh generation and attempts 0`() {
+    val settled = entry(state = EntryState.ERROR, settledEventId = "ev", generation = 2, attempts = 3)
+    val next = EnqueueRules.resumed(settled, parsed(), false, 0, 9)
     assertEquals(EntryState.QUEUED, next.state)
     assertEquals(3, next.generation)
+    assertEquals(0, next.attempts)
     assertNull(next.settledEventId)
+  }
+
+  @Test
+  fun `resume clears a pending backoff so the entry runs now`() {
+    val waiting = entry(state = EntryState.QUEUED, nextAttemptAt = 99_000).copy(backoffStreak = 6)
+    val next = EnqueueRules.resumed(waiting, parsed(), false, 0, 9)
+    assertNull(next.nextAttemptAt)
+    assertEquals(0, next.backoffStreak)
   }
 
   @Test
@@ -149,7 +185,7 @@ class EnqueueRulesTest {
 
   @Test
   fun `adopting v9 parts carries the flags only for the same parts`() {
-    val v9 = LegacyManifest("e1", "/b", listOf(part(0, 10, accepted = true), part(10, 20)), emptyList(), 1, false, 1)
+    val v9 = LegacyManifest("e1", listOf(part(0, 10, accepted = true), part(10, 20)), emptyList())
     assertTrue(EnqueueRules.adoptedParts(v9, listOf(part(0, 10), part(10, 20)))[0].accepted)
     assertFalse(EnqueueRules.adoptedParts(v9, listOf(part(0, 20)))[0].accepted)
   }

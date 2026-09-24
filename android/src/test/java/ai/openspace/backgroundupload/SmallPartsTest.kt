@@ -6,11 +6,7 @@ import androidx.work.WorkInfo.State.ENQUEUED
 import androidx.work.WorkInfo.State.FAILED
 import androidx.work.WorkInfo.State.RUNNING
 import androidx.work.WorkInfo.State.SUCCEEDED
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -21,11 +17,21 @@ class AttemptEventTest {
   private val response = UploadResponse(401, "x".repeat(5_000), mapOf("a" to "b"))
 
   @Test
-  fun `the body is cut at 4 KB and flagged`() {
+  fun `the body is cut at 4 KB of UTF-8 and flagged`() {
     val e = AttemptEvent.ofResponse(entry(attempts = 2), "r1", "https://x", null, response, accepted = false, at = 7)
-    assertEquals(AttemptEvent.MAX_BODY_CHARS, e.responseBody!!.length)
+    assertEquals(BodyCap.ATTEMPT_MAX_BYTES, e.responseBody!!.length)
     assertEquals(true, e.responseBodyTruncated)
     assertEquals(2, e.attempt)
+    // 3-byte characters: the cut backs off to a whole character.
+    val wide = AttemptEvent.ofResponse(entry(), "r1", "https://x", null, response.copy(body = "\u20ac".repeat(2_000)), false, 7)
+    assertEquals(BodyCap.ATTEMPT_MAX_BYTES / 3, wide.responseBody!!.length)
+  }
+
+  @Test
+  fun `a response the stream cap cut is flagged even under 4 KB`() {
+    val e = AttemptEvent.ofResponse(entry(), "r1", "https://x", null, response.copy(body = "short", truncated = true), false, 7)
+    assertEquals("short", e.responseBody)
+    assertEquals(true, e.responseBodyTruncated)
   }
 
   @Test
@@ -114,7 +120,7 @@ class RequestIndexTest {
   fun `setBytes on a missing id is a no-op`() {
     val index = RequestIndex()
     index.setBytes("nope", 5)
-    assertNull(index.get("nope"))
+    assertEquals(emptyList<RequestRow>(), index.snapshot())
   }
 
   @Test
@@ -124,9 +130,9 @@ class RequestIndexTest {
     index.put(running.toRow())
     index.setBytes("e1", 60)
     index.put(running.copy(attempts = 2).toRow())
-    assertEquals(60, index.get("e1")!!.bytesSent)
+    assertEquals(60, index.snapshot().single().bytesSent)
     index.put(running.copy(state = EntryState.QUEUED).toRow())
-    assertEquals(0, index.get("e1")!!.bytesSent)
+    assertEquals(0, index.snapshot().single().bytesSent)
   }
 }
 
@@ -157,11 +163,14 @@ class TransferSemaphoreTest {
   @Test
   fun `the global cap is 4 and a fifth request waits`() = runBlocking {
     assertEquals(4, MAX_TRANSFER_CONCURRENCY)
-    val holders = (1..4).map { async { transferSemaphore.withPermit { delay(200) } } }
-    delay(20)
-    val fifth = withTimeoutOrNull(50) { transferSemaphore.withPermit { } }
-    assertNull(fifth)
-    holders.forEach { it.await() }
-    assertEquals(Unit, withTimeoutOrNull(500) { transferSemaphore.withPermit { } })
+    repeat(4) { transferSemaphore.acquire() }
+    try {
+      assertFalse(transferSemaphore.tryAcquire()) // no fifth permit
+      transferSemaphore.release()
+      assertTrue(transferSemaphore.tryAcquire()) // one freed, one taken
+    } finally {
+      repeat(4) { transferSemaphore.release() }
+    }
+    assertEquals(4, transferSemaphore.availablePermits)
   }
 }

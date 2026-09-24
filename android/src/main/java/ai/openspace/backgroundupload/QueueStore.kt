@@ -122,10 +122,17 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     (dir.listFiles { f -> f.isDirectory } ?: emptyArray())
       .mapNotNull { d -> File(d, ENTRY_FILE).takeIf { it.exists() }?.let { read(it) } }
 
-  /** The v9 chunked manifest for [id], when the directory has no v10 entry. */
+  /** Every eventId a row names. The journal prune spares them. */
+  @Synchronized
+  fun referencedEventIds(): Set<String> = all().mapNotNull { it.settledEventId }.toSet()
+
+  /**
+   * The v9 chunked manifest in [id]'s directory. The caller asks only when
+   * there is no v10 entry or the entry is a legacy row: a v10 entry
+   * prunes the manifest when it adopts it.
+   */
   @Synchronized
   fun legacyManifest(id: String): LegacyManifest? {
-    if (entryFile(id).exists()) return null
     val file = File(entryDir(id), V9_MANIFEST_FILE)
     if (!file.exists()) return null
     val parsed = runCatching { gson.fromJson(file.readText(), LegacyManifest::class.java) }.getOrNull()
@@ -181,15 +188,14 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   }
 }
 
-/** A v9 chunked manifest. The field names are the v9 ones. */
+/**
+ * A v9 chunked manifest, only the fields v10 reads. The field names are the
+ * v9 ones; Gson skips the rest of the file.
+ */
 data class LegacyManifest(
   val id: String,
-  val sourcePath: String,
   val parts: List<Part>,
   val accept: List<UploadOutcome.AcceptRule>,
-  val expiresAt: Long,
-  val noNotification: Boolean,
-  val createdAt: Long,
 ) {
   companion object {
     @Suppress("SENSELESS_COMPARISON")

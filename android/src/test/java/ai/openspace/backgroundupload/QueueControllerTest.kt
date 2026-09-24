@@ -26,14 +26,16 @@ class QueueControllerTest {
   private val running = mutableSetOf<String>()
   private var now = 10_000L
   private lateinit var controller: QueueController
+  private val listener = Any()
 
   @Before
   fun setUp() {
     root = tmp.newFolder("queue")
     store = QueueStore(root, RequestIndex())
-    journal = EventJournal(tmp.newFolder("journal"))
+    journal = EventJournal(tmp.newFolder("journal"), retryLater = { _, _ -> })
     settings = QueueSettingsStore(File(root, "settings.json"))
     controller = QueueController(store, journal, settings, events, scheduler, { it in running }, { now })
+    journal.drain(listener) // JS is subscribed
   }
 
   private fun source(name: String, size: Int) = File(tmp.newFolder(), name).apply { writeBytes(ByteArray(size) { it.toByte() }) }
@@ -165,14 +167,50 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `same body on an error entry reopens it and keeps attempts`() {
+  fun `same body on an error entry reopens it with attempts 0`() {
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(state = EntryState.ERROR, attempts = 3, settledEventId = "ev"))
     controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
     val e = store.load("e1")!!
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(2, e.generation)
-    assertEquals(3, e.attempts)
+    assertEquals(0, e.attempts) // attempts count the current generation
+  }
+
+  @Test
+  fun `same body on a live entry keeps its attempts`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(attempts = 3))
+    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
+    assertEquals(3, store.load("e1")!!.attempts)
+  }
+
+  @Test
+  fun `a same-id resume of a queued entry waiting out a backoff clears it and runs now`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(nextAttemptAt = now + 3_600_000, backoffStreak = 9))
+    scheduler.scheduled.clear()
+    controller.enqueue(parsed())
+    val e = store.load("e1")!!
+    assertNull(e.nextAttemptAt)
+    assertEquals(0, e.backoffStreak)
+    assertEquals(listOf("e1"), scheduler.scheduled)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertFalse(events.rows.last().toMap().containsKey("nextAttemptAt"))
+  }
+
+  @Test
+  fun `a completed unacked re-emit with no listener yet waits for the drain`() {
+    controller.enqueue(parsed())
+    val eventId = "00000000-0000-0000-0000-00000000001a"
+    journal.append(record(eventId))
+    store.save(store.load("e1")!!.copy(state = EntryState.COMPLETED, settledEventId = eventId))
+    journal.stopListening(listener)
+    events.log.clear()
+    controller.enqueue(parsed())
+    assertEquals(emptyList<String>(), events.log)
+    assertEquals(1, journal.find(eventId)!!.deliveries)
+    assertEquals(2, controller.unacknowledged(listener).single().deliveries)
   }
 
   @Test
@@ -183,6 +221,34 @@ class QueueControllerTest {
     assertFalse(e.legacy)
     assertEquals(2, e.generation)
     assertEquals(EntryState.QUEUED, e.state)
+  }
+
+  // MARK: - legacy row over a v9 manifest
+
+  @Test
+  fun `a same-id enqueue over a legacy row with a v9 manifest adopts it one generation up`() {
+    v9Dir("e1", v9Parts, 20)
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    val legacy = store.load("e1")!!
+    assertEquals(0L to 0L, legacy.bytesSent to legacy.totalBytes) // legacy rows report 0/0 bytes
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = "/gone.bin", parts = listOf(part(0, 10), part(10, 20)))))
+    val e = store.load("e1")!!
+    assertFalse(e.legacy)
+    assertEquals(2, e.generation)
+    assertEquals(5, e.createdAt)
+    assertTrue(e.descriptor!!.parts!![0].accepted) // the v9 progress is kept
+    assertFalse(e.descriptor!!.parts!![1].accepted)
+    assertEquals(10, e.bytesSent)
+    assertEquals(setOf("entry.json", "blob"), dirFiles()) // the manifest is pruned
+  }
+
+  @Test
+  fun `a same-id enqueue over a legacy row with no manifest replaces it`() {
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    controller.enqueue(parsed())
+    val e = store.load("e1")!!
+    assertEquals(2, e.generation)
+    assertEquals(0, e.bytesSent)
   }
 
   // MARK: - chunked replace (a present file wins over the old blob)
@@ -360,23 +426,99 @@ class QueueControllerTest {
     assertEquals(record.eventId, e.settledEventId)
     assertEquals(listOf("e1"), scheduler.cancelled)
     assertEquals(listOf("settled:e1:cancelled", "state:e1:cancelled"), events.log)
+    assertTrue(events.listeners.single() === listener)
     controller.ack(listOf(record.eventId))
     assertNull(store.load("e1"))
     assertFalse(store.entryDir("e1").exists())
   }
 
   @Test
-  fun `cancel of a settled entry forgets it now and keeps its unacked record`() {
+  fun `cancel of a settled entry forgets it now with its unacked outcomes`() {
     controller.enqueue(parsed())
     val eventId = "00000000-0000-0000-0000-00000000000b"
+    val older = "00000000-0000-0000-0000-00000000001b"
+    journal.append(record(older, generation = 0))
     journal.append(record(eventId, kind = EventJournal.KIND_ERROR))
+    journal.append(record("00000000-0000-0000-0000-00000000002b", id = "other"))
     store.save(store.load("e1")!!.copy(state = EntryState.ERROR, settledEventId = eventId))
     events.log.clear()
     controller.cancel("e1")
     assertNull(store.load("e1"))
     assertFalse(store.entryDir("e1").exists())
     assertEquals(emptyList<String>(), events.log)
-    assertNotNull(journal.find(eventId))
+    assertEquals(listOf("other"), journal.unacknowledged().map { it.id })
+  }
+
+  @Test
+  fun `cancel of a live entry whose journal can not write rejects E_STORAGE and changes nothing`() {
+    controller.enqueue(parsed())
+    val before = store.load("e1")!!
+    events.log.clear()
+    scheduler.cancelled.clear()
+    val dir = tmp.root.resolve("journal")
+    dir.setWritable(false)
+    val e = try {
+      assertThrows(QueueException::class.java) { controller.cancel("e1") }
+    } finally {
+      dir.setWritable(true)
+    }
+    assertEquals(QueueException.E_STORAGE, e.code)
+    assertEquals(before, store.load("e1"))
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+    assertEquals(emptyList<String>(), events.log)
+    assertEquals(emptyList<String>(), scheduler.cancelled)
+  }
+
+  @Test
+  fun `cancel whose entry save fails stops the work, emits, rejects, and a retry adds no second outcome`() {
+    controller.enqueue(parsed())
+    events.log.clear()
+    scheduler.cancelled.clear()
+    val dir = store.entryDir("e1")
+    dir.setWritable(false)
+    val error = try {
+      assertThrows(QueueException::class.java) { controller.cancel("e1") }
+    } finally {
+      dir.setWritable(true)
+    }
+    assertEquals(QueueException.E_STORAGE, error.code)
+    val record = journal.unacknowledged().single()
+    assertEquals(EventJournal.KIND_CANCELLED, record.kind)
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state) // the save was lost
+    assertEquals(listOf("e1"), scheduler.cancelled) // a running request can not settle again
+    assertEquals(listOf("settled:e1:cancelled"), events.log)
+    // JS calls cancel() again: the journaled cancel is applied, not a second one.
+    events.log.clear()
+    controller.cancel("e1")
+    val e = store.load("e1")!!
+    assertEquals(EntryState.CANCELLED, e.state)
+    assertEquals(record.eventId, e.settledEventId)
+    assertEquals(listOf(record.eventId), journal.unacknowledged().map { it.eventId })
+    assertEquals(listOf("state:e1:cancelled"), events.log)
+  }
+
+  @Test
+  fun `cancel over the journal cap keeps its own record`() {
+    val small = EventJournal(tmp.newFolder("small"), maxEntries = 1)
+    val smallController = QueueController(store, small, settings, events, scheduler, { false }, { now })
+    val named = "00000000-0000-0000-0000-000000000042"
+    small.append(record(named, id = "done"))
+    store.save(entry(id = "done", state = EntryState.ERROR, settledEventId = named))
+    smallController.enqueue(parsed())
+    smallController.cancel("e1")
+    val own = store.load("e1")!!.settledEventId!!
+    assertNotNull(small.find(own)) // without it, the sweep forgets the row with no outcome
+    assertNotNull(small.find(named))
+  }
+
+  @Test
+  fun `cancel with no listener journals at 0 and does not emit the outcome`() {
+    controller.enqueue(parsed())
+    journal.stopListening(listener)
+    events.log.clear()
+    controller.cancel("e1")
+    assertEquals(listOf("state:e1:cancelled"), events.log)
+    assertEquals(0, journal.unacknowledged().single().deliveries)
   }
 
   @Test
@@ -525,8 +667,8 @@ class QueueControllerTest {
   @Test
   fun `each replay counts one more delivery`() {
     journal.append(record("00000000-0000-0000-0000-00000000000f"))
-    assertEquals(2, controller.unacknowledged().single().deliveries)
-    assertEquals(3, controller.unacknowledged().single().deliveries)
+    assertEquals(2, controller.unacknowledged(listener).single().deliveries)
+    assertEquals(3, controller.unacknowledged(listener).single().deliveries)
   }
 
   // MARK: - boot sweep
@@ -586,6 +728,24 @@ class QueueControllerTest {
     assertNull(store.load("done"))
     assertEquals(listOf(own), journal.unacknowledged().map { it.eventId })
     assertNotNull(store.load("c"))
+  }
+
+  @Test
+  fun `sweep keeps a completed entry whose record is held in memory`() {
+    val eventId = "00000000-0000-0000-0000-000000000015"
+    val dir = tmp.root.resolve("journal")
+    dir.setWritable(false)
+    try {
+      journal.appendOrHold(record(eventId))
+    } finally {
+      dir.setWritable(true)
+    }
+    store.save(entry(state = EntryState.COMPLETED, settledEventId = eventId))
+    controller.sweep()
+    assertNotNull(store.load("e1"))
+    // Its ack still forgets it.
+    controller.ack(listOf(eventId))
+    assertNull(store.load("e1"))
   }
 
   @Test

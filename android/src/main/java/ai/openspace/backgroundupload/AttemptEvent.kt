@@ -6,7 +6,8 @@ import com.facebook.react.bridge.WritableMap
  * One HTTP attempt, before the library interprets it. Live only: never
  * journaled. [outcome] is `completed` when the response is accepted and
  * `error` otherwise, so a 401 is `error` with httpCode 401 even though the
- * entry parks.
+ * entry parks. A transport failure is `error` with its own errorKind. Pause,
+ * cancel, supersede, and a system stop emit no attempt event.
  */
 data class AttemptEvent(
   val id: String,
@@ -23,12 +24,9 @@ data class AttemptEvent(
   val responseHeaders: Map<String, String>?,
   val errorKind: String?,
   val errorMessage: String?,
-  val cancelReason: String?,
   val at: Long,
 ) {
   companion object {
-    const val MAX_BODY_CHARS = 4 * 1024
-
     fun ofResponse(
       entry: QueueEntry,
       requestId: String,
@@ -38,16 +36,16 @@ data class AttemptEvent(
       accepted: Boolean,
       at: Long,
     ): AttemptEvent {
-      val (body, truncated) = EventJournal.capBody(response.body, MAX_BODY_CHARS)
+      val (body, cut) = BodyCap.cap(response.body, BodyCap.ATTEMPT_MAX_BYTES)
       return AttemptEvent(
         id = entry.id, key = entry.key, requestId = requestId, attempt = entry.attempts,
         url = url, method = entry.descriptor?.method ?: "POST", partIndex = partIndex,
         outcome = if (accepted) "completed" else "error",
-        httpCode = response.code, responseBody = body, responseBodyTruncated = truncated,
+        httpCode = response.code, responseBody = body, responseBodyTruncated = cut || response.truncated,
         responseHeaders = response.headers,
         errorKind = if (accepted) null else "http",
         errorMessage = if (accepted) null else "HTTP ${response.code}",
-        cancelReason = null, at = at,
+        at = at,
       )
     }
 
@@ -64,7 +62,7 @@ data class AttemptEvent(
       url = url, method = entry.descriptor?.method ?: "POST", partIndex = partIndex,
       outcome = "error", httpCode = null, responseBody = null, responseBodyTruncated = null,
       responseHeaders = null, errorKind = errorKind, errorMessage = message,
-      cancelReason = null, at = at,
+      at = at,
     )
   }
 
@@ -83,7 +81,6 @@ data class AttemptEvent(
     responseHeaders?.let { put("responseHeaders", it) }
     errorKind?.let { put("errorKind", it) }
     errorMessage?.let { put("errorMessage", it) }
-    cancelReason?.let { put("cancelReason", it) }
     put("at", at.toDouble())
   }
 

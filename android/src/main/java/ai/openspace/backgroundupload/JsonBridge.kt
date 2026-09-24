@@ -6,31 +6,29 @@ import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.ReadableType
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
-import com.google.gson.GsonBuilder
-import com.google.gson.JsonArray
+import com.google.gson.Gson
 import com.google.gson.JsonElement
-import com.google.gson.JsonNull
-import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
+import com.google.gson.Strictness
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
+import java.io.StringReader
 import kotlin.math.abs
 import kotlin.math.floor
 
 /**
- * Moves values between three forms: the bridge (ReadableMap, WritableMap),
- * plain Kotlin values (Map, List, String, Double, Boolean, null), and JSON
- * text. `vars` and `data` are stored as JSON text.
+ * Moves values between the bridge (ReadableMap, WritableMap), plain Kotlin
+ * values (Map, List, String, Double, Boolean, null), and JSON text. `vars`
+ * and `data` cross from JS as JSON text and are stored as it came; native
+ * parses them back only to hand objects to JS.
  *
- * Numbers: RN gives every JS number to Kotlin as a Double. A Double with no
- * fraction is written as an integer, so `{ n: 1 }` becomes `{"n":1}`, as
- * JSON.stringify writes it, not `{"n":1.0}`.
- *
- * Key order: the bridge does not keep the JS key order. Object keys are
- * written sorted, so the same object always gives the same text. The
- * same-body check compares that text.
+ * Numbers: RN gives every JS number to Kotlin as a Double. [numberText]
+ * writes a Double with no fraction as an integer, so a header value 5 is
+ * "5", as JSON.stringify writes it, not "5.0".
  */
 object JsonBridge {
-  private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
+  private val gson = Gson()
 
   // 2^53. Above this a Double can not hold every integer, so it keeps the
   // Double form.
@@ -71,11 +69,19 @@ object JsonBridge {
     }
   }
 
-  /** Plain values to JSON text. */
-  fun toJson(value: Any?): String = gson.toJson(toElement(value))
-
   /** JSON text to plain values. Throws on malformed text. Numbers come back as Double. */
   fun parse(json: String): Any? = fromElement(JsonParser.parseString(json))
+
+  /**
+   * Whether [text] is one strict JSON value, as JSON.stringify writes it.
+   * Any top-level value counts, so "null" is valid. Lenient forms (single
+   * quotes, bare keys, trailing text) are not.
+   */
+  fun isJson(text: String): Boolean = runCatching {
+    val reader = JsonReader(StringReader(text)).apply { setStrictness(Strictness.STRICT) }
+    gson.getAdapter(JsonElement::class.java).read(reader)
+    reader.peek() == JsonToken.END_DOCUMENT
+  }.getOrDefault(false)
 
   /** A number as JSON would print it: an integer when it has no fraction. */
   fun numberText(d: Double): String = gson.toJson(number(d))
@@ -83,24 +89,6 @@ object JsonBridge {
   private fun number(d: Double): JsonPrimitive =
     if (d.isFinite() && d == floor(d) && abs(d) < MAX_SAFE_INTEGER) JsonPrimitive(d.toLong())
     else JsonPrimitive(d)
-
-  private fun toElement(value: Any?): JsonElement = when (value) {
-    null -> JsonNull.INSTANCE
-    is Boolean -> JsonPrimitive(value)
-    is Double -> number(value)
-    is Float -> number(value.toDouble())
-    is Int, is Long, is Short, is Byte -> JsonPrimitive((value as Number).toLong())
-    is Number -> JsonPrimitive(value)
-    is String -> JsonPrimitive(value)
-    is Map<*, *> -> JsonObject().apply {
-      value.entries
-        .sortedBy { it.key.toString() }
-        .forEach { (k, v) -> add(k.toString(), toElement(v)) }
-    }
-    is Iterable<*> -> JsonArray().apply { value.forEach { add(toElement(it)) } }
-    is Array<*> -> JsonArray().apply { value.forEach { add(toElement(it)) } }
-    else -> JsonPrimitive(value.toString())
-  }
 
   private fun fromElement(element: JsonElement): Any? = when {
     element.isJsonNull -> null

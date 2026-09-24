@@ -15,6 +15,7 @@ sealed class Settlement {
     override val method: String,
   ) : Settlement()
 
+  /** [bytesSent] is the live bytes of a simple entry's last attempt; null keeps the stored value. */
   data class Failed(
     val errorKind: String,
     val message: String,
@@ -22,6 +23,7 @@ sealed class Settlement {
     val partIndex: Int?,
     override val url: String,
     override val method: String,
+    val bytesSent: Long? = null,
   ) : Settlement()
 }
 
@@ -49,19 +51,36 @@ class WorkerOps(
 ) {
   enum class ParkResult { PARKED, REISSUE, NOT_OWNED }
 
-  /** Takes a queued entry. Null when there is nothing to run. */
+  /**
+   * Takes a queued entry. Null when there is nothing to run.
+   *
+   * A journal record of the entry's own generation means a settle was
+   * journaled and its store write was lost (a process death between the
+   * two, or a failed save). WorkManager can run the entry again before any
+   * boot sweep. Then begin applies the record, as the sweep does, and does
+   * not send the request again.
+   */
   fun begin(id: String): QueueEntry? {
     val now = clock()
-    var changed = false
-    val entry = store.compute(id) { e ->
-      if (e != null && !e.legacy && (e.state == EntryState.QUEUED || e.state == EntryState.RUNNING)) {
-        changed = true
-        EntryTransitions.toRunning(e, now)
-      } else e
+    var row: QueueEntry? = null
+    var taken: QueueEntry? = null
+    store.locked {
+      val e = store.load(id) ?: return@locked
+      if (e.legacy || (e.state != EntryState.QUEUED && e.state != EntryState.RUNNING)) return@locked
+      val journaled = EntryTransitions.journaledSettle(e, journal.forEntry(id), now)
+      if (journaled != null) {
+        store.save(journaled.entry)
+        journal.ack(journaled.extraEventIds)
+        row = journaled.entry
+        return@locked
+      }
+      val next = EntryTransitions.toRunning(e, now)
+      store.save(next)
+      row = next
+      taken = next
     }
-    if (entry == null || entry.state != EntryState.RUNNING) return null
-    if (changed) events.state(entry.toRow())
-    return entry
+    row?.let { events.state(it.toRow()) }
+    return taken
   }
 
   /** The stored entry, while this run still owns it. */
@@ -126,73 +145,88 @@ class WorkerOps(
     }
 
   /**
-   * Journal, then transition, then emit. When a cancel or a replace landed
-   * first, the record is an orphan: it is acked at once and nothing is
-   * emitted. Returns whether this run's outcome stands.
+   * Journal, then transition, then emit, all under the store lock, so a
+   * cancel, pause, or replace lands either before (this run's outcome is
+   * dropped) or after. Returns whether this run's outcome stands.
+   *
+   * A failed journal write holds the record in memory ([EventJournal.appendOrHold]):
+   * the request already ran, and a retry would send it twice. A failed
+   * store write leaves the record for the ack, the next [begin], or the
+   * boot sweep to apply.
+   *
+   * A record of this generation already in the journal (a cancel whose
+   * entry save failed) wins: it is applied, as [begin] does, and this run's
+   * outcome is dropped. One life has one outcome.
    */
   fun settle(id: String, generation: Int, s: Settlement): Boolean {
-    val e = store.load(id)
-    if (!EntryTransitions.canSettle(e, generation)) return false
-    e!!
     val now = clock()
     val completed = s is Settlement.Completed
-    val state = if (completed) EntryState.COMPLETED else EntryState.ERROR
-    val bytesSent = if (completed) e.totalBytes else e.bytesSent
     val failed = s as? Settlement.Failed
-    val record = EventJournal.SettledRecord(
-      eventId = UUID.randomUUID().toString(),
-      id = e.id,
-      key = e.key,
-      varsJson = e.varsJson,
-      at = now,
-      attempts = e.attempts,
-      requestId = e.lastRequestId,
-      deliveries = if (events.canDeliver()) 1 else 0,
-      state = state.wire,
-      bytesSent = bytesSent,
-      totalBytes = e.totalBytes,
-      url = s.url,
-      method = s.method,
-      partIndex = failed?.partIndex,
-      kind = if (completed) EventJournal.KIND_COMPLETED else EventJournal.KIND_ERROR,
-      response = when (s) {
-        is Settlement.Completed -> s.response?.let { EventJournal.Response.of(it) } ?: EventJournal.Response.NONE
-        is Settlement.Failed -> s.response?.let { EventJournal.Response.of(it) }
-      },
-      errorKind = failed?.errorKind,
-      message = failed?.message,
-      cancelReason = null,
-      generation = generation,
-    )
-    // 1. The durable outcome. It never throws.
-    journal.append(record)
-    // JS can subscribe between the check above and the append, and its first
-    // drain can miss this record. Count it as a live delivery then.
-    val live = if (record.deliveries == 0 && events.canDeliver()) {
-      journal.incrementDeliveries(record.eventId) ?: record
-    } else record
-    // 2. The transition, atomic against cancel().
-    var applied = false
-    val next = try {
-      store.compute(id) { cur ->
-        if (EntryTransitions.canSettle(cur, generation)) {
-          applied = true
-          EntryTransitions.toSettled(cur!!, state, record.eventId, bytesSent, now)
-        } else cur
+    var delivered: EventJournal.SettledRecord? = null
+    var settled: QueueEntry? = null
+    store.locked {
+      val e = store.load(id)
+      if (!EntryTransitions.canSettle(e, generation, completed)) return@locked
+      e!!
+      val journaled = EntryTransitions.journaledSettle(e, journal.forEntry(id), now)
+      if (journaled != null) {
+        try {
+          store.save(journaled.entry)
+          journal.ack(journaled.extraEventIds)
+          settled = journaled.entry
+        } catch (error: IOException) {
+          Diag.error("settle could not apply the journaled outcome of '$id'; its ack or the boot sweep applies it", error)
+        }
+        return@locked
       }
-    } catch (error: IOException) {
-      // The record is durable; the boot sweep applies it to the entry.
-      Diag.error("settle could not save '$id'; its ack or the boot sweep repairs it", error)
-      if (live.deliveries > 0) events.settled(live)
-      return true
+      val state = if (completed) EntryState.COMPLETED else EntryState.ERROR
+      // A failed simple entry keeps the live bytes of its last attempt; a
+      // chunked one keeps its accepted bytes (the stored value).
+      val bytesSent = if (completed) e.totalBytes else failed?.bytesSent ?: e.bytesSent
+      val record = EventJournal.SettledRecord(
+        eventId = UUID.randomUUID().toString(),
+        id = e.id,
+        key = e.key,
+        varsJson = e.varsJson,
+        at = now,
+        attempts = e.attempts,
+        requestId = e.lastRequestId,
+        deliveries = 0, // the journal sets it
+        state = state.wire,
+        bytesSent = bytesSent,
+        totalBytes = e.totalBytes,
+        url = s.url,
+        method = s.method,
+        partIndex = failed?.partIndex,
+        kind = if (completed) EventJournal.KIND_COMPLETED else EventJournal.KIND_ERROR,
+        response = when (s) {
+          is Settlement.Completed -> s.response?.let { EventJournal.Response.of(it) } ?: EventJournal.Response.NONE
+          is Settlement.Failed -> s.response?.let { EventJournal.Response.of(it) }
+        },
+        errorKind = failed?.errorKind,
+        message = failed?.message,
+        cancelReason = null,
+        generation = generation,
+      )
+      // 1. The durable outcome. It never throws.
+      delivered = journal.appendOrHold(record) { store.referencedEventIds() + record.eventId }
+      // 2. The transition.
+      val next = EntryTransitions.toSettled(e, state, record.eventId, bytesSent, now)
+      try {
+        store.save(next)
+        settled = next
+      } catch (error: IOException) {
+        Diag.error("settle could not save '$id'; its ack, the next run, or the boot sweep applies the record", error)
+      }
     }
-    if (!applied || next == null) {
-      journal.ack(listOf(record.eventId))
+    val record = delivered
+    if (record == null) {
+      settled?.let { events.state(it.toRow()) }
       return false
     }
     // 3 and 4. Best effort.
-    if (live.deliveries > 0) events.settled(live)
-    events.state(next.toRow())
+    if (record.deliveries > 0) journal.listener()?.let { events.settled(record, it) }
+    settled?.let { events.state(it.toRow()) }
     return true
   }
 

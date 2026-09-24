@@ -1,6 +1,7 @@
 package ai.openspace.backgroundupload
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -72,6 +73,37 @@ class LegacyImportTest {
     val broken = QueueStore(tmp.newFile(), RequestIndex()) // a file where the directory should be
     assertEquals(false, LegacyImport.import(v9Dir, broken))
     assertTrue(File(v9Dir, "a.json").exists())
+  }
+
+  @Test
+  fun `runOnce imports, then writes the marker, and a second launch does nothing`() {
+    val v9Dir = tmp.newFolder()
+    val marker = File(tmp.newFolder(), LegacyImport.MARKER)
+    val store = QueueStore(tmp.newFolder(), RequestIndex())
+    v9(v9Dir, "a", "up-1", "completed", 100)
+    assertTrue(LegacyImport.runOnce(marker, v9Dir, store))
+    assertTrue(marker.exists())
+    assertEquals(listOf("up-1"), store.all().map { it.id })
+    // A v9 file that shows up later is not imported: the marker says done.
+    v9(v9Dir, "b", "up-2", "error", 200)
+    store.remove("up-1")
+    assertFalse(LegacyImport.runOnce(marker, v9Dir, store))
+    assertEquals(emptyList<QueueEntry>(), store.all())
+    assertTrue(File(v9Dir, "b.json").exists())
+  }
+
+  @Test
+  fun `runOnce with a failed row save writes no marker, so the next launch tries again`() {
+    val v9Dir = tmp.newFolder()
+    val marker = File(tmp.newFolder(), LegacyImport.MARKER)
+    v9(v9Dir, "a", "up-1", "error", 100)
+    val broken = QueueStore(tmp.newFile(), RequestIndex()) // a file where the directory should be
+    assertTrue(LegacyImport.runOnce(marker, v9Dir, broken)) // it ran, so v9 work is cancelled
+    assertFalse(marker.exists())
+    val store = QueueStore(tmp.newFolder(), RequestIndex())
+    assertTrue(LegacyImport.runOnce(marker, v9Dir, store))
+    assertTrue(marker.exists())
+    assertEquals(listOf("up-1"), store.all().map { it.id })
   }
 
   @Test
