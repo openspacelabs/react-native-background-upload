@@ -1,3 +1,92 @@
+## 10.0.0 (unreleased)
+
+The library now owns a durable request queue. A consumer describes each
+request kind one time with `define()`, enqueues instances with `mutate()`,
+and receives every outcome through the definition's handlers, on this launch
+or a later one. Outcomes are journaled natively before JS hears about them
+and acknowledged only after the handler's promise resolves. See the README's
+"Usage" and "Reliable delivery" sections.
+
+This release is built in slices. The JS layer, the codegen spec, and native
+stubs land first; the Android and iOS queues follow. Until they land, every
+queue method rejects with `E_NOT_IMPLEMENTED`.
+
+Breaking:
+- **`startUpload` and `getAllUploads` are removed.** `define()` + `mutate()`
+  replace the first; the synchronous `getRequests(filter?)` replaces the
+  second.
+- **The v9 event names are removed.** `addListener` takes `'state'`,
+  `'progress'`, or `'attempt'`. Terminal outcomes go to the definition's
+  `onSuccess` / `onError`; a `cancelled` outcome calls no handler.
+- **`getUnacknowledgedEvents` and `ackEvents` are internal.** The library
+  drains the journal after `configure()` and acknowledges after each handler
+  settles.
+- **`cancelUpload` and `removeUpload` fold into `cancel(id)`.** A live entry
+  settles `cancelled` and is forgotten after its ack; a settled entry is
+  forgotten now, row and bytes.
+- **Per-upload `wifiOnly` becomes `setWifiOnly(enabled)`** on the queue,
+  persisted natively.
+- **`progress` carries `{ id, bytesSent, totalBytes }`** instead of a
+  percentage.
+- **`configure()` must be called at boot, after every `define()`.** It starts
+  the replay of journaled outcomes. It also takes `lifetimeMs`, `retry`, a
+  `headers` provider that runs at `mutate()`, `maxVarsBytes` (default 1 MB),
+  and `enqueueTimeoutMs` (default 10 s): `mutate()` rejects with a named
+  error and warns when the native write has not settled by then, so a native
+  bug cannot hang a caller in silence.
+- **`ErrorKind` gains `'truncated'`.** With a `response` parser set and a body
+  over the 1 MB cap, `onError` fires with it instead of `onSuccess`.
+
+Added:
+- **`createUploadClient()`**: builds a client with its own definitions and
+  settings. The default export is one client.
+- **`define({ key, request, response?, onSuccess?, onError? })`**: `vars`
+  infer from the `request` parameter, the handler data type from the
+  `response` return. `response(raw, vars)` also receives the entry's `vars`;
+  a one-argument parser such as `schema.parse` still fits. A duplicate key
+  replaces the definition and warns in development.
+- **`mutate(vars, { id? })`**: runs `request(vars)` once, merges the configured
+  headers under the descriptor's, validates the descriptor (at most one of
+  `data` / `form` / `file`, none for a bodiless DELETE; no body on a GET;
+  `parts` only with `file`; parts must tile the file; no field outside the
+  descriptor shape), defaults `expiresAt` to now +
+  `lifetimeMs`, and resolves when the entry is durable. `vars` is any
+  JSON-serializable object, so generated API request types work as they are;
+  `mutate()` rejects vars or `data` that do not serialize (a cycle, a function,
+  a BigInt) and caps `vars` at `configure().maxVarsBytes`, 1 MB by default. A
+  definition whose `request` takes no vars calls `mutate()` with no arguments.
+  It resolves after the row and every staged body copy are on disk, so the
+  caller may delete its source file then; native failures reject with
+  `E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`.
+- **Request bodies**: JSON (`data`), multipart (`form`), whole file (`file`),
+  and chunked (`file` + `parts`). All under one entry shape and one id.
+- **Delivery rules**: dedupe by event id; the outcomes of one id deliver in
+  order, one handler at a time; an outcome for an id waits for that id's
+  in-flight `mutate()`; an outcome whose key has no definition stays
+  unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`;
+  a handler that has not settled after 30 s logs a warning. No ordering is
+  promised between different ids.
+- **`Meta.deliveries`**: counts deliveries that reached a JS listener: 1 on
+  the first, +1 per replay. A handler that keeps throwing sees it grow; the
+  library never gives up on its own, so the app decides a poison policy.
+- **`RequestRow.nextAttemptAt`**: epoch ms, set while an entry waits out a
+  retry backoff. `getRequests()` returns every entry native has not yet
+  forgotten, so completed and cancelled rows appear until their ack.
+- **`pause()` / `resume()`** for the whole queue, **`updateHeaders(patch)`** to
+  re-auth parked entries, and the **`attempt`** event with one row per HTTP
+  attempt. Its `outcome` is `completed` or `error`; pause, cancel, and
+  supersede emit none.
+
+Removed:
+- `startUpload`, `startChunkedUpload` (native), `cancelUpload`,
+  `removeUpload`, `getAllUploads`, the public `getUnacknowledgedEvents` /
+  `ackEvents`, and the `progress` / `error` / `completed` / `cancelled` event
+  names, with their `ProgressData`, `CompletedData`, `ErrorData`,
+  `CancelledData`, `EventData`, `TerminalEventData`, `JournaledEvent`,
+  `UploadSnapshot`, `UploadOptions`, `ChunkedUploadOptions`,
+  `StartUploadOptions`, `AndroidOnlyUploadOptions`, `RawUploadOptions`, and
+  `UploadId` types.
+
 ## 9.0.0
 
 Chunked uploads move into the library: one file, many part requests, one upload
