@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.Buffer
 import okio.BufferedSink
@@ -19,97 +20,60 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import kotlin.coroutines.resumeWithException
 
-// Throttling interval of progress reports
+// Throttling interval of the raw progress callback. ProgressThrottle limits
+// the JS events above this.
 private const val PROGRESS_INTERVAL = 500 // milliseconds
 
 private const val RANGE_COPY_BUFFER = 64 * 1024
 
+/** [truncated] when the body passed [BodyCap.SETTLED_MAX_BYTES] and the rest was not read. */
 data class UploadResponse(
   val code: Int,
   val body: String,
-  val headers: Map<String, String>
+  val headers: Map<String, String>,
+  val truncated: Boolean = false,
 )
 
-// make an upload request using okhttp
-suspend fun okhttpUpload(
+/** One request as the worker sends it. [body] is null only for GET and DELETE with no body. */
+data class TransferRequest(
+  val url: String,
+  val method: String,
+  val headers: Map<String, String>,
+  val body: RequestBody?,
+)
+
+/** Sends one request and reports bytes written. The headers are sent as they are. */
+suspend fun okhttpSend(
   client: OkHttpClient,
-  upload: Upload,
-  file: File,
-  onProgress: (Long) -> Unit
+  request: TransferRequest,
+  onProgress: (Long) -> Unit,
 ): UploadResponse {
-  val request = Request.Builder()
-    .url(upload.url)
-    .headers(upload.headers.toHeaders())
-    .method(upload.method, withProgressListener(file.asRequestBody(), throttled(onProgress)))
+  val body = request.body?.let { withProgressListener(it, throttled(onProgress)) }
+  val built = Request.Builder()
+    .url(request.url)
+    .headers(request.headers.toHeaders())
+    .method(request.method, body)
     .build()
-  return awaitResponse(client, request)
+  return awaitResponse(client, built)
 }
+
+// Every body has a null content type, so OkHttp does not invent a
+// Content-Type. The header on the request (the caller's, or the one staging
+// set) is sent unchanged.
+
+/** A whole staged file. */
+fun fileBody(file: File): RequestBody = file.asRequestBody(null as MediaType?)
+
+/** A zero-length body for a POST, PUT, or PATCH with no body. OkHttp requires one. */
+fun emptyBody(): RequestBody = ByteArray(0).toRequestBody(null)
 
 /**
- * PUTs one byte range of the source file: a chunked part. It streams straight
- * from disk, with no temporary chunk file. The headers are the consumer's,
- * unchanged. The library adds nothing, per the design's protocol-as-data rule.
+ * The file bytes [start, end) as a request body: a chunked part. It streams
+ * from disk with no temporary chunk file. A RandomAccessFile is opened fresh
+ * on every writeTo, because OkHttp can replay a body (a connection-level
+ * retry), and a one-shot stream would then send truncated data.
  */
-suspend fun okhttpUploadPart(
-  client: OkHttpClient,
-  part: ChunkedManifest.Part,
-  file: File,
-  onProgress: (Long) -> Unit
-): UploadResponse {
-  val request = Request.Builder()
-    .url(part.url)
-    .headers(part.headers.toHeaders())
-    .put(withProgressListener(rangeRequestBody(file, part.start, part.end), throttled(onProgress)))
-    .build()
-  return awaitResponse(client, request)
-}
-
-private suspend fun awaitResponse(client: OkHttpClient, request: Request): UploadResponse =
-  suspendCancellableCoroutine { continuation ->
-    val call = client.newCall(request)
-    continuation.invokeOnCancellation { call.cancel() }
-    call.enqueue(object : Callback {
-      override fun onFailure(call: Call, e: IOException) =
-        continuation.resumeWithException(e)
-
-      override fun onResponse(call: Call, response: Response) {
-        val result = response.use { res -> // close the response asap
-          UploadResponse(
-            res.code,
-            // The body, unchanged: an empty body stays empty. A substituted
-            // HTTP reason phrase would make accept `bodyIncludes` rules match
-            // text that the server never sent. iOS also reports the body
-            // as-is.
-            res.body?.string().orEmpty(),
-            res.headers.toMultimap().mapValues { it.value.joinToString(", ") }
-          )
-        }
-
-        continuation.resumeWith(Result.success(result))
-      }
-    })
-  }
-
-private fun throttled(onProgress: (Long) -> Unit): (Long) -> Unit {
-  var lastProgressReport = 0L
-  return { progress ->
-    val now = System.currentTimeMillis()
-    if (now - lastProgressReport >= PROGRESS_INTERVAL) {
-      lastProgressReport = now
-      onProgress(progress)
-    }
-  }
-}
-
-/**
- * Streams the file bytes [start, end) as a request body. A RandomAccessFile
- * backs it, opened fresh on every writeTo call. OkHttp can replay a body (for
- * example, after a connection-level retry), and a one-shot stream would then
- * send truncated data silently.
- */
-private fun rangeRequestBody(file: File, start: Long, end: Long) = object : RequestBody() {
-  // Null, so no Content-Type is invented. The consumer's header is already on
-  // the request, unchanged.
+fun rangeRequestBody(file: File, start: Long, end: Long): RequestBody = object : RequestBody() {
   override fun contentType(): MediaType? = null
 
   override fun contentLength() = end - start
@@ -131,8 +95,51 @@ private fun rangeRequestBody(file: File, start: Long, end: Long) = object : Requ
   }
 }
 
-// create a request body that allows us to listen to progress.
-// okhttp has no built-in way of reporting progress
+private suspend fun awaitResponse(client: OkHttpClient, request: Request): UploadResponse =
+  suspendCancellableCoroutine { continuation ->
+    val call = client.newCall(request)
+    continuation.invokeOnCancellation { call.cancel() }
+    call.enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) =
+        continuation.resumeWithException(e)
+
+      override fun onResponse(call: Call, response: Response) {
+        val result = try {
+          response.use { res -> // close the response asap
+            // The body unchanged: an empty body stays empty. A substituted
+            // reason phrase would make accept `bodyIncludes` rules match text
+            // the server never sent. The cap applies while it streams in.
+            val body = res.body?.let {
+              BodyCap.read(it.source(), BodyCap.SETTLED_MAX_BYTES, it.contentType()?.charset() ?: Charsets.UTF_8)
+            }
+            UploadResponse(
+              res.code,
+              body?.text.orEmpty(),
+              res.headers.toMultimap().mapValues { it.value.joinToString(", ") },
+              body?.truncated ?: false,
+            )
+          }
+        } catch (e: IOException) {
+          continuation.resumeWithException(e)
+          return
+        }
+        continuation.resumeWith(Result.success(result))
+      }
+    })
+  }
+
+private fun throttled(onProgress: (Long) -> Unit): (Long) -> Unit {
+  var lastProgressReport = 0L
+  return { progress ->
+    val now = System.currentTimeMillis()
+    if (now - lastProgressReport >= PROGRESS_INTERVAL) {
+      lastProgressReport = now
+      onProgress(progress)
+    }
+  }
+}
+
+// OkHttp has no built-in progress report, so the body counts bytes as it writes.
 private fun withProgressListener(
   body: RequestBody,
   onProgress: (Long) -> Unit

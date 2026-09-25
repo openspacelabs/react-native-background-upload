@@ -1,6 +1,6 @@
 {
   "name": "react-native-background-upload",
-  "version": "9.0.0",
+  "version": "10.0.0",
   "description": "Cross platform http post file uploader with android and iOS background support",
   "main": "src/index",
   "typings": "src/index.ts",
@@ -9,10 +9,15 @@
   "files": [
     "src",
     "!src/__tests__",
+    "!src/__typetests__",
     "android",
     "!android/build",
     "!android/.gradle",
     "ios",
+    "!ios/Tests",
+    "!ios/Package.swift",
+    "!ios/.build",
+    "!ios/.swiftpm",
     "react-native-background-upload.podspec",
     "README.md",
     "CHANGELOG.md",
