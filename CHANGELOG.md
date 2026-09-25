@@ -21,8 +21,9 @@ Breaking:
 - **`cancelUpload` and `removeUpload` fold into `cancel(id)`.** A live entry
   settles `cancelled` and is forgotten after its ack; a settled entry is
   forgotten now, row and bytes.
-- **Per-upload `wifiOnly` becomes `setWifiOnly(enabled)`** on the queue,
-  persisted natively.
+- **`wifiOnly` moves from the upload options to the request descriptor.**
+  `setWifiOnly(enabled)` on the queue, persisted natively, is the value for
+  entries that omit it.
 - **`progress` carries `{ id, bytesSent, totalBytes }`** instead of a
   percentage.
 - **`configure()` must be called at boot, after every `define()`.** It starts
@@ -78,11 +79,24 @@ Added:
   a named error and warns when the native write has not settled by then, so
   a native bug cannot hang a caller in silence), and the v9 `android`
   notification options.
-- **Queue control**: `pause()` / `resume()` for the whole queue, `cancel(id)`,
+- **Queue control**: `pause(scope?)` / `resume(scope?)`, `cancel(id)`,
   `setWifiOnly(enabled)`, and `updateHeaders(patch)` to re-auth entries
   parked on 401 or 403. Each `updateHeaders()` call bumps a header
   generation, so a 401 from an attempt sent under older headers re-issues at
   once instead of parking.
+- **Key-scoped pause.** `pause()` and `resume()` take an optional
+  `{ keys?: string[] }`. No scope is the whole queue; `{ keys }` pauses or
+  resumes the entries of those definition keys, queued and future. An entry
+  is paused while the whole queue or its key is paused, so resuming one
+  scope does not resume an entry the other still pauses. Both states persist
+  natively. A misspelled scope field, `keys: undefined`, or an empty key
+  rejects, so a mistake cannot pause the whole queue. The native `pause` and
+  `resume` now take a scope object, `{}` for the whole queue, because
+  codegen has no optional arguments.
+- **Per-request `wifiOnly`.** `RequestDescriptor.wifiOnly?: boolean`
+  overrides `setWifiOnly()` for that entry and is persisted with it. An
+  entry that omits it follows `setWifiOnly()`, including later toggles.
+  Both are checked before each attempt.
 - **`getRequests(filter?)`**: synchronous, from native's in-memory index.
   Returns every entry native has not yet forgotten, so completed and
   cancelled rows appear until their ack and `error` rows until `cancel()` or

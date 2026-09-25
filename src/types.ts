@@ -99,6 +99,13 @@ export type RequestDescriptor = {
   /** Epoch ms. Default now + `lifetimeMs`. */
   expiresAt?: number;
   retry?: Partial<RetryPolicy>;
+  /**
+   * Wait for Wi-Fi before each attempt. When set, it overrides
+   * `setWifiOnly()` for this entry. When absent, the entry follows
+   * `setWifiOnly()`, so a later toggle moves it too. Persisted with the
+   * entry.
+   */
+  wifiOnly?: boolean;
   android?: { noNotification?: boolean };
 };
 
@@ -333,11 +340,19 @@ export interface AddListener {
   (event: 'attempt', listener: (e: AttemptEvent) => void): EventSubscription;
 }
 
+/**
+ * What `pause()` and `resume()` act on. No `keys` field means the whole
+ * queue. `keys` means the entries of those definition keys, queued and
+ * future; an empty list changes nothing. `keys: undefined` is refused, so a
+ * missing list cannot pause the whole queue by accident.
+ */
+export type PauseScope = { keys?: string[] };
+
 export type UploadClient = {
   configure: (options: ConfigureOptions) => void;
   define: Define;
-  pause: () => Promise<void>;
-  resume: () => Promise<void>;
+  pause: (scope?: PauseScope) => Promise<void>;
+  resume: (scope?: PauseScope) => Promise<void>;
   cancel: (id: string) => Promise<void>;
   setWifiOnly: (enabled: boolean) => Promise<void>;
   updateHeaders: (patch: Record<string, string>) => Promise<void>;

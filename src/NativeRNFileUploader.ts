@@ -17,7 +17,9 @@ export interface Spec extends TurboModule {
   // relaunch (no JS) can read it. Each call replaces the full configuration.
   configure(options: CodegenTypes.UnsafeObject): void;
   // Persists { id, key, varsJson, descriptor } and schedules it. varsJson is
-  // JSON.stringify(vars). descriptor.dataJson is JSON.stringify(data) and
+  // JSON.stringify(vars). descriptor.wifiOnly, when present, is a boolean
+  // persisted with the entry; see setWifiOnly. An entry enqueued while its
+  // scope is paused starts 'paused'; see pause. descriptor.dataJson is JSON.stringify(data) and
   // replaces data; a bodiless request omits it. Both cross as strings
   // because React Native on iOS drops object keys whose value is null, so
   // { status: null } would arrive as {}. Native parses them. dataJson
@@ -48,17 +50,33 @@ export interface Spec extends TurboModule {
   //
   // The resolved value is the entry's id. The JS layer does not read it.
   enqueue(entry: CodegenTypes.UnsafeObject): Promise<string>;
-  // Whole-queue pause. No outcome is produced; live rows move to 'paused'.
-  // A paused entry past expiresAt settles error/expired at resume.
-  pause(): Promise<void>;
-  resume(): Promise<void>;
+  // scope is { keys?: string[] }. JS always passes an object, because
+  // codegen has no optional arguments.
+  // - {} (no keys): the global gate. pause turns it on, resume turns it off.
+  // - { keys }: pause adds the keys to a paused-keys set, resume removes
+  //   them. An empty list changes nothing. keys never mean the whole queue.
+  // An entry is paused when the global gate is on OR its key is in the set,
+  // so a resume of one scope does not resume an entry that another scope
+  // still pauses (gate on + key resumed stays paused). The gate and the set
+  // are persisted, and apply to queued and future entries.
+  //
+  // Each live entry that becomes paused moves to 'paused', and each that
+  // stops being paused moves back to 'queued', with one 'state' event per
+  // entry. A running attempt stops. No outcome is produced and no attempt
+  // event is emitted. A paused entry past expiresAt settles error/expired
+  // when it stops being paused.
+  pause(scope: CodegenTypes.UnsafeObject): Promise<void>;
+  resume(scope: CodegenTypes.UnsafeObject): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. Settled
   // entry: forget now: row, bytes, and its unacknowledged outcomes. Unknown
   // id: resolve, no-op. If the journal or the store cannot be written,
   // cancel rejects with E_STORAGE and changes nothing; the caller may call
   // again.
   cancel(id: string): Promise<void>;
-  // Persisted natively. Applies to queued and future entries.
+  // The queue's Wi-Fi setting. Persisted natively. Applies to queued and
+  // future entries whose descriptor has no wifiOnly. An entry with
+  // descriptor.wifiOnly set (true or false) ignores it. Both are evaluated
+  // per attempt, so a toggle moves queued entries that follow the setting.
   setWifiOnly(enabled: boolean): Promise<void>;
   // Merges the patch into every entry not yet forgotten and bumps a header
   // generation. The patch also replaces same-named headers a part carries. A 401/403 from an attempt issued under an older generation

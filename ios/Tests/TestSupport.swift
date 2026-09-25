@@ -212,13 +212,16 @@ final class Harness {
     drain()
   }
 
-  func pause() {
-    coordinator.pause(resolve: {}, reject: { _, _ in XCTFail("pause rejected") })
+  /// No keys: the whole queue. `keys`: those definition keys.
+  func pause(keys: [String]? = nil) {
+    coordinator.pause(keys.map { ["keys": $0] } ?? [:], resolve: {},
+                      reject: { _, _ in XCTFail("pause rejected") })
     drain()
   }
 
-  func resume() {
-    coordinator.resume(resolve: {}, reject: { _, _ in XCTFail("resume rejected") })
+  func resume(keys: [String]? = nil) {
+    coordinator.resume(keys.map { ["keys": $0] } ?? [:], resolve: {},
+                       reject: { _, _ in XCTFail("resume rejected") })
     drain()
   }
 
@@ -268,16 +271,16 @@ final class Harness {
   }
 
   /// `data` crosses as its JSON text, as the JS layer sends it.
-  func dataRaw(id: String, data: Any = ["x": 1], url: String = "https://api.test/x",
+  func dataRaw(id: String, key: String = "k", data: Any = ["x": 1], url: String = "https://api.test/x",
                headers: [String: Any] = [:], extra: [String: Any] = [:]) -> [String: Any] {
     var d: [String: Any] = ["url": url, "dataJson": jsonText(data), "headers": headers]
     for (k, v) in extra { d[k] = v }
-    return raw(id: id, descriptor: d)
+    return raw(id: id, key: key, descriptor: d)
   }
 
   /// A chunked descriptor over a fresh source file of `size` bytes cut into
   /// `parts` equal parts.
-  func chunkedRaw(id: String, size: Int = 30, parts: Int = 3, source: URL? = nil,
+  func chunkedRaw(id: String, key: String = "k", size: Int = 30, parts: Int = 3, source: URL? = nil,
                   urlPrefix: String = "https://s3.test/part", extra: [String: Any] = [:]) -> [String: Any] {
     let file = source ?? root.appendingPathComponent("src-\(UUID().uuidString)")
     if source == nil { writeFile(file, bytes: size) }
@@ -291,6 +294,6 @@ final class Harness {
     var d: [String: Any] = ["file": file.path, "parts": list, "method": "PUT",
                             "headers": ["Content-Type": "video/mp4"]]
     for (k, v) in extra { d[k] = v }
-    return raw(id: id, descriptor: d)
+    return raw(id: id, key: key, descriptor: d)
   }
 }

@@ -139,14 +139,17 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     coordinator.enqueue(entry, resolve: { resolve($0) }, reject: { reject($0, $1, nil) })
   }
 
-  @objc(pause:reject:)
-  public func pause(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-    coordinator.pause(resolve: { resolve(nil) }, reject: { reject($0, $1, nil) })
+  // scope is { keys?: [String] }; [:] is the whole queue.
+  @objc(pause:resolve:reject:)
+  public func pause(_ scope: [String: Any], resolve: @escaping RCTPromiseResolveBlock,
+                    reject: @escaping RCTPromiseRejectBlock) {
+    coordinator.pause(scope, resolve: { resolve(nil) }, reject: { reject($0, $1, nil) })
   }
 
-  @objc(resume:reject:)
-  public func resume(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-    coordinator.resume(resolve: { resolve(nil) }, reject: { reject($0, $1, nil) })
+  @objc(resume:resolve:reject:)
+  public func resume(_ scope: [String: Any], resolve: @escaping RCTPromiseResolveBlock,
+                     reject: @escaping RCTPromiseRejectBlock) {
+    coordinator.resume(scope, resolve: { resolve(nil) }, reject: { reject($0, $1, nil) })
   }
 
   @objc(cancel:resolve:reject:)

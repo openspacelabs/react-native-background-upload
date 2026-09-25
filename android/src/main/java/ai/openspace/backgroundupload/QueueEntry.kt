@@ -49,6 +49,8 @@ data class Descriptor(
   val accept: List<UploadOutcome.AcceptRule>,
   val retry: RetryOverride?,
   val noNotification: Boolean,
+  /** The request's own Wi-Fi rule. Null follows the queue's setWifiOnly(). */
+  val wifiOnly: Boolean? = null,
 ) {
   val bodyKind: String
     get() = when {

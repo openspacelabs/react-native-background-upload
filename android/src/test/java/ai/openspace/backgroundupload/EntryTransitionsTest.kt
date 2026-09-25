@@ -154,6 +154,14 @@ class EnqueueRulesTest {
   }
 
   @Test
+  fun `resume takes the incoming wifiOnly, including its removal`() {
+    val stored = entry(descriptor = desc(dataJson = """{"a":1}""", wifiOnly = true))
+    val off = parsed(descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false))
+    assertEquals(false, EnqueueRules.resumed(stored, off, false, 0, 9).descriptor!!.wifiOnly)
+    assertNull(EnqueueRules.resumed(stored, parsed(), false, 0, 9).descriptor!!.wifiOnly)
+  }
+
+  @Test
   fun `resume of a settled entry reopens it with a fresh generation and attempts 0`() {
     val settled = entry(state = EntryState.ERROR, settledEventId = "ev", generation = 2, attempts = 3)
     val next = EnqueueRules.resumed(settled, parsed(), false, 0, 9)

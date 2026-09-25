@@ -59,7 +59,7 @@ extension QueueCoordinator {
     }
 
     var e = QueueEntry.created(from: p, staged: staged, headerGeneration: settings.headerGeneration,
-                               paused: settings.paused, now: now())
+                               paused: settings.isPaused(p.key), now: now())
     if let manifest = adopted {
       e.incarnation = manifest.incarnation
       for i in e.parts.indices { e.parts[i].accepted = manifest.parts[i].accepted }
@@ -70,12 +70,13 @@ extension QueueCoordinator {
     store.sweep(e)
     publish(e)
     armExpiry(e)
-    return (p.id, !settings.paused)
+    return (p.id, !settings.isPaused(p.key))
   }
 
   private func enqueueExisting(_ existing: QueueEntry, _ p: ParsedEnqueue) throws
     -> (id: String, issue: Bool) {
-    let paused = settings.paused
+    // By the incoming key: a same-id enqueue may move the entry to another key.
+    let paused = settings.isPaused(p.key)
     if existing.bodyFingerprint == p.fingerprint && !existing.legacy {
       switch existing.state {
       case .completed:
@@ -115,11 +116,19 @@ extension QueueCoordinator {
 
       case .queued, .running, .paused:
         // The in-flight task keeps its request. A retry waiting in the daemon
-        // picks up the new headers in willBeginDelayedRequest.
-        let n = existing.resumed(with: p, resetBudget: false, now: now())
+        // picks up the new headers in willBeginDelayedRequest. A paused entry
+        // parked on auth leaves the parking spot: fresh headers came with the
+        // call, as in the awaiting-auth case.
+        var n = existing.resumed(with: p, resetBudget: false, now: now())
+        n.authParked = false
         try saveOrThrow(n)
         publish(n)
         armExpiry(n)
+        if paused != (n.state == .paused) {
+          // A new key that another scope pauses, or no longer pauses.
+          applyPauseGate(n)
+          return (p.id, false)
+        }
         if ready, !paused, n.state == .queued, !n.isChunked, let at = n.nextAttemptAt, at > now() {
           // A simple retry waiting out its backoff: the caller asks again,
           // so retry now. The waiting attempt never ran: keep its ordinal.

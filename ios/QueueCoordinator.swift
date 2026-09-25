@@ -132,51 +132,83 @@ final class QueueCoordinator {
     }
   }
 
-  /// Whole-queue pause. Cancels every task with purpose "pause", so its
-  /// NSURLErrorCancelled produces no outcome and no attempt event. A single
-  /// body restarts from byte 0 on resume; a chunked upload keeps its
-  /// accepted parts.
-  func pause(resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
+  /// pause(scope). `{}` turns the global gate on; `{ keys }` adds the keys
+  /// to the paused set. Each live entry that is now paused stops: every task
+  /// is cancelled with purpose "pause", so its NSURLErrorCancelled produces
+  /// no outcome and no attempt event. A single body restarts from byte 0 on
+  /// resume; a chunked upload keeps its accepted parts.
+  func pause(_ scope: [String: Any], resolve: @escaping () -> Void,
+             reject: @escaping (String, String) -> Void) {
+    changeGate(scope, method: "pause", resolve: resolve, reject: reject) { next, keys in
+      if let keys { next.pausedKeys.formUnion(keys) } else { next.paused = true }
+    }
+  }
+
+  /// resume(scope). `{}` turns the global gate off; `{ keys }` removes the
+  /// keys from the paused set. An entry another scope still pauses stays
+  /// paused.
+  func resume(_ scope: [String: Any], resolve: @escaping () -> Void,
+              reject: @escaping (String, String) -> Void) {
+    changeGate(scope, method: "resume", resolve: resolve, reject: reject) { next, keys in
+      if let keys { next.pausedKeys.subtract(keys) } else { next.paused = false }
+    }
+  }
+
+  /// Parses the scope, saves the changed settings, then moves every entry
+  /// whose paused state changed. `change` gets nil keys for the whole queue.
+  private func changeGate(_ scope: [String: Any], method: String, resolve: @escaping () -> Void,
+                          reject: @escaping (String, String) -> Void,
+                          change: @escaping (inout QueueSettings, Set<String>?) -> Void) {
     queue.async {
+      var keys: Set<String>?
+      if let raw = scope["keys"], !(raw is NSNull) {
+        guard let list = raw as? [String] else {
+          reject("E_INVALID", "\(method): 'keys' must be a list of strings")
+          return
+        }
+        keys = Set(list)
+      }
       var next = self.settings
-      next.paused = true
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "pause: cannot save the queue settings")
+      change(&next, keys)
+      guard next == self.settings || self.saveSettings(next) else {
+        reject("E_STORAGE", "\(method): cannot save the queue settings")
         return
       }
-      for e in self.index.entries() where !e.legacy
-        && [.queued, .running, .awaitingAuth].contains(e.state) {
-        self.cancelTasks(e.id, purpose: .pause)
-        self.chunked.stop(e.id)
-        var n = e
-        n.state = .paused
-        n.nextAttemptAt = nil
-        self.commit(n)
-      }
+      self.applyPauseGates()
       resolve()
     }
   }
 
-  func resume(resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
-    queue.async {
-      var next = self.settings
-      next.paused = false
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "resume: cannot save the queue settings")
+  /// Moves every live entry to match the gates. See applyPauseGate.
+  func applyPauseGates() {
+    for e in index.entries() { applyPauseGate(e) }
+  }
+
+  /// An entry is paused when the global gate is on or its key is paused.
+  /// A live entry that should be paused stops and moves to 'paused'. A
+  /// paused entry that should not be moves back: past expiresAt it settles
+  /// expired (a pause does not expire an entry; the resume does), else to
+  /// awaiting-auth when it was parked, else to queued and issues.
+  func applyPauseGate(_ e: QueueEntry) {
+    guard e.isLive, !e.legacy else { return }
+    let gated = settings.isPaused(e.key)
+    if gated, e.state != .paused {
+      cancelTasks(e.id, purpose: .pause)
+      chunked.stop(e.id)
+      var n = e
+      n.state = .paused
+      n.nextAttemptAt = nil
+      commit(n)
+    } else if !gated, e.state == .paused {
+      if now() >= e.expiresAt {
+        settle(e.id, .expired)
         return
       }
-      for e in self.index.entries() where e.state == .paused && !e.legacy {
-        // A pause does not expire an entry; the resume does.
-        if self.now() >= e.expiresAt {
-          self.settle(e.id, .expired)
-          continue
-        }
-        var n = e
-        n.state = e.authParked ? .awaitingAuth : .queued
-        self.commit(n)
-        if n.state == .queued { self.issue(n.id) }
-      }
-      resolve()
+      var n = e
+      n.state = e.authParked ? .awaitingAuth : .queued
+      commit(n)
+      armExpiry(n)
+      if n.state == .queued { issue(n.id) }
     }
   }
 
@@ -203,9 +235,10 @@ final class QueueCoordinator {
     }
   }
 
-  /// Persisted. Queued and future entries use the session it picks. A queued
-  /// entry whose retry waits in the daemon moves to the new session; a
-  /// running task finishes where it started (session config is fixed).
+  /// Persisted. Queued and future entries with no wifiOnly of their own use
+  /// the session it picks. Such a queued entry whose retry waits in the
+  /// daemon moves to the new session; a running task finishes where it
+  /// started (session config is fixed). An entry that pins wifiOnly stays.
   func setWifiOnly(_ enabled: Bool, resolve: @escaping () -> Void,
                    reject: @escaping (String, String) -> Void) {
     queue.async {
@@ -217,7 +250,8 @@ final class QueueCoordinator {
         return
       }
       if changed && self.ready {
-        for e in self.index.entries() where e.state == .queued && !e.isChunked && !e.legacy {
+        for e in self.index.entries() where e.state == .queued && !e.isChunked && !e.legacy
+          && e.wifiOnly == nil {
           let remaining = e.nextAttemptAt.map { Int($0 - self.now()) }
           self.cancelTasks(e.id, purpose: .superseded)
           // The waiting attempt never ran: keep its ordinal and request id.
@@ -257,7 +291,7 @@ final class QueueCoordinator {
         n.headerGeneration = self.settings.headerGeneration
         if n.state == .awaitingAuth {
           n.authParked = false
-          n.state = self.settings.paused ? .paused : .queued
+          n.state = self.settings.isPaused(n.key) ? .paused : .queued
           self.commit(n)
           self.issue(n.id)
         } else {

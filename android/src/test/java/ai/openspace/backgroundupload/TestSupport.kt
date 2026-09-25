@@ -15,7 +15,8 @@ internal fun desc(
   accept: List<UploadOutcome.AcceptRule> = emptyList(),
   retry: RetryOverride? = null,
   noNotification: Boolean = false,
-) = Descriptor(url, method, headers, dataJson, form, file, parts, accept, retry, noNotification)
+  wifiOnly: Boolean? = null,
+) = Descriptor(url, method, headers, dataJson, form, file, parts, accept, retry, noNotification, wifiOnly)
 
 internal fun part(start: Long, end: Long, accepted: Boolean = false, url: String? = null) = Part(
   url = url ?: "https://example.com/part?start=$start",

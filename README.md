@@ -128,6 +128,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `accept` | Non-2xx responses to treat as success: `[{ status, bodyIncludes? }]`. |
 | `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
 | `retry` | Per-request override of the `configure()` retry defaults. |
+| `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
 | `android` | `{ noNotification?: boolean }`. See Silent uploads. |
 
 `vars` and `data` cross to native as JSON strings, and native parses them.
@@ -256,10 +257,10 @@ while the app was dead from being sent twice.
    live. A handler that keeps throwing sees the number grow. The library
    never gives up on its own; the app decides a poison policy from that
    number.
-3. **One outcome per settle cycle.** `pause()` produces none. A paused entry
-   past `expiresAt` settles `error` with `errorKind: 'expired'` at
-   `resume()`. A same-id `mutate()` on a settled entry reopens it, and it
-   settles once more.
+3. **One outcome per settle cycle.** `pause()` produces none, for the whole
+   queue or for a set of keys. A paused entry past `expiresAt` settles
+   `error` with `errorKind: 'expired'` when it is resumed. A same-id
+   `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
@@ -364,10 +365,27 @@ outcomes. A second call updates the settings and does not replay again.
 | `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when native enqueue has not settled by then. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, so a large file takes longer. A timeout means native did not answer, not that the request failed. A watchdog for a native bug, not a tuning knob. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
-### `pause(): Promise<void>` and `resume(): Promise<void>`
-Whole-queue pause. No outcome is produced; live rows show `paused`. A paused
-entry past `expiresAt` settles `error` with `errorKind: 'expired'` at
-`resume()`.
+### `pause(scope?): Promise<void>` and `resume(scope?): Promise<void>`
+`scope` is `{ keys?: string[] }`. No scope pauses or resumes the whole queue.
+`{ keys }` pauses or resumes the entries of those definition keys, queued and
+future. An empty `keys` list changes nothing. A scope field other than `keys`,
+`keys: undefined`, or a key that is not a non-empty string rejects, so a
+mistake cannot pause the whole queue.
+
+An entry is paused while the whole queue is paused or its key is paused. A
+resume of one scope does not resume an entry that the other still pauses:
+
+```ts
+await Upload.pause({ keys: ['capture.upload'] }); // captures wait, notes run
+await Upload.pause();                             // everything waits
+await Upload.resume();                            // notes run, captures still wait
+await Upload.resume({ keys: ['capture.upload'] }); // captures run
+```
+
+Both states are persisted natively. Each entry that moves emits one `state`
+event (`paused`, then `queued`). No outcome is produced and the bytes are
+kept. A paused entry past `expiresAt` settles `error` with
+`errorKind: 'expired'` when it is resumed.
 
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
@@ -380,7 +398,10 @@ whose entry save failed is already in effect: the work stops and the
 finishes it.
 
 ### `setWifiOnly(enabled): Promise<void>`
-Persisted natively. Applies to queued and future entries.
+The queue's Wi-Fi setting. Persisted natively. Applies to queued and future
+entries whose descriptor does not set `wifiOnly`. An entry that sets it keeps
+its own value. Both are checked before each attempt, so a toggle moves the
+queued entries that follow the setting.
 
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and
@@ -439,7 +460,8 @@ The CHANGELOG lists every removed v9 export with its replacement. In short:
 `startUpload` becomes a `define()` plus `mutate()`; `getAllUploads` becomes
 `getRequests()`; `cancelUpload` and `removeUpload` become `cancel(id)`; the
 terminal event names become the definition's handlers; per-upload `wifiOnly`
-becomes `setWifiOnly()`.
+stays on the descriptor, and `setWifiOnly()` sets the value for entries that
+omit it.
 
 What happens to work a v9 build left behind:
 

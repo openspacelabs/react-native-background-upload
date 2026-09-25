@@ -164,9 +164,28 @@ class UploaderModule(context: ReactApplicationContext) :
     onQueue(promise) { controller.enqueue(parsed) }
   }
 
-  override fun pause(promise: Promise) = onQueue(promise) { controller.pause(); null }
+  // scope is { keys?: string[] }; {} is the whole queue. Null (a stale JS
+  // bundle that sends no argument) is also the whole queue, not a crash.
+  // Parse on the calling thread, as enqueue does.
+  override fun pause(scope: ReadableMap?, promise: Promise) {
+    val keys = try {
+      EntryParsing.scopeKeys(scope)
+    } catch (e: EntryParsing.InvalidEntryException) {
+      promise.reject(QueueException.E_INVALID, e.message, e)
+      return
+    }
+    onQueue(promise) { controller.pause(keys); null }
+  }
 
-  override fun resume(promise: Promise) = onQueue(promise) { controller.resume(); null }
+  override fun resume(scope: ReadableMap?, promise: Promise) {
+    val keys = try {
+      EntryParsing.scopeKeys(scope)
+    } catch (e: EntryParsing.InvalidEntryException) {
+      promise.reject(QueueException.E_INVALID, e.message, e)
+      return
+    }
+    onQueue(promise) { controller.resume(keys); null }
+  }
 
   override fun cancel(id: String, promise: Promise) = onQueue(promise) { controller.cancel(id); null }
 

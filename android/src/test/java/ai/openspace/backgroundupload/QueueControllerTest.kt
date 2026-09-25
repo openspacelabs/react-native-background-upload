@@ -555,6 +555,99 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `a key pause moves only that key's live rows, one state event each, and no outcome`() {
+    store.save(entry(id = "c1", key = "capture", state = EntryState.QUEUED))
+    store.save(entry(id = "c2", key = "capture", state = EntryState.RUNNING))
+    store.save(entry(id = "c3", key = "capture", state = EntryState.ERROR))
+    store.save(entry(id = "n1", key = "note", state = EntryState.QUEUED))
+    controller.pause(listOf("capture"))
+    assertFalse(settings.load().paused)
+    assertEquals(setOf("capture"), settings.load().pausedKeys)
+    assertEquals(listOf("paused", "paused", "error", "queued"), listOf("c1", "c2", "c3", "n1").map { store.load(it)!!.state.wire })
+    assertEquals(setOf("c1", "c2"), scheduler.cancelled.toSet())
+    assertEquals(listOf("state:c1:paused", "state:c2:paused"), events.log.sorted())
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+
+    events.log.clear()
+    controller.resume(listOf("capture"))
+    assertEquals(emptySet<String>(), settings.load().pausedKeys)
+    assertEquals(listOf("queued", "queued", "error", "queued"), listOf("c1", "c2", "c3", "n1").map { store.load(it)!!.state.wire })
+    assertEquals(listOf("state:c1:queued", "state:c2:queued"), events.log.sorted())
+    assertTrue(scheduler.scheduled.containsAll(listOf("c1", "c2")))
+  }
+
+  @Test
+  fun `a key resume under the global gate stays paused, and a global resume under a key pause too`() {
+    store.save(entry(id = "c", key = "capture"))
+    store.save(entry(id = "n", key = "note"))
+    controller.pause(listOf("capture"))
+    controller.pause()
+    events.log.clear()
+    controller.resume(listOf("capture"))
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state) // the gate still pauses it
+    assertEquals(emptyList<String>(), events.log)
+
+    controller.pause(listOf("capture"))
+    controller.resume()
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state) // its key still pauses it
+    assertEquals(EntryState.QUEUED, store.load("n")!!.state)
+    assertEquals(listOf("state:n:queued"), events.log)
+    assertFalse("c" in scheduler.scheduled)
+  }
+
+  @Test
+  fun `a key pause of an already paused entry emits nothing`() {
+    store.save(entry(id = "c", key = "capture"))
+    controller.pause()
+    events.log.clear()
+    controller.pause(listOf("capture"))
+    assertEquals(emptyList<String>(), events.log)
+    assertEquals(setOf("capture"), settings.load().pausedKeys)
+  }
+
+  @Test
+  fun `an empty key list changes nothing`() {
+    store.save(entry(id = "c", key = "capture"))
+    controller.pause(emptyList())
+    assertEquals(QueueSettings(), settings.load())
+    assertEquals(EntryState.QUEUED, store.load("c")!!.state)
+    controller.pause(listOf("capture"))
+    controller.resume(emptyList())
+    assertEquals(setOf("capture"), settings.load().pausedKeys)
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+  }
+
+  @Test
+  fun `enqueue under a key pause starts paused, and other keys run`() {
+    controller.pause(listOf("capture"))
+    controller.enqueue(parsed(id = "c", key = "capture"))
+    controller.enqueue(parsed(id = "n", key = "note"))
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+    assertEquals(EntryState.QUEUED, store.load("n")!!.state)
+    assertEquals(listOf("n"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `updateHeaders unparks an entry under a key pause to paused`() {
+    store.save(entry(id = "c", key = "capture", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    settings.update { it.copy(pausedKeys = setOf("capture")) }
+    controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+    assertFalse("c" in scheduler.scheduled)
+  }
+
+  @Test
+  fun `the per-request wifiOnly is persisted with the entry`() {
+    controller.enqueue(parsed(id = "w", descriptor = desc(dataJson = """{"a":1}""", wifiOnly = true)))
+    controller.enqueue(parsed(id = "c", descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false)))
+    controller.enqueue(parsed(id = "f"))
+    val reread = QueueStore(root, RequestIndex())
+    assertEquals(true, reread.load("w")!!.descriptor!!.wifiOnly)
+    assertEquals(false, reread.load("c")!!.descriptor!!.wifiOnly)
+    assertNull(reread.load("f")!!.descriptor!!.wifiOnly)
+  }
+
+  @Test
   fun `setWifiOnly persists`() {
     controller.setWifiOnly(true)
     assertTrue(QueueSettingsStore(File(root, "settings.json")).load().wifiOnly)
@@ -773,5 +866,20 @@ class QueueControllerTest {
     assertEquals(EntryState.PAUSED, store.load("q")!!.state)
     assertEquals(EntryState.PAUSED, store.load("r")!!.state)
     assertEquals(listOf("p"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `sweep finishes a key pause or resume that a process death cut short`() {
+    // pause({ keys }) saved the set, then died before the rows.
+    settings.update { it.copy(pausedKeys = setOf("capture")) }
+    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED))
+    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED))
+    // resume({ keys }) of "video" saved the set, then died before the rows.
+    store.save(entry(id = "v", key = "video", state = EntryState.PAUSED))
+    controller.sweep()
+    assertEquals(EntryState.PAUSED, store.load("c")!!.state)
+    assertEquals(EntryState.QUEUED, store.load("n")!!.state)
+    assertEquals(EntryState.QUEUED, store.load("v")!!.state)
+    assertEquals(setOf("n", "v"), scheduler.scheduled.toSet())
   }
 }

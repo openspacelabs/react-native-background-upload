@@ -32,8 +32,8 @@ internal class EntryRun(
 
   class ExpiredException : Exception("expired before completion")
 
-  /** The queue was paused between the module's pause and the work cancel reaching us. */
-  class PausedException : Exception("queue paused")
+  /** The entry was paused (whole queue or its key) between the module's pause and the work cancel reaching us. */
+  class PausedException : Exception("paused")
 
   /** How one attempt ended, after the retry table. */
   sealed class AttemptResult {
@@ -96,7 +96,7 @@ internal class EntryRun(
       return
     }
     if (initial.state != EntryState.QUEUED && initial.state != EntryState.RUNNING) return
-    if (ops.settings().paused) return
+    if (ops.settings().isPaused(initial.key)) return
     if (!waitUntilDue(initial)) return
     val entry = ops.begin(entryId) ?: return
     generation = entry.generation
@@ -220,16 +220,17 @@ internal class EntryRun(
   // MARK: - helpers for the transfers
 
   /**
-   * Waits until the network fits the queue's wifi-only setting. Re-reads
-   * the settings and the entry at every poll.
+   * Waits until the network fits the entry's Wi-Fi rule: its own wifiOnly,
+   * else the queue's setting. Re-reads the settings and the entry at every
+   * poll, so a setWifiOnly() toggle reaches an entry that follows it.
    */
   suspend fun waitForNetwork() {
     while (true) {
       val s = ops.settings()
-      if (s.paused) throw PausedException()
       val entry = ops.latest(entryId, generation)
+      if (s.isPaused(entry.key)) throw PausedException()
       if (RetryClassifier.isExpired(host.now(), entry.expiresAt)) throw ExpiredException()
-      if (host.connectivity(s.wifiOnly) == Connectivity.Ok) return
+      if (host.connectivity(s.wifiOnlyFor(entry)) == Connectivity.Ok) return
       host.sleep(CONNECTIVITY_POLL_MS)
     }
   }
