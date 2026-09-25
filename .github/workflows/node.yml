@@ -40,3 +40,42 @@ jobs:
         run: |
           cd example/RNBGUExample/android
           ./gradlew :react-native-background-upload:testDebugUnitTest
+
+  # Host-side unit tests for the pure Swift half of the iOS module.
+  # They run on macOS with Xcode's Swift toolchain. ios/Package.swift needs
+  # swift-tools-version 5.9. The macos-15 image ships Xcode 16 or later
+  # (Swift 6 or later), which meets that.
+  #
+  # This job does not build the example app. Do that by hand before a
+  # release, because a simulator build is too slow for every push:
+  #   cd example/RNBGUExample/ios && pod install
+  #   xcodebuild -workspace RNBGUExample.xcworkspace -scheme RNBGUExample \
+  #     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+  #     -configuration Debug build
+  ios-host-tests:
+    runs-on: macos-15
+    timeout-minutes: 30
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: swift version
+        id: swift
+        run: |
+          swift --version
+          echo "version=$(swift --version 2>&1 | head -n 1 | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: cache swift build
+        uses: actions/cache@v4
+        with:
+          path: ios/.build
+          key: swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('ios/*.swift', 'ios/Tests/**/*.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+
+      - name: ios host tests
+        run: |
+          cd ios
+          swift test
