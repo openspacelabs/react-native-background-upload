@@ -218,6 +218,13 @@ back to `Bearer bad` before a step that needs a 401.
     `code=E_FILE_MISSING`. Press "GET with a body". Pass: rejected. The JS
     layer rejects it before native, so there is no code.
 
+15. **Dispatch latency.** Mode `ok`, app in the foreground. Press "JSON POST"
+    and note the clock on the log line the press writes. Note `at=` on the
+    first attempt line for that id. The difference is the time from `mutate()`
+    to the first send. Repeat five times and report the median. This number
+    decides whether a follow-up adds an in-process fast path for small
+    requests: a median under about 500 ms means no.
+
 ### iOS
 
 Set Settings > Developer > Network Link Conditioner > "3G" on the phone, so an
@@ -294,6 +301,9 @@ step says otherwise.
     "DELETE". Pass: the server shows a GET and a DELETE with 0 B, and both
     outcomes are `ok`. If one retries without end with a `network` error,
     write down the error message: a bodiless GET needs a download task.
+
+18. **Dispatch latency.** Same as Android step 15. iOS creates a background
+    session task per attempt, so this is the number to watch.
 
 ## Tests
 
