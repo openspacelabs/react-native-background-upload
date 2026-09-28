@@ -413,8 +413,10 @@ class WorkerOpsTest {
     repeat(200) { i ->
       val id = "race-$i"
       val owner = Any()
-      journal.stopListening(listener)
-      journal.stopListening(owner)
+      // The previous iteration's drain left its owner as the listener. Clear
+      // it, so the race starts with no listener every time.
+      journal.listener()?.let { journal.stopListening(it) }
+      assertFalse(journal.isListening())
       store.save(entry(id = id, state = EntryState.RUNNING))
       events.records.clear()
       val start = CyclicBarrier(2)
