@@ -15,6 +15,9 @@ Pod::Spec.new do |s|
   }
 
   s.source_files = "ios/**/*.{h,m,mm,swift}"
+  # ios/Package.swift and ios/Tests are the host-side unit tests (`swift test`).
+  # They and SwiftPM's build output must not compile into the pod.
+  s.exclude_files = ["ios/Package.swift", "ios/Tests/**", "ios/.build/**", "ios/.swiftpm/**"]
   # RNFileUploader.h imports the codegen spec header, which is Obj-C++ only. Keep
   # every header out of the public umbrella so a consumer's plain Obj-C
   # `@import react_native_background_upload;` still compiles — that import is how
