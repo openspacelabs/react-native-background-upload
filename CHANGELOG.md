@@ -1,3 +1,12 @@
+## 9.0.1
+
+Fixed:
+- **iOS no longer crashes when an upload's file is missing.** A background
+  session raises an Objective-C exception, not an error, when it cannot read
+  the file, and Swift cannot catch it. A file deleted after the caller checked
+  it ended the app. `startUpload` now rejects instead, and a chunked part that
+  cannot be enqueued journals an `error` with `errorKind: 'file'`.
+
 ## 9.0.0
 
 Chunked uploads move into the library: one file, many part requests, one upload

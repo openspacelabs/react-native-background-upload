@@ -50,13 +50,14 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   // removeUpload cancels work with no user-cancel mark.
   private static var removedIds = Set<String>()
   // The consumer-supplied ids whose check-and-create is in flight, mapped to
-  // the resolves of the concurrent same-id calls. The existence check
+  // the promises of the concurrent same-id calls. The existence check
   // enumerates the session tasks asynchronously. Without this claim, two
   // concurrent calls could both see "no task" and enqueue duplicates. The id
   // is claimed synchronously, under `lock`, BEFORE the enumeration is
   // dispatched. The map entry drains when the first caller's create-or-find
-  // lands.
-  private static var creationsInFlight: [String: [RCTPromiseResolveBlock]] = [:]
+  // lands, and every parked call gets that caller's outcome.
+  private static var creationsInFlight:
+    [String: [(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock)]] = [:]
 
   private static var backgroundSession: URLSession?
   private static var wifiOnlySession: URLSession?
@@ -249,8 +250,8 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     let fileURL = URL(string: path) ?? URL(fileURLWithPath: path)
 
     let session = self.session(wifiOnly: wifiOnly)
-    let startNew = {
-      let task = session.uploadTask(with: request, fromFile: fileURL)
+    let startNew: () throws -> Void = {
+      let task = try RNBackgroundUpload.uploadTask(session, request, fromFile: fileURL)
       task.taskDescription = uploadId
       TaskMap.set(TaskMap.Meta(id: uploadId, accept: accept, partIndex: nil),
                   forKey: self.taskMapKey(session, task))
@@ -265,30 +266,39 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     // session. A generated id cannot collide, so that path does not do the
     // (asynchronous) task enumeration.
     guard options["id"] != nil else {
-      startNew()
-      resolve(uploadId)
+      do {
+        try startNew()
+        resolve(uploadId)
+      } catch {
+        reject("RN Uploader", error.localizedDescription, error)
+      }
       return
     }
 
     // Serialize the check-and-create for each id: claim the id synchronously,
     // before we dispatch the enumeration. The first caller runs the check and
-    // creates the task. A concurrent same-id caller parks its resolve here.
-    // When the task lands, we answer the parked calls with the id. There is no
-    // second task, and there is no polling.
+    // creates the task. A concurrent same-id caller parks its promise here.
+    // When the task lands, we answer the parked calls with the same outcome.
+    // There is no second task, and there is no polling.
     RNBackgroundUpload.lock.lock()
     if RNBackgroundUpload.creationsInFlight[uploadId] != nil {
-      RNBackgroundUpload.creationsInFlight[uploadId]?.append(resolve)
+      RNBackgroundUpload.creationsInFlight[uploadId]?.append((resolve: resolve, reject: reject))
       RNBackgroundUpload.lock.unlock()
       return
     }
     RNBackgroundUpload.creationsInFlight[uploadId] = []
     RNBackgroundUpload.lock.unlock()
-    let settle = {
+    let settle = { (failure: Error?) in
       RNBackgroundUpload.lock.lock()
       let waiters = RNBackgroundUpload.creationsInFlight.removeValue(forKey: uploadId) ?? []
       RNBackgroundUpload.lock.unlock()
-      resolve(uploadId)
-      for waiter in waiters { waiter(uploadId) }
+      for call in [(resolve: resolve, reject: reject)] + waiters {
+        if let failure {
+          call.reject("RN Uploader", failure.localizedDescription, failure)
+        } else {
+          call.resolve(uploadId)
+        }
+      }
     }
 
     let group = DispatchGroup()
@@ -308,8 +318,12 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       }
     }
     group.notify(queue: .main) {
-      if !exists { startNew() }
-      settle()
+      do {
+        if !exists { try startNew() }
+        settle(nil)
+      } catch {
+        settle(error)
+      }
     }
   }
 
@@ -694,6 +708,23 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     let handler = RNBackgroundUpload.bgCompletionHandlers.removeValue(forKey: identifier)
     RNBackgroundUpload.bgHandlerLock.unlock()
     if let handler { DispatchQueue.main.async { handler() } }
+  }
+
+  // A background session raises an NSException, not an error, when the file
+  // cannot be read: for example, when the file was deleted after the caller
+  // checked it. Uncaught, the exception ends the process. This throws a
+  // URL-domain error instead, which errorKind(for:) classifies as 'file'.
+  static func uploadTask(_ session: URLSession, _ request: URLRequest,
+                         fromFile file: URL) throws -> URLSessionUploadTask {
+    var task: URLSessionUploadTask?
+    if let exception = RNBGUCatchException({
+      task = session.uploadTask(with: request, fromFile: file)
+    }) {
+      throw NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile, userInfo: [
+        NSLocalizedDescriptionKey: exception.reason ?? "Cannot read file at \(file.absoluteString)",
+      ])
+    }
+    return task!
   }
 
   // Classify a transport error to match Android's errorKind taxonomy: a missing or
