@@ -94,9 +94,13 @@ final class FakeTransport: Transport {
   /// completion can land before reconcile.
   var deferAllTasks = false
   private var pendingAllTasks: (() -> Void)?
+  /// Runs before each task is created. A throw creates no task, as when a
+  /// session cannot read the file.
+  var beforeUpload: ((URL) throws -> Void)?
 
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) -> UploadTask {
+              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask {
+    try beforeUpload?(file)
     let task = FakeTask(key: "\(wifiOnly ? "wifi" : "any"):\(Self.next)", description: description,
                         request: request, file: file, beginAt: beginAt, wifiOnly: wifiOnly)
     Self.next += 1

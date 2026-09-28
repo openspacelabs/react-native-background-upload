@@ -342,10 +342,20 @@ private final class SessionTransport: Transport {
   }
 
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) -> UploadTask {
+              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask {
     let session = self.session(wifiOnly: wifiOnly)
-    // A background session uploads from a file only.
-    let task = session.uploadTask(with: request, fromFile: file)
+    // A background session uploads from a file only. It raises an NSException,
+    // not an error, when it cannot read the file. Uncaught, that ends the
+    // process.
+    var created: URLSessionUploadTask?
+    if let exception = RNBGUCatchException({
+      created = session.uploadTask(with: request, fromFile: file)
+    }) {
+      throw NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile, userInfo: [
+        NSLocalizedDescriptionKey: exception.reason ?? "Cannot read file at \(file.absoluteString)",
+      ])
+    }
+    let task = created!
     task.taskDescription = description
     if let beginAt { task.earliestBeginDate = beginAt }
     let handle = SessionTask(session: session, task: task)

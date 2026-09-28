@@ -318,12 +318,20 @@ final class ChunkedCoordinator {
       id: id, partIndex: index, incarnation: e.incarnation, attempt: e.attempts,
       requestId: requestId, headerGeneration: q.settings.headerGeneration,
       generation: e.generation, purpose: .attempt)
-    let task = q.transport.upload(
-      q.buildRequest(e, url: url, requestId: requestId, partHeaders: part.headers),
-      fromFile: file, wifiOnly: q.settings.wifiOnly(e.wifiOnly),
-      description: ChunkedEngine.taskDescription(id: id, part: index, incarnation: e.incarnation),
-      beginAt: delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) },
-      beforeResume: { key in self.q.taskMap.set(meta, forKey: key) })
+    let task: UploadTask
+    do {
+      task = try q.transport.upload(
+        q.buildRequest(e, url: url, requestId: requestId, partHeaders: part.headers),
+        fromFile: file, wifiOnly: q.settings.wifiOnly(e.wifiOnly),
+        description: ChunkedEngine.taskDescription(id: id, part: index, incarnation: e.incarnation),
+        beginAt: delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) },
+        beforeResume: { key in self.q.taskMap.set(meta, forKey: key) })
+    } catch {
+      // The blob is whole (the part was just built from it), so the next
+      // build can pass.
+      refillLater(e, part: part, delayMs: delayMs)
+      return false
+    }
     inFlight[id, default: [:]][index] = task.key
     q.liveTasks[task.key] = (id, task)
     if let delayMs {

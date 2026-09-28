@@ -21,9 +21,9 @@ protocol UploadTask: AnyObject {
 protocol Transport: AnyObject {
   /// Creates an upload task, sets its description and begin date, calls
   /// `beforeResume` with its key (the caller writes the TaskMap there), then
-  /// resumes it.
+  /// resumes it. Throws, with no task created, when `file` cannot be read.
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) -> UploadTask
+              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask
 
   /// Every task of both sessions. The completion may run on any queue.
   func allTasks(_ completion: @escaping ([UploadTask]) -> Void)

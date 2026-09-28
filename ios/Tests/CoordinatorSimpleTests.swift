@@ -457,6 +457,33 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "file")
   }
 
+  func testUnreadableBodyAtIssueCreatesNoTaskAndIssuesAfterABackoff() throws {
+    let transport = h.transport
+    transport.beforeUpload = { [weak transport] _ in
+      transport?.beforeUpload = nil
+      throw NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    XCTAssertEqual(try h.enqueue(h.dataRaw(id: "a")).get(), "a")
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertTrue(h.sink.settled.isEmpty, "not a terminal while the body exists")
+    h.advance(1_000)
+    _ = onlyTask()
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertEqual(h.entry("a")?.attempts, 2)
+  }
+
+  func testBodyDeletedAsTheTaskIsCreatedIsTerminal() throws {
+    h.transport.beforeUpload = { file in
+      try FileManager.default.removeItem(at: file)
+      throw NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "file")
+  }
+
   func testUnreadableFileIsTransient() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     h.complete(onlyTask(), error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNoPermissionsToReadFile))
