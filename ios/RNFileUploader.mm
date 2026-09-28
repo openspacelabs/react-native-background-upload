@@ -66,38 +66,60 @@
 
 #pragma mark - Exported methods
 
-// configure() carries the Android notification configuration. iOS background
-// uploads have no library-owned notification. Thus there is nothing to save.
+// Each method is a one-line forward to the Swift engine, which hops onto its
+// own serial queue and returns. getRequests is the one synchronous method: it
+// reads the in-memory index under a lock.
+
 - (void)configure:(NSDictionary *)options
 {
+  [RNBackgroundUpload.shared configure:options];
 }
 
-- (void)startUpload:(NSDictionary *)options
+- (void)enqueue:(NSDictionary *)entry
+        resolve:(RCTPromiseResolveBlock)resolve
+         reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared enqueue:entry resolve:resolve reject:reject];
+}
+
+- (void)pause:(NSDictionary *)scope
+      resolve:(RCTPromiseResolveBlock)resolve
+       reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared pause:scope resolve:resolve reject:reject];
+}
+
+- (void)resume:(NSDictionary *)scope
+       resolve:(RCTPromiseResolveBlock)resolve
+        reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared resume:scope resolve:resolve reject:reject];
+}
+
+- (void)cancel:(NSString *)id
+       resolve:(RCTPromiseResolveBlock)resolve
+        reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared cancel:id resolve:resolve reject:reject];
+}
+
+- (void)setWifiOnly:(BOOL)enabled
             resolve:(RCTPromiseResolveBlock)resolve
              reject:(RCTPromiseRejectBlock)reject
 {
-  [RNBackgroundUpload.shared startUpload:options resolve:resolve reject:reject];
+  [RNBackgroundUpload.shared setWifiOnly:enabled resolve:resolve reject:reject];
 }
 
-- (void)startChunkedUpload:(NSDictionary *)options
-                   resolve:(RCTPromiseResolveBlock)resolve
-                    reject:(RCTPromiseRejectBlock)reject
+- (void)updateHeaders:(NSDictionary *)patch
+              resolve:(RCTPromiseResolveBlock)resolve
+               reject:(RCTPromiseRejectBlock)reject
 {
-  [RNBackgroundUpload.shared startChunkedUpload:options resolve:resolve reject:reject];
+  [RNBackgroundUpload.shared updateHeaders:patch resolve:resolve reject:reject];
 }
 
-- (void)cancelUpload:(NSString *)id
-             resolve:(RCTPromiseResolveBlock)resolve
-              reject:(RCTPromiseRejectBlock)reject
+- (NSArray<NSDictionary *> *)getRequests
 {
-  [RNBackgroundUpload.shared cancelUpload:id resolve:resolve reject:reject];
-}
-
-- (void)removeUpload:(NSString *)id
-             resolve:(RCTPromiseResolveBlock)resolve
-              reject:(RCTPromiseRejectBlock)reject
-{
-  [RNBackgroundUpload.shared removeUpload:id resolve:resolve reject:reject];
+  return [RNBackgroundUpload.shared getRequests];
 }
 
 - (void)getUnacknowledgedEvents:(RCTPromiseResolveBlock)resolve
@@ -113,15 +135,9 @@
   [RNBackgroundUpload.shared ackEvents:ids resolve:resolve reject:reject];
 }
 
-- (void)getAllUploads:(RCTPromiseResolveBlock)resolve
-               reject:(RCTPromiseRejectBlock)reject
-{
-  [RNBackgroundUpload.shared getAllUploads:resolve reject:reject];
-}
-
 #pragma mark - RNFileUploaderEventDelegate
 
-// Called synchronously on the URLSession delegate queue. That is safe and
+// Called on the engine's serial queue. That is safe and
 // deliberate: the generated emitter locks its own state and dispatches each
 // listener through the JS CallInvoker, so it is already thread-safe and already
 // async onto the JS thread. Deferring to the main queue instead would open a
@@ -142,24 +158,24 @@
   }
 }
 
+- (void)emitState:(NSDictionary *)body
+{
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnState:body]; }];
+}
+
 - (void)emitProgress:(NSDictionary *)body
 {
-  [self safeEmit:^(RNFileUploader *emitter) { [emitter emitOnProgress:body]; }];
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnProgress:body]; }];
 }
 
-- (void)emitCompleted:(NSDictionary *)body
+- (void)emitAttempt:(NSDictionary *)body
 {
-  [self safeEmit:^(RNFileUploader *emitter) { [emitter emitOnCompleted:body]; }];
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnAttempt:body]; }];
 }
 
-- (void)emitError:(NSDictionary *)body
+- (void)emitSettled:(NSDictionary *)body
 {
-  [self safeEmit:^(RNFileUploader *emitter) { [emitter emitOnError:body]; }];
-}
-
-- (void)emitCancelled:(NSDictionary *)body
-{
-  [self safeEmit:^(RNFileUploader *emitter) { [emitter emitOnCancelled:body]; }];
+  [self safeEmit:^(RNFileUploader *m) { [m emitOnSettled:body]; }];
 }
 
 @end
