@@ -192,6 +192,21 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertNotNil(partTask(3), "built and sent after the backoff")
   }
 
+  func testUnreadablePartFileAtIssueRefillsLater() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
+    let transport = h.transport
+    transport.beforeUpload = { [weak transport] _ in
+      transport?.beforeUpload = nil
+      throw NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    h.complete(try XCTUnwrap(partTask(0)))
+    XCTAssertTrue(h.sink.settled.isEmpty, "not a file terminal")
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertNil(partTask(3))
+    h.advance(1_000)
+    XCTAssertNotNil(partTask(3), "sent after the backoff")
+  }
+
   func testPart401ParksTheWholeEntryAndHeadersResumeIt() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
     h.complete(try XCTUnwrap(partTask(0)))

@@ -76,18 +76,34 @@ extension QueueCoordinator {
     let meta = TaskMap.Meta(
       id: id, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt)
-    let task = transport.upload(
-      buildRequest(e, url: url, requestId: requestId), fromFile: body,
-      wifiOnly: settings.wifiOnly(e.wifiOnly),
-      description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
-      beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
-      beforeResume: { key in self.taskMap.set(meta, forKey: key) })
+    let task: UploadTask
+    do {
+      task = try transport.upload(
+        buildRequest(e, url: url, requestId: requestId), fromFile: body,
+        wifiOnly: settings.wifiOnly(e.wifiOnly),
+        description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
+        beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
+        beforeResume: { key in self.taskMap.set(meta, forKey: key) })
+    } catch {
+      // The same verdict as a file error at completion: terminal only when
+      // the staged body is gone. Otherwise issue again after a backoff; an
+      // immediate re-issue would fail the same way.
+      guard FileIO.exists(body) else {
+        settle(id, .fileError("the staged body is missing"))
+        return
+      }
+      e.state = .queued
+      e.nextAttemptAt = nil
+      commit(e)
+      deferIssue(e, delayMs: delayMs)
+      return
+    }
     liveTasks[task.key] = (id, task)
     throttle.reset(id)
   }
 
-  /// The attempt could not be written ahead (disk full, protected data).
-  /// The entry stays as the disk has it, queued in memory, with no task.
+  /// The attempt got no task: its write-ahead failed (disk full, protected
+  /// data), or the session could not read the body. The entry stays queued.
   /// Issue again after the wait it asked for, or a backoff, whichever is
   /// longer, unless something else moved the entry first.
   private func deferIssue(_ e: QueueEntry, delayMs: Int?) {

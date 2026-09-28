@@ -199,6 +199,10 @@ Fixed:
   dead. v9 ran the cooldown on an in-process timer.
 - iOS: task-map keys whose completion never arrives are pruned at the end of
   the relaunch grace wait and when their entry is gone. v9 kept them forever.
+- iOS: a file the session cannot read no longer crashes the app. The session
+  raises an Objective-C exception, which Swift cannot catch. The attempt now
+  gets no task. It settles `file` only when the staged body is gone, and
+  otherwise issues again after a backoff.
 
 ## 9.0.0
 
