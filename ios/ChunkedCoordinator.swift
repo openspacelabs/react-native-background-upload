@@ -498,7 +498,15 @@ final class ChunkedCoordinator {
       request.setValue(value, forHTTPHeaderField: key)
     }
     let session = uploader.session(wifiOnly: manifest.wifiOnly)
-    let task = session.uploadTask(with: request, fromFile: partFile)
+    let task: URLSessionUploadTask
+    do {
+      task = try RNBackgroundUpload.uploadTask(session, request, fromFile: partFile)
+    } catch {
+      stall(id, entry: errorEntry(
+        id: id, error: "cannot enqueue part \(index): \(error.localizedDescription)",
+        errorKind: "file", partIndex: index))
+      return false
+    }
     task.taskDescription = ChunkedEngine.taskDescription(
       id: id, part: index, incarnation: manifest.incarnation)
     let key = TaskMap.key(session, task)

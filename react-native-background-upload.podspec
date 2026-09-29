@@ -16,10 +16,12 @@ Pod::Spec.new do |s|
 
   s.source_files = "ios/**/*.{h,m,mm,swift}"
   # RNFileUploader.h imports the codegen spec header, which is Obj-C++ only. Keep
-  # every header out of the public umbrella so a consumer's plain Obj-C
+  # it out of the public umbrella so a consumer's plain Obj-C
   # `@import react_native_background_upload;` still compiles — that import is how
   # the AppDelegate reaches RNBackgroundUpload's background-session handler.
-  s.private_header_files = "ios/**/*.h"
+  s.private_header_files = "ios/RNFileUploader.h"
+  # Foundation-only, and public so that the Swift half of the module can see it.
+  s.public_header_files = "ios/RNBGUCatchException.h"
 
   s.platform = :ios, "15.1"
   s.swift_version = "5.0"
