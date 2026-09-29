@@ -6,6 +6,14 @@ Fixed:
   the file, and Swift cannot catch it. A file deleted after the caller checked
   it ended the app. `startUpload` now rejects instead, and a chunked part that
   cannot be enqueued journals an `error` with `errorKind: 'file'`.
+- **Android 15+ no longer kills the app when the `dataSync` foreground-service
+  budget runs out.** Android gives `dataSync` services six hours per day in the
+  background, then calls `onTimeout` and expects the service to stop.
+  WorkManager 2.9 never answered, so the system threw
+  `ForegroundServiceDidNotStopInTimeException` and the process died mid-upload.
+  WorkManager 2.12 stops the timed-out workers itself. They re-run without
+  foreground priority until the user opens the app, which resets the budget.
+  Bumps `androidx.work` to 2.12.0 (minSdk 24).
 
 ## 9.0.0
 
