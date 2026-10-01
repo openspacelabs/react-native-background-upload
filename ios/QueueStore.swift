@@ -8,7 +8,8 @@ import Foundation
 /// - `entry.json`: the QueueEntry (v10).
 /// - `body-<uuid>` or `blob-<uuid>` / `blob`: the staged body.
 /// - `part-<i>.<incarnation>.<start>-<end>`: a chunked part while in flight.
-/// - `manifest.json`: a v9 manifest, until a same-id enqueue adopts it.
+/// - `manifest.json`: a v9 manifest, until a same-id enqueue adopts it or
+///   cancel deletes it.
 ///
 /// Next to the directories: `settings.json` and the `v10-imported` marker.
 /// Writes are tmp + fsync + rename. A corrupt or half-written file reads as
@@ -80,6 +81,18 @@ final class QueueStore {
   /// manifest.
   func remove(_ id: String) {
     queue.sync { _ = try? FileManager.default.removeItem(at: dir(id)) }
+  }
+
+  /// Deletes the id directory when it holds no `entry.json`: v9 files that
+  /// no row owns. A directory with an `entry.json`, readable or not, is kept.
+  /// The empty id names the store root, so it deletes nothing.
+  func removeUnowned(_ id: String) {
+    guard !id.isEmpty else { return }
+    queue.sync {
+      let d = dir(id)
+      guard FileIO.exists(d), !FileIO.exists(d.appendingPathComponent(Self.entryName)) else { return }
+      _ = try? FileManager.default.removeItem(at: d)
+    }
   }
 
   // MARK: - Forget in steps (cancel on a settled entry)

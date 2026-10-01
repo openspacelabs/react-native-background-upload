@@ -146,11 +146,15 @@ extension QueueCoordinator {
     cancelTasks(existing.id, purpose: .superseded)
     chunked.stop(existing.id)
     // A chunked replace may keep the current blob when the caller already
-    // deleted its source (the part-404 recreate over moved bytes).
+    // deleted its source (the part-404 recreate over moved bytes). A legacy
+    // row with no body may still have the v9 blob on disk: its manifest
+    // could not be read at import.
     var fallback: String?
     if let path = existing.bodyPath, existing.isChunked || existing.legacy,
        path == ChunkedManifestV9.blobName || path.hasPrefix(BodyStaging.blobPrefix) {
       fallback = path
+    } else if existing.legacy, existing.bodyPath == nil {
+      fallback = ChunkedManifestV9.blobName
     }
     let staged = try mapStaging {
       try BodyStaging.stage(p.body, parts: p.parts, into: store.dir(p.id), fallbackBlob: fallback)

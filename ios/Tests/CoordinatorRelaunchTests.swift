@@ -486,6 +486,52 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertEqual(l.transport.live.count, 3)
   }
 
+  /// v9 state with a journaled error for a chunked id whose manifest is
+  /// truncated, and a blob when `blobBytes` is set.
+  private func legacyErrorWithUnreadableManifest(blobBytes: Int?) -> Harness {
+    let root = makeTempDir()
+    let v9Store = QueueStore(root: root.appendingPathComponent("queue"))
+    let v9Journal = EventJournal(root: root.appendingPathComponent("events"))
+    V9Journal.write(V9Journal.error(eventId: "ev1", id: "cap-1", timestamp: 100), eventId: "ev1",
+                    into: v9Journal.root)
+    writeFile(v9Store.fileURL("cap-1", QueueStore.manifestName), #"{"id":"cap-1","parts":["#)
+    if let blobBytes { writeFile(v9Store.fileURL("cap-1", "blob"), bytes: blobBytes) }
+    let fresh = Harness(root: root)
+    fresh.boot()
+    return fresh
+  }
+
+  func testLegacyErrorRowWithAnUnreadableManifestRunsOverTheV9Blob() throws {
+    let l = legacyErrorWithUnreadableManifest(blobBytes: 30)
+    defer { try? FileManager.default.removeItem(at: l.root) }
+    let legacy = try XCTUnwrap(l.entry("cap-1"))
+    XCTAssertTrue(legacy.legacy)
+    XCTAssertEqual(legacy.state, .error)
+    XCTAssertNil(legacy.bodyPath, "the import could not read the manifest")
+
+    let gone = l.root.appendingPathComponent("gone")
+    _ = try l.enqueue(l.chunkedRaw(id: "cap-1", size: 30, parts: 3, source: gone)).get()
+    let e = try XCTUnwrap(l.entry("cap-1"))
+    XCTAssertFalse(e.legacy)
+    XCTAssertEqual(e.generation, 2)
+    XCTAssertEqual(e.bodyPath, "blob")
+    XCTAssertTrue(e.parts.allSatisfy { !$0.accepted }, "no manifest to resume from: every part is sent")
+    XCTAssertEqual(l.row("cap-1")?["bytesSent"] as? Int64, 0)
+    XCTAssertTrue(FileIO.exists(l.store.fileURL("cap-1", "blob")))
+    XCTAssertFalse(FileIO.exists(l.store.fileURL("cap-1", QueueStore.manifestName)), "the bad manifest is deleted")
+    XCTAssertEqual(l.transport.live.count, 3)
+  }
+
+  func testLegacyErrorRowWithNoBlobAndAMissingFileRejectsFileMissing() throws {
+    let l = legacyErrorWithUnreadableManifest(blobBytes: nil)
+    defer { try? FileManager.default.removeItem(at: l.root) }
+    let gone = l.root.appendingPathComponent("gone")
+    guard case .failure(let missing) = l.enqueue(l.chunkedRaw(id: "cap-1", size: 30, parts: 3, source: gone))
+    else { return XCTFail("expected E_FILE_MISSING") }
+    XCTAssertEqual(missing.code, "E_FILE_MISSING")
+    XCTAssertEqual(l.entry("cap-1")?.legacy, true, "the legacy row stays")
+  }
+
   func testV9JournalFilesOfEachKindImportAsLegacyRows() throws {
     let root = makeTempDir()
     let events = root.appendingPathComponent("events")

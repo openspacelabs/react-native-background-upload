@@ -13,7 +13,7 @@ import java.util.Base64
  *
  * A v10 directory holds `entry.json` and at most one staged body file (see
  * [StagedBody.fileName]). A v9 directory holds `manifest.json` and `blob`
- * until a same-id enqueue adopts it.
+ * until a same-id enqueue adopts it or cancel deletes it.
  *
  * Every write is tmp + fsync + rename ([AtomicFiles]). Bodies are staged
  * before `entry.json` is saved, so an `entry.json` on disk means its body is
@@ -114,6 +114,18 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     entryFile(id).delete()
     entryDir(id).deleteRecursively()
     index.remove(id)
+  }
+
+  /**
+   * Deletes [id]'s directory when it holds no `entry.json`: v9 files that no
+   * row owns. A directory with an `entry.json`, readable or not, is kept. The
+   * empty id encodes to the store root, so it deletes nothing.
+   */
+  @Synchronized
+  fun removeUnowned(id: String) {
+    if (id.isEmpty()) return
+    val d = entryDir(id)
+    if (d.isDirectory && !File(d, ENTRY_FILE).exists()) d.deleteRecursively()
   }
 
   /** Every v10 entry. A directory with only a v9 manifest is not a row. */
