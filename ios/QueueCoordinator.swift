@@ -213,13 +213,17 @@ final class QueueCoordinator {
   }
 
   /// Live entry: journal 'cancelled' (user); forgotten after its ack.
-  /// Settled entry: forgotten now, with its unacked outcomes. Unknown: no-op.
+  /// Settled entry: forgotten now, with its unacked outcomes. No row: the id
+  /// directory is deleted when it has no entry file.
   /// When the journal or the store cannot be written, rejects E_STORAGE and
   /// changes nothing: the entry keeps running (or stays settled), and JS may
   /// call again.
   func cancel(_ id: String, resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
     queue.async {
-      guard let e = self.index.entry(id) else { return resolve() }
+      guard let e = self.index.entry(id) else {
+        self.store.removeUnowned(id)
+        return resolve()
+      }
       if e.isLive && !e.legacy {
         guard self.settle(id, .cancelled(reason: "user"), requireJournal: true) else {
           return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed")

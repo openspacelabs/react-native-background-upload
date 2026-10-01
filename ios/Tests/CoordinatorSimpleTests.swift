@@ -248,7 +248,64 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertNil(h.row("a"))
     XCTAssertFalse(FileIO.exists(h.store.dir("a")))
     XCTAssertTrue(h.journal.unacknowledged().isEmpty)
-    h.cancel("unknown") // no-op
+    XCTAssertTrue(cancelResolves("unknown"))
+    XCTAssertFalse(FileIO.exists(h.store.dir("unknown")))
+  }
+
+  /// True when cancel resolved; a rejection or no answer is false.
+  private func cancelResolves(_ id: String) -> Bool {
+    var resolved = false
+    h.coordinator.cancel(id, resolve: { resolved = true }, reject: { _, _ in })
+    h.drain()
+    return resolved
+  }
+
+  private func writeV9Upload(_ id: String) throws {
+    let manifest = ChunkedManifestV9(id: id, parts: [
+      .init(url: "https://s3.test/part1", start: 0, end: 10, accepted: true),
+      .init(url: "https://s3.test/part2", start: 10, end: 20, accepted: false),
+    ], expiresAt: h.clock + 60_000, incarnation: "v9inc")
+    writeFile(h.store.fileURL(id, QueueStore.manifestName),
+              String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
+    writeFile(h.store.fileURL(id, ChunkedManifestV9.blobName), bytes: 20)
+  }
+
+  func testCancelOfAnIdWithOnlyV9FilesDeletesItsDirectory() throws {
+    try writeV9Upload("cap")
+    XCTAssertTrue(cancelResolves("cap"))
+    XCTAssertFalse(FileIO.exists(h.store.dir("cap")))
+    XCTAssertTrue(h.sink.states.isEmpty)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  func testCancelOfAnIdWithOnlyABlobDeletesItsDirectory() {
+    writeFile(h.store.fileURL("cap", ChunkedManifestV9.blobName), bytes: 20)
+    XCTAssertTrue(cancelResolves("cap"))
+    XCTAssertFalse(FileIO.exists(h.store.dir("cap")))
+  }
+
+  func testCancelKeepsADirectoryWhoseEntryFileCannotBeRead() throws {
+    try writeV9Upload("cap")
+    writeFile(h.store.fileURL("cap", QueueStore.entryName), "{")
+    XCTAssertTrue(cancelResolves("cap"))
+    XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", QueueStore.entryName)))
+    XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", QueueStore.manifestName)))
+    XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", ChunkedManifestV9.blobName)))
+  }
+
+  func testCancelOfAnEmptyIdDeletesNothingInTheStore() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    writeFile(h.store.fileURL("cap", ChunkedManifestV9.blobName), bytes: 20)
+    h.setWifiOnly(true)
+    XCTAssertTrue(h.store.isImported())
+    let states = h.sink.states.count
+    XCTAssertTrue(cancelResolves(""))
+    XCTAssertNotNil(h.entry("a"))
+    XCTAssertNotNil(h.store.load("a"))
+    XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", ChunkedManifestV9.blobName)))
+    XCTAssertTrue(FileIO.exists(h.store.root.appendingPathComponent("settings.json")))
+    XCTAssertTrue(h.store.isImported())
+    XCTAssertEqual(h.sink.states.count, states)
   }
 
   func testCancelWhoseJournalWriteFailsRejectsStorageAndChangesNothing() throws {

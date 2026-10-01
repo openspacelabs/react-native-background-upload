@@ -114,8 +114,13 @@ class QueueController(
       }
       EnqueueRules.Action.Replace -> {
         val old = existing!!
-        // Different parts: a present caller file wins; the old blob is the fallback.
-        val ownedBlob = if (old.body?.kind == StagedBody.CHUNKED) store.bodyFile(old) else null
+        // Different parts: a present caller file wins; the old blob is the
+        // fallback. A legacy row has no body, so its fallback is the v9 blob.
+        val ownedBlob = when {
+          old.legacy -> store.blobFile(p.id)
+          old.body?.kind == StagedBody.CHUNKED -> store.bodyFile(old)
+          else -> null
+        }
         val staged = preStaged(old.generation + 1)
           ?: stageOrThrow(p.descriptor, dir, old.generation + 1, ownedBlob)
         commit(EnqueueRules.replaced(old, p, staged, s.isPaused(p.key), s.headerGeneration, now))
@@ -205,7 +210,8 @@ class QueueController(
   /**
    * Live: journal a 'cancelled' (user) outcome, then forget after its ack.
    * Settled (or legacy): forget now, row, bytes, and its unacknowledged
-   * outcomes. Unknown: no-op.
+   * outcomes. No row: delete the id's directory when it has no entry file
+   * ([QueueStore.removeUnowned]).
    *
    * A failed journal write rejects E_STORAGE and changes nothing: the entry
    * goes on, and JS can call cancel() again.
@@ -222,8 +228,11 @@ class QueueController(
     var saved: QueueEntry? = null
     try {
       store.locked {
-        stop = true // unknown or settled: stop any stray work, as before
-        val e = store.load(id) ?: return@locked
+        stop = true // no row or settled: stop any stray work
+        val e = store.load(id) ?: run {
+          store.removeUnowned(id)
+          return@locked
+        }
         if (!e.isLive || e.legacy) {
           journal.ackEntry(id)
           store.remove(id)
