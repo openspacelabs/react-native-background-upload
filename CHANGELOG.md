@@ -128,8 +128,9 @@ Added:
   send: a non-http(s) URL, a header name or value the platform HTTP client
   rejects, a GET with a body, parts that do not tile the file),
   `E_RUNNING`, `E_FILE_MISSING`, and `E_STORAGE`. `cancel()` rejects with
-  `E_STORAGE` and changes nothing when the journal or the store cannot be
-  written. `updateHeaders()` rejects with `E_INVALID` for a bad header name
+  `E_STORAGE` and changes nothing when the journal (live entry) or the store
+  (settled entry) cannot be written. A live cancel whose outcome is journaled
+  resolves, even if the entry save that follows fails. `updateHeaders()` rejects with `E_INVALID` for a bad header name
   or value.
 - **`X-Request-Id`** on every attempt, minted per attempt. `Meta.requestId`
   and `attempt.requestId` carry it.

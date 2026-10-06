@@ -390,12 +390,14 @@ kept. A paused entry past `expiresAt` settles `error` with
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
-unacknowledged outcomes. An unknown id resolves and does nothing. If the
-journal or the store cannot be written, `cancel()` rejects with `E_STORAGE`.
-The caller may call again. On Android, a cancel whose journal write landed but
-whose entry save failed is already in effect: the work stops and the
-`cancelled` outcome is journaled. Its ack, a retry, or the next boot sweep
-finishes it.
+unacknowledged outcomes. An unknown id resolves and does nothing.
+
+For a live entry, the journaled `cancelled` outcome is the cancel. Once it is
+written, `cancel()` resolves, even if the entry save that follows fails: the
+work stops and the outcome's ack, a retry, or the next launch finishes it. If
+the journal (live entry) or the store (settled entry) cannot be written,
+`cancel()` rejects with `E_STORAGE` and changes nothing. The caller may call
+again.
 
 ### `setWifiOnly(enabled): Promise<void>`
 The queue's Wi-Fi setting. Persisted natively. Applies to queued and future
