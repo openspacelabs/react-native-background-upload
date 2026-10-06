@@ -2,7 +2,8 @@
 // Host-side unit tests for the pure half of the iOS module: `cd ios && swift test`.
 // The CocoaPods build ignores this file (see exclude_files in the podspec).
 // RNBackgroundUpload.swift and the .mm import React and UIKit, so they are
-// not part of this package.
+// not part of this package. Neither is the Obj-C exception helper that
+// RNBackgroundUpload.swift calls; the tests fake the transport instead.
 import PackageDescription
 
 let package = Package(
@@ -12,7 +13,8 @@ let package = Package(
     .target(
       name: "RNBGUCore",
       path: ".",
-      exclude: ["Tests", "RNBackgroundUpload.swift", "RNFileUploader.h", "RNFileUploader.mm", ".gitignore"],
+      exclude: ["Tests", "RNBackgroundUpload.swift", "RNFileUploader.h", "RNFileUploader.mm",
+                "RNBGUCatchException.h", "RNBGUCatchException.m", ".gitignore"],
       sources: [
         "BodyStaging.swift",
         "ChunkedCoordinator.swift",

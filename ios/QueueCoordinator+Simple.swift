@@ -75,11 +75,28 @@ extension QueueCoordinator {
     let meta = TaskMap.Meta(
       id: id, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt)
-    let task = transport.upload(
-      buildRequest(e, url: url, requestId: requestId), fromFile: body, wifiOnly: settings.wifiOnly,
-      description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
-      beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
-      beforeResume: { key in self.taskMap.set(meta, forKey: key) })
+    let task: UploadTask
+    do {
+      task = try transport.upload(
+        buildRequest(e, url: url, requestId: requestId), fromFile: body, wifiOnly: settings.wifiOnly,
+        description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
+        beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
+        beforeResume: { key in self.taskMap.set(meta, forKey: key) })
+    } catch {
+      // The session could not open the body. Gone since the check above: it
+      // can never send. Still there: it is unreadable for now (data
+      // protection while the device is locked), so try again later.
+      guard FileIO.exists(body) else {
+        settle(id, .fileError("cannot read the staged body: \(error.localizedDescription)"))
+        return
+      }
+      var waiting = e
+      waiting.state = .queued
+      waiting.nextAttemptAt = nil
+      commit(waiting)
+      deferIssue(waiting, delayMs: delayMs)
+      return
+    }
     liveTasks[task.key] = (id, task)
     throttle.reset(id)
   }

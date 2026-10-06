@@ -52,6 +52,33 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertFalse(FileIO.exists(h.store.dir("cap")))
   }
 
+  func testPartTheSessionCannotOpenTriesAgainLater() throws {
+    let src = h.root.appendingPathComponent("capture.mp4")
+    writeFile(src, bytes: 50)
+    h.transport.failUpload = { _ in NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile) }
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, source: src)).get()
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertTrue(h.sink.settled.isEmpty, "the blob is whole: not terminal")
+    h.transport.failUpload = nil
+    h.advance(4 * 3_600_000)
+    XCTAssertEqual(h.transport.live.count, 3, "the window fills again")
+  }
+
+  func testPartTheSessionCannotOpenOverAShortBlobSettlesFile() throws {
+    let src = h.root.appendingPathComponent("capture.mp4")
+    writeFile(src, bytes: 50)
+    h.transport.failUpload = { [unowned self] _ in
+      let e = self.h.entry("cap")!
+      try? FileManager.default.removeItem(at: self.h.store.fileURL("cap", e.bodyPath ?? ChunkedManifestV9.blobName))
+      return NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, source: src)).get()
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "file")
+    XCTAssertEqual(error["partIndex"] as? Int, 0)
+  }
+
   func testPart404WithEmptyExemptIsTerminalAndKeepsBytes() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["retry": ["terminalHttp": ["exempt": []]]])).get()
     let second = try XCTUnwrap(partTask(1))

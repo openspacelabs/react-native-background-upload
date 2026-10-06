@@ -464,6 +464,33 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.sink.attempts.last?["errorKind"] as? String, "file")
   }
 
+  // The session raises an exception for a file it cannot open. The
+  // transport turns it into an error; these check what the queue does next.
+
+  func testSessionCannotOpenAMissingBodySettlesFile() throws {
+    h.transport.failUpload = { file in
+      try? FileManager.default.removeItem(at: file) // deleted after the check
+      return NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "file")
+    XCTAssertTrue(h.transport.live.isEmpty)
+  }
+
+  func testSessionCannotOpenAReadableBodyTriesAgainLater() throws {
+    h.transport.failUpload = { _ in NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile) }
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.store.load("a")?.state, .queued, "the disk does not say running")
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    h.transport.failUpload = nil
+    h.advance(4 * 3_600_000)
+    XCTAssertEqual(h.transport.live.count, 1)
+    XCTAssertEqual(h.entry("a")?.state, .running)
+  }
+
   func testAcceptRuleWithBodyIncludes() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["accept": [["status": 409, "bodyIncludes": "already completed"]]])).get()
     h.complete(onlyTask(), status: 409, body: "upload already completed")
