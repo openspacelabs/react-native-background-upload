@@ -52,9 +52,11 @@ export interface Spec extends TurboModule {
   // A paused entry past expiresAt settles error/expired at resume.
   pause(): Promise<void>;
   resume(): Promise<void>;
-  // Live entry: journal 'cancelled' (user), forget after its ack. Settled
-  // entry: forget now: row, bytes, and its unacknowledged outcomes. Unknown
-  // id: resolve, no-op. If the journal or the store cannot be written,
+  // Live entry: journal 'cancelled' (user), forget after its ack. The
+  // journaled record is the cancel: it resolves even if the entry save then
+  // fails, and the record is applied later. Settled entry: forget now: row,
+  // bytes, and its unacknowledged outcomes. Unknown id: resolve, no-op. If
+  // the journal (live entry) or the store (settled entry) cannot be written,
   // cancel rejects with E_STORAGE and changes nothing; the caller may call
   // again.
   cancel(id: string): Promise<void>;
