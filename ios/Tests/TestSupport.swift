@@ -95,8 +95,13 @@ final class FakeTransport: Transport {
   var deferAllTasks = false
   private var pendingAllTasks: (() -> Void)?
 
+  /// When set, upload calls it and throws what it returns: the session could
+  /// not open the file. It may delete the file first, to race the check.
+  var failUpload: ((URL) -> Error?)?
+
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) -> UploadTask {
+              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask {
+    if let error = failUpload?(file) { throw error }
     let task = FakeTask(key: "\(wifiOnly ? "wifi" : "any"):\(Self.next)", description: description,
                         request: request, file: file, beginAt: beginAt, wifiOnly: wifiOnly)
     Self.next += 1
