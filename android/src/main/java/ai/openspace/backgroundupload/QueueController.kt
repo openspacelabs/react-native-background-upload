@@ -229,9 +229,17 @@ class QueueController(
           throw QueueException(QueueException.E_STORAGE, "could not journal the cancel: ${error.message}")
         }
         stop = true
+        // The journaled record is the cancel. A failed save does not undo
+        // it: the ack, the next cancel(), or the boot sweep applies the
+        // record. So cancel resolves, as on iOS; it rejects only when
+        // nothing changed.
         val next = EntryTransitions.toSettled(e, EntryState.CANCELLED, record.eventId, e.bytesSent, now)
-        saveOrThrow(next)
-        saved = next
+        try {
+          store.save(next)
+          saved = next
+        } catch (error: IOException) {
+          Diag.error("cancel journaled '$id' but could not save it; the record is applied later", error)
+        }
       }
     } finally {
       // Once an outcome is journaled, the worker must stop even when the

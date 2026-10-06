@@ -470,18 +470,17 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `cancel whose entry save fails stops the work, emits, rejects, and a retry adds no second outcome`() {
+  fun `cancel whose entry save fails still cancels and resolves, and a retry adds no second outcome`() {
     controller.enqueue(parsed())
     events.log.clear()
     scheduler.cancelled.clear()
     val dir = store.entryDir("e1")
     dir.setWritable(false)
-    val error = try {
-      assertThrows(QueueException::class.java) { controller.cancel("e1") }
+    try {
+      controller.cancel("e1") // resolves: the journaled record is the cancel
     } finally {
       dir.setWritable(true)
     }
-    assertEquals(QueueException.E_STORAGE, error.code)
     val record = journal.unacknowledged().single()
     assertEquals(EventJournal.KIND_CANCELLED, record.kind)
     assertEquals(EntryState.QUEUED, store.load("e1")!!.state) // the save was lost
