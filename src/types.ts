@@ -281,6 +281,12 @@ export type Defined<V extends Vars, T> = {
     : (vars: V, options?: { id?: string }) => Promise<{ id: string }>;
 };
 
+/** A `Defined` of any vars and response types, as `configure()` lists them. */
+export type AnyDefined = {
+  key: string;
+  mutate: (...args: never[]) => Promise<{ id: string }>;
+};
+
 /**
  * `define()`. `V` infers from the `request` parameter and defaults to `null`
  * when `request` declares none. `T` infers from the `response` return type.
@@ -312,6 +318,14 @@ export type AndroidNotificationConfig = {
 };
 
 export type ConfigureOptions = {
+  /**
+   * Every definition that outcomes route to, as `define()` returned them.
+   * The replay of journaled outcomes starts after they are registered, so no
+   * outcome reaches a key before its definition. `mutate()` waits for
+   * `configure()` and refuses a key that is not listed. The first call fixes
+   * the list; a later call must list the same keys.
+   */
+  definitions: readonly AnyDefined[];
   /** Default 14 days. Sets the default `expiresAt` of every entry. */
   lifetimeMs?: number;
   /**

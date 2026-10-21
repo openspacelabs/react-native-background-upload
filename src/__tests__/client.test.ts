@@ -150,6 +150,7 @@ describe('configure', () => {
     const client = createUploadClient();
     const retry = { terminalHttp: { exempt: [] } };
     client.configure({
+      definitions: [],
       lifetimeMs: 1000,
       retry,
       headers: () => ({}),
@@ -164,7 +165,7 @@ describe('configure', () => {
   });
 
   it('sends the 14 day default lifetime and no retry when neither is given', () => {
-    createUploadClient().configure({});
+    createUploadClient().configure({ definitions: [] });
     expect(native.configure).toHaveBeenCalledWith({
       lifetimeMs: 14 * 24 * 60 * 60 * 1000,
     });
@@ -172,22 +173,25 @@ describe('configure', () => {
   });
 
   it('rejects a non-positive lifetime', () => {
-    expect(() => createUploadClient().configure({ lifetimeMs: 0 })).toThrow(
-      /lifetimeMs/,
-    );
-    expect(() => createUploadClient().configure({ lifetimeMs: NaN })).toThrow(
-      /lifetimeMs/,
-    );
+    expect(() =>
+      createUploadClient().configure({ definitions: [], lifetimeMs: 0 }),
+    ).toThrow(/lifetimeMs/);
+    expect(() =>
+      createUploadClient().configure({ definitions: [], lifetimeMs: NaN }),
+    ).toThrow(/lifetimeMs/);
   });
 
   it('rejects a non-positive maxVarsBytes and keeps it on the JS side', () => {
     expect(() =>
-      createUploadClient().configure({ maxVarsBytes: 0 }),
+      createUploadClient().configure({ definitions: [], maxVarsBytes: 0 }),
     ).toThrow(/maxVarsBytes must be a positive number, got 0/);
     expect(() =>
-      createUploadClient().configure({ maxVarsBytes: Infinity }),
+      createUploadClient().configure({
+        definitions: [],
+        maxVarsBytes: Infinity,
+      }),
     ).toThrow(/maxVarsBytes/);
-    createUploadClient().configure({ maxVarsBytes: 64 });
+    createUploadClient().configure({ definitions: [], maxVarsBytes: 64 });
     expect(native.configure.mock.calls.at(-1)![0]).not.toHaveProperty(
       'maxVarsBytes',
     );
@@ -199,7 +203,7 @@ describe('configure', () => {
       key: 'k',
       request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
     });
-    client.configure({ maxVarsBytes: 16 });
+    client.configure({ definitions: [send], maxVarsBytes: 16 });
     await expect(send.mutate({ s: 'a'.repeat(8) })).resolves.toBeDefined();
     await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
       /is 17 bytes; the limit is 16/,
@@ -208,8 +212,8 @@ describe('configure', () => {
 
   it('starts replay once; a second call updates settings without replaying', async () => {
     const client = createUploadClient();
-    client.configure({});
-    client.configure({ lifetimeMs: 5 });
+    client.configure({ definitions: [] });
+    client.configure({ definitions: [], lifetimeMs: 5 });
     await flush();
     expect(native.getUnacknowledgedEvents).toHaveBeenCalledTimes(1);
     expect(native.onSettled).toHaveBeenCalledTimes(1);
@@ -233,7 +237,11 @@ describe('configure', () => {
         headers: { B: '2' },
       }),
     });
-    client.configure({ lifetimeMs: 1000, headers: () => ({ A: '1' }) });
+    client.configure({
+      definitions: [send],
+      lifetimeMs: 1000,
+      headers: () => ({ A: '1' }),
+    });
     const before = Date.now();
     await send.mutate(null);
     const entry = native.enqueue.mock.calls.at(-1)![0];
@@ -377,7 +385,7 @@ describe('addListener', () => {
     fire('state', rows[0]);
     expect(state).toHaveBeenCalledWith(rows[0]);
 
-    client.configure({});
+    client.configure({ definitions: [] });
     await flush();
     fire('settled', {
       eventId: 'e1',
@@ -426,7 +434,7 @@ describe('addListener', () => {
     const state = jest.fn();
     const first = client.addListener('state', state);
     client.addListener('state', state);
-    client.configure({});
+    client.configure({ definitions: [] });
     await flush();
     const settled = (eventId: string) => ({
       eventId,
@@ -466,7 +474,7 @@ describe('addListener', () => {
     const client = createUploadClient();
     const second = jest.fn();
     const onSuccess = jest.fn();
-    client.define({
+    const known = client.define({
       key: 'known',
       request: (_v: null) => ({ url: 'https://x', data: 1 }),
       onSuccess,
@@ -475,7 +483,7 @@ describe('addListener', () => {
       throw new Error('listener down');
     });
     client.addListener('state', second);
-    client.configure({});
+    client.configure({ definitions: [known] });
     await flush();
     const settled = (eventId: string, key: string) => ({
       eventId,
@@ -535,7 +543,10 @@ describe('end to end', () => {
       response: (raw) => (raw as { id: string }).id,
       onSuccess,
     });
-    client.configure({ headers: () => ({ Authorization: 'Bearer t' }) });
+    client.configure({
+      definitions: [create],
+      headers: () => ({ Authorization: 'Bearer t' }),
+    });
     await flush();
     const { id } = await create.mutate({ n: 3 }, { id: 'local-3' });
     expect(id).toBe('local-3');
@@ -588,7 +599,7 @@ describe('end to end', () => {
         order.push(`handler ${meta.id}`);
       },
     });
-    client.configure({});
+    client.configure({ definitions: [create] });
     await flush();
     let resolveEnqueue!: (id: string) => void;
     native.enqueue.mockImplementationOnce(
@@ -639,7 +650,10 @@ describe('with a fake native', () => {
       response: (raw) => (raw as { id: string }).id,
       onSuccess,
     });
-    client.configure({ headers: () => ({ Authorization: 'Bearer t' }) });
+    client.configure({
+      definitions: [create],
+      headers: () => ({ Authorization: 'Bearer t' }),
+    });
     const { id } = await create.mutate({ n: 3 }, { id: 'local-3' });
 
     expect(fake.entries).toEqual([
@@ -679,7 +693,7 @@ describe('with a fake native', () => {
     expect(native.ackEvents).not.toHaveBeenCalled();
   });
 
-  it('replays an outcome settled before configure() when configure() runs', async () => {
+  it('replays an outcome journaled before configure() when configure() runs', async () => {
     const fake = createFakeNative();
     const client = createUploadClient({ native: fake });
     const onError = jest.fn();
@@ -688,16 +702,19 @@ describe('with a fake native', () => {
       request: (_v: null) => ({ url: 'https://x' }),
       onError,
     });
-    const { id } = await send.mutate();
-    const acked = fake.settle(id, {
+    // An earlier session queued the entry, and it failed while JS was gone.
+    const id = 'earlier';
+    fake.seedRows([{ ...rows[0]!, id, key: 'item.send', state: 'error' }]);
+    const event = fake.buildSettled(id, {
       kind: 'error',
       error: { errorKind: 'http', response: { status: 500 } },
     });
+    fake.seedUnacknowledged([event]);
     await flush();
     expect(onError).not.toHaveBeenCalled();
 
-    client.configure({});
-    const event = await acked;
+    client.configure({ definitions: [send] });
+    await flush();
 
     expect(onError).toHaveBeenCalledWith(
       {
@@ -706,12 +723,103 @@ describe('with a fake native', () => {
         response: { status: 500, bodyTruncated: false },
       },
       null,
-      expect.objectContaining({ id, deliveries: 1 }),
+      expect.objectContaining({ id }),
     );
     expect(fake.ackedEventIds).toEqual([event.eventId]);
     // An error row stays until cancel() or a same-id mutate().
     expect(client.getRequests({ id })).toEqual([
       expect.objectContaining({ state: 'error' }),
     ]);
+  });
+
+  it('holds a mutate() made before configure() and queues it with the configured headers', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const send = client.define({
+      key: 'item.send',
+      request: (_v: null) => ({ url: 'https://x' }),
+    });
+    const pending = send.mutate(null, { id: 'early' });
+    await flush();
+    expect(fake.entries).toEqual([]);
+
+    client.configure({
+      definitions: [send],
+      headers: () => ({ Authorization: 'Bearer t' }),
+    });
+
+    await expect(pending).resolves.toEqual({ id: 'early' });
+    expect(fake.entries).toEqual([
+      expect.objectContaining({
+        id: 'early',
+        descriptor: expect.objectContaining({
+          headers: { Authorization: 'Bearer t' },
+        }),
+      }),
+    ]);
+  });
+
+  it('runs a replayed outcome for a held mutate() id after the caller has the id', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const order: string[] = [];
+    const send = client.define({
+      key: 'item.send',
+      request: (_v: null) => ({ url: 'https://x' }),
+      onError: (_error, _vars, meta) => {
+        order.push(`handler ${meta.id}`);
+      },
+    });
+    fake.seedRows([{ ...rows[0]!, id: 'early', key: 'item.send' }]);
+    fake.seedUnacknowledged([
+      fake.buildSettled('early', {
+        kind: 'error',
+        error: { errorKind: 'http', response: { status: 500 } },
+      }),
+    ]);
+    const pending = send.mutate(null, { id: 'early' }).then(({ id }) => {
+      order.push(`caller ${id}`);
+    });
+
+    client.configure({ definitions: [send] });
+    await pending;
+    // Delivery yields a macrotask after the mutate() promise; wait it out.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    expect(order).toEqual(['caller early', 'handler early']);
+  });
+
+  it('keeps the settings when a later configure() lists other keys', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const send = client.define({
+      key: 'k',
+      request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
+    });
+    client.configure({ definitions: [send], maxVarsBytes: 64 });
+
+    expect(() =>
+      client.configure({ definitions: [], maxVarsBytes: 16 }),
+    ).toThrow(
+      'configure: the first call fixes the definitions. A later call must list the same keys.',
+    );
+
+    await expect(send.mutate({ s: 'a'.repeat(30) })).resolves.toBeDefined();
+    expect(fake.calls.configure).toHaveLength(1);
+  });
+
+  it('refuses a definitions list before it touches native', () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const other = createUploadClient({ native: fake }).define({
+      key: 'item.send',
+      request: (_v: null) => ({ url: 'https://x' }),
+    });
+
+    expect(() => client.configure({ definitions: [other] })).toThrow(
+      "configure: every definition must be one that this client's define() returned",
+    );
+    expect(fake.calls.configure).toEqual([]);
+    expect(fake.listenerCount('settled')).toBe(0);
   });
 });

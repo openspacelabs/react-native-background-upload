@@ -90,8 +90,10 @@ export const addComment = uploads.define({
   },
 });
 
-// At boot, after every define() call. Replay of journaled outcomes starts here.
+// At boot. List every definition: replay of journaled outcomes starts here,
+// and only the listed keys receive outcomes.
 uploads.configure({
+  definitions: [addComment],
   headers: () => ({ Authorization: `Bearer ${currentToken()}` }),
   android: { notificationTitle: 'Uploading', notificationChannel: 'uploads' },
 });
@@ -263,10 +265,14 @@ while the app was dead from being sent twice.
    `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise.
-5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
-   deliver then. Call every `define()` first.
-6. **Unknown key is loud.** An outcome whose key has no definition stays
-   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`.
+5. **Replay starts after `configure()` has registered its definitions.**
+   Outcomes journaled by a dead session deliver then, so none reaches a key
+   before its definition. A bundler that loads modules lazily, such as Metro
+   with `inlineRequires`, cannot change that order.
+6. **Unknown key is loud.** An outcome whose key is not listed, such as one an
+   earlier app version queued under a key it has since dropped, stays
+   unacknowledged and reaches `state` listeners with
+   `reason: 'unhandled-key'`.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in
@@ -327,9 +333,11 @@ dropped. A `request` that declares no parameter gives `V = null`, and
 `mutate()` then takes no arguments. When `response` is set and
 the body was truncated, `onError` gets `errorKind: 'truncated'`. When
 `response` throws, `onError` gets `errorKind: 'unknown'` with the thrown
-message; the entry still settles as completed. A key that is already defined
-is replaced, with a warning in development. A `cancelled` outcome calls no
-handler.
+message; the entry still settles as completed. `define()` only builds the
+definition. Its handlers receive outcomes, and its `mutate()` queues, once
+`configure()` lists it. A second `define()` of a key warns in development; a
+second `define()` of a listed key, as a hot reload does, replaces its
+definition. A `cancelled` outcome calls no handler.
 
 `Meta` is `{ id, key, at, attempts, requestId?, deliveries }`; `at` is the
 native outcome time. `attempts` counts attempts in the current generation; a
@@ -340,24 +348,32 @@ live, so its first delivery, at the boot replay, is 1.
 
 ### `mutate(vars, { id? }): Promise<{ id }>`
 
-Runs `request(vars)` once, merges `configure().headers()` under the
-descriptor's headers, validates the descriptor, defaults `expiresAt`, and
-persists the entry. Resolves with the id after the row and every staged body
-copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
-field, a GET with a body, input native cannot send (`E_INVALID`), a missing
-file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running entry
-with a different body (`E_RUNNING`), or `vars` over
-`maxVarsBytes` (1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a definition
-whose `request` takes no vars, call `mutate()` with no arguments; native stores
-`null`.
+Serializes `vars` and runs `request(vars)` once, at the call, and validates
+the descriptor. When `configure()` has not run yet, the entry then waits for
+it. Then merges `configure().headers()` under the descriptor's headers,
+defaults `expiresAt` from the call time, and persists the entry. Resolves
+with the id after the row and every staged body copy are on disk. Rejects on
+a key that `configure()` did not list, a malformed descriptor, an unknown
+descriptor field, a GET with a body, input native cannot send (`E_INVALID`),
+a missing file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running
+entry with a different body (`E_RUNNING`), or `vars` over `maxVarsBytes`
+(1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a
+definition whose `request` takes no vars, call `mutate()` with no arguments;
+native stores `null`.
 
 ### `configure(options): void`
 
-Call one time at boot, after every `define()`. Starts replay of journaled
-outcomes. A second call updates the settings and does not replay again.
+Call one time at boot. Registers the definitions, then starts replay of
+journaled outcomes. A second call must list the same keys; it updates the
+settings and does not replay again. Throws, before it changes anything, on a
+`definitions` that is not an array, an entry that this client's `define()`
+did not return, a key listed twice, or a second call with other keys. In
+development, a Fast Refresh that runs `configure()` again with a changed list
+throws, so reload the app after you change the list.
 
 | Option | Notes |
 | --- | --- |
+| `definitions` | Required. Every definition, as `define()` returned it. Only these keys receive outcomes, and `mutate()` refuses any other key. A hot reload that runs `define()` again for a listed key replaces its definition. |
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
@@ -450,11 +466,21 @@ Fires when the Android progress notification is pressed. No event data.
 
 | Event | Data |
 | --- | --- |
-| `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key has no definition. A consumer's reducer is one upsert. |
+| `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key `configure()` did not list. A consumer's reducer is one upsert. |
 | `progress` | `{ id, bytesSent, totalBytes }`, byte-weighted across a chunked upload's parts. |
 | `attempt` | One HTTP attempt: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, at }`. `outcome` is `completed` for an accepted response (2xx or a matching `accept` rule). Any other HTTP response is `error` with `errorKind: 'http'`; a transport failure is `error` with its own `errorKind`. Pause, cancel, and supersede emit no attempt event. Live-only; never journaled or replayed. |
 
 Terminal outcomes do not appear here. They go to the definition's handlers.
+
+# Upgrading from v10
+
+Pass every definition to `configure()` as `definitions`. In v10, `define()`
+registered a definition when its module loaded, so a bundler that loads
+modules lazily (Metro's default `inlineRequires`) could start the replay
+before a definition existed. That outcome then waited for the next launch. In
+v11 the list sets what receives outcomes, and a `mutate()` before
+`configure()` waits for it instead of queueing without the configured
+headers.
 
 # Upgrading from v9
 
@@ -517,12 +543,17 @@ const ping = uploads.define({
   request: () => ({ url: 'https://api.test/ping' }),
   onSuccess,
 });
-uploads.configure({});
+uploads.configure({ definitions: [ping] });
 
 const { id } = await ping.mutate();
 await native.settle(id, { kind: 'completed', response: { body: '{}' } });
 expect(onSuccess).toHaveBeenCalled();
 ```
+
+Configure each client one time, with every definition its tests use. A
+second `configure()` with other keys throws, and `native.reset()` does not
+undo the first. A `mutate()` before `configure()` waits for it, so a test
+that never configures times out instead of finding the entry.
 
 `settle()` resolves after delivery acks the outcome, so an async handler
 has finished. It rejects after 2 s (`ackTimeoutMs`) when no ack comes. A

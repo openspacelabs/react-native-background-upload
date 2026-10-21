@@ -297,3 +297,12 @@ client.define({
   // @ts-expect-error wifiOnly is a boolean
   request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
 });
+
+// configure() lists definitions of any vars and response types.
+client.configure({
+  definitions: [addComment, putFile, ping, noVars, interfaceVars, upsert],
+});
+// @ts-expect-error configure() requires the definitions
+client.configure({});
+// @ts-expect-error a definition is what define() returned, not its options
+client.configure({ definitions: [{ key: 'x', request: () => ({ url: 'x' }) }] });
