@@ -11,8 +11,8 @@ import {clock, log} from './log';
 import {loadSettings, settings} from './settings';
 
 // The request kinds, the listeners, and configure(). All of it runs at module
-// scope, as in a real app: every define() before configure(), and the
-// listeners before the boot replay.
+// scope, as in a real app: configure() lists every definition, and the
+// listeners are in place before the boot replay.
 
 export const LAUNCHED_AT = Date.now();
 
@@ -315,6 +315,15 @@ export const ready: Promise<void> = (async () => {
     )}`,
   );
   Upload.configure({
+    definitions: [
+      postJson,
+      postForm,
+      putFile,
+      putChunked,
+      deleteThing,
+      getNoVars,
+      getWithBody,
+    ],
     headers: () => ({Authorization: session.auth}),
     android: {
       notificationId: 'rnbgu-upload-progress',

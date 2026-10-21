@@ -8,10 +8,12 @@ import {
   type EnqueueEntry,
   type Settings,
 } from '../registry';
+import type { AnyDefined, Define } from '../types';
 
 const NOW = 1_700_000_000_000;
 
-const setup = (settings: Partial<Settings> = {}) => {
+/** A registry that configure() has not registered a list with yet. */
+const unconfigured = (settings: Partial<Settings> = {}) => {
   const enqueue = jest.fn(async (entry: EnqueueEntry) => entry.id);
   const definitions = new Map<string, AnyDefinition>();
   const trackMutate = jest.fn();
@@ -34,41 +36,67 @@ const setup = (settings: Partial<Settings> = {}) => {
   return { ...registry, enqueue, definitions, trackMutate, warn, lastEntry };
 };
 
+/**
+ * A configured registry whose `define()` also routes the definition, as if
+ * configure() had listed it, so a test's mutate() runs at once.
+ */
+const setup = (settings: Partial<Settings> = {}) => {
+  const registry = unconfigured(settings);
+  registry.register([]);
+  const defineOne = registry.define as (d: AnyDefinition) => AnyDefined;
+  const define = ((definition: AnyDefinition) => {
+    registry.definitions.set(definition.key, definition);
+    return defineOne(definition);
+  }) as Define;
+  return { ...registry, define };
+};
+
 const jsonPost = (vars: { n: number }) => ({
   url: `https://example.com/items/${vars.n}`,
   data: { n: vars.n },
 });
 
 describe('define', () => {
-  it('registers the definition under its key and returns { key, mutate }', () => {
-    const { define, definitions } = setup();
+  it('returns { key, mutate } and routes nothing until register()', () => {
+    const { define, definitions } = unconfigured();
     const defined = define({ key: 'item.create', request: jsonPost });
     expect(defined.key).toBe('item.create');
     expect(typeof defined.mutate).toBe('function');
-    expect(definitions.get('item.create')?.key).toBe('item.create');
+    expect(definitions.size).toBe(0);
   });
 
-  it('replaces a duplicate key and warns', () => {
-    const { define, definitions, warn } = setup();
-    const first = { key: 'dup', request: jsonPost };
-    const second = { key: 'dup', request: jsonPost, onSuccess: jest.fn() };
-    define(first);
+  it('warns on a duplicate key before configure() and replaces nothing', () => {
+    const { define, definitions, warn } = unconfigured();
+    define({ key: 'dup', request: jsonPost });
     expect(warn).not.toHaveBeenCalled();
+    define({ key: 'dup', request: jsonPost });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe(
+      'define: "dup" is already defined. configure() routes the key to the one definition it lists.',
+    );
+    expect(definitions.size).toBe(0);
+  });
+
+  it('replaces a listed key defined again and warns', () => {
+    const { define, register, definitions, warn } = unconfigured();
+    register([define({ key: 'dup', request: jsonPost })]);
+    const second = { key: 'dup', request: jsonPost, onSuccess: jest.fn() };
     define(second);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/"dup" is already defined/);
+    expect(warn.mock.calls[0][0]).toBe(
+      'define: "dup" is already defined. The new definition replaces it.',
+    );
     expect(definitions.get('dup')).toBe(second);
   });
 
-  it('runs the replacement request() from a mutate on the earlier handle', async () => {
-    const { define, lastEntry } = setup();
-    const old = define({ key: 'k', request: jsonPost });
-    define({
-      key: 'k',
-      request: (vars: { n: number }) => ({ url: 'https://new', data: vars }),
-    });
-    await old.mutate({ n: 1 });
-    expect(lastEntry().descriptor.url).toBe('https://new');
+  it('warns on a key defined after configure() that it did not list', () => {
+    const { define, register, warn } = unconfigured();
+    register([]);
+    define({ key: 'late', request: jsonPost });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe(
+      'define: "late" is defined after configure() and is not in its definitions, so its mutate() rejects.',
+    );
   });
 
   it('rejects an empty key or a missing request', () => {
@@ -77,6 +105,158 @@ describe('define', () => {
     expect(() =>
       define({ key: 'x', request: undefined as unknown as typeof jsonPost }),
     ).toThrow(/request/);
+  });
+});
+
+describe('register', () => {
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  it('routes the listed definitions under their keys', () => {
+    const { define, register, definitions } = unconfigured();
+    const onSuccess = jest.fn();
+    const create = define({ key: 'item.create', request: jsonPost, onSuccess });
+    register([create]);
+    expect([...definitions.keys()]).toEqual(['item.create']);
+    expect(definitions.get('item.create')?.onSuccess).toBe(onSuccess);
+  });
+
+  it('holds a mutate() until register(), then enqueues it', async () => {
+    const { define, register, enqueue, lastEntry } = unconfigured();
+    const create = define({ key: 'item.create', request: jsonPost });
+    const pending = create.mutate({ n: 1 }, { id: 'early' });
+    await flush();
+    expect(enqueue).not.toHaveBeenCalled();
+    register([create]);
+    await expect(pending).resolves.toEqual({ id: 'early' });
+    expect(lastEntry().id).toBe('early');
+  });
+
+  it('takes the vars and runs request() at mutate(), before register()', async () => {
+    const { define, register, lastEntry } = unconfigured();
+    const request = jest.fn((vars: { text: string }) => ({
+      url: 'https://x',
+      data: { ...vars },
+    }));
+    const send = define({ key: 'send', request });
+    const vars = { text: 'hello' };
+    const pending = send.mutate(vars);
+    vars.text = 'changed';
+    expect(request).toHaveBeenCalledTimes(1);
+    register([send]);
+    await pending;
+    expect(lastEntry().varsJson).toBe('{"text":"hello"}');
+    expect(lastEntry().descriptor.dataJson).toBe('{"text":"hello"}');
+  });
+
+  it('rejects a held mutate() once register() leaves its key out', async () => {
+    const { define, register, enqueue } = unconfigured();
+    const unlisted = define({ key: 'unlisted', request: jsonPost });
+    const pending = unlisted.mutate({ n: 1 });
+    register([]);
+    await expect(pending).rejects.toThrow(
+      'mutate: "unlisted" is not in configure().definitions',
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('tracks a held mutate() under its id before register()', () => {
+    const { define, trackMutate } = unconfigured();
+    const create = define({ key: 'item.create', request: jsonPost });
+    void create.mutate({ n: 1 }, { id: 'early' });
+    expect(trackMutate).toHaveBeenCalledWith('early', expect.any(Promise));
+  });
+
+  it('rejects a mutate() whose key is not listed, without reaching native', async () => {
+    const { define, register, enqueue } = unconfigured();
+    const listed = define({ key: 'listed', request: jsonPost });
+    const unlisted = define({ key: 'unlisted', request: jsonPost });
+    register([listed]);
+    await expect(unlisted.mutate({ n: 1 })).rejects.toThrow(
+      'mutate: "unlisted" is not in configure().definitions',
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a mutate() of a key defined after register()', async () => {
+    const { define, register, enqueue } = unconfigured();
+    register([]);
+    const late = define({ key: 'late', request: jsonPost });
+    await expect(late.mutate({ n: 1 })).rejects.toThrow(
+      'mutate: "late" is not in configure().definitions',
+    );
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('routes a listed key to its new definition when it is defined again', async () => {
+    const { define, register, definitions, lastEntry } = unconfigured();
+    const old = define({ key: 'k', request: jsonPost });
+    register([old]);
+    const replacement = {
+      key: 'k',
+      request: (vars: { n: number }) => ({ url: 'https://new', data: vars }),
+    };
+    define(replacement);
+    expect(definitions.get('k')).toBe(replacement);
+    await old.mutate({ n: 1 });
+    expect(lastEntry().descriptor.url).toBe('https://new');
+  });
+
+  it("refuses a handle that is not one this registry's define() returned", () => {
+    const other = unconfigured().define({ key: 'k', request: jsonPost });
+    const { register } = unconfigured();
+    const message =
+      "configure: every definition must be one that this client's define() returned";
+    expect(() => register([other])).toThrow(message);
+    const lookalike = { key: 'k', mutate: async () => ({ id: 'x' }) };
+    expect(() => register([lookalike])).toThrow(message);
+    expect(() => register([null as unknown as AnyDefined])).toThrow(message);
+  });
+
+  it('refuses a list that is not an array', () => {
+    const { register } = unconfigured();
+    expect(() => register(undefined as unknown as AnyDefined[])).toThrow(
+      'configure: definitions must be an array',
+    );
+  });
+
+  it('refuses a key listed twice', () => {
+    const { define, register } = unconfigured();
+    const first = define({ key: 'dup', request: jsonPost });
+    const second = define({ key: 'dup', request: jsonPost });
+    expect(() => register([first, second])).toThrow(
+      'configure: "dup" is listed twice',
+    );
+  });
+
+  it('leaves mutate() held when the list is refused', async () => {
+    const { define, register, enqueue } = unconfigured();
+    const create = define({ key: 'item.create', request: jsonPost });
+    void create.mutate({ n: 1 });
+    expect(() => register([create, create])).toThrow(/listed twice/);
+    await flush();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('accepts a later call with the same keys and changes nothing', () => {
+    const { define, register, definitions } = unconfigured();
+    const first = { key: 'k', request: jsonPost };
+    const handle = define(first);
+    register([handle]);
+    const again = define({ key: 'k', request: jsonPost, onSuccess: jest.fn() });
+    expect(() => register([again])).not.toThrow();
+    expect([...definitions.keys()]).toEqual(['k']);
+  });
+
+  it('refuses a later call that lists other keys', () => {
+    const { define, register } = unconfigured();
+    const a = define({ key: 'a', request: jsonPost });
+    const b = define({ key: 'b', request: jsonPost });
+    register([a]);
+    const message =
+      'configure: the first call fixes the definitions. A later call must list the same keys.';
+    expect(() => register([a, b])).toThrow(message);
+    expect(() => register([b])).toThrow(message);
+    expect(() => register([])).toThrow(message);
   });
 });
 

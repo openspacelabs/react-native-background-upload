@@ -1,3 +1,30 @@
+## 11.0.0
+
+`configure()` takes the definitions, so the replay of journaled outcomes can
+no longer start before a definition exists. In v10, `define()` registered a
+definition when its module loaded. Under a bundler that loads modules lazily,
+such as Metro with its default `inlineRequires`, `configure()` could run
+first, and the outcome waited unhandled for the next launch.
+
+Breaking:
+- **`configure()` requires `definitions`,** the list of handles that
+  `define()` returned. Only the listed keys receive outcomes. It throws on a
+  `definitions` that is not an array, an entry that this client's `define()`
+  did not return, a key listed twice, or a later call that lists other keys.
+- **`define()` no longer registers a definition.** A second `define()` of a
+  listed key, as a hot reload does, still replaces it. In development,
+  `define()` warns about a key it builds after `configure()` that the list
+  left out.
+- **`mutate()` waits for `configure()`** when it has not run. It still
+  serializes `vars` and runs `request()` at the call, and `expiresAt` still
+  counts from the call. The headers and the configured settings apply when
+  the entry is queued. It rejects a key that `configure()` did not list.
+- **Tests that share a client must configure it one time with the full
+  list.** A test that never configures now times out in `mutate()`.
+
+Added:
+- **`AnyDefined`**, the type of one entry of `configure().definitions`.
+
 ## 10.0.0
 
 The library now owns a durable request queue. A consumer describes each

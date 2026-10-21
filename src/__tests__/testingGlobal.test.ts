@@ -28,7 +28,7 @@ it('runs the default client on the fake from the registry mock', async () => {
     response: (raw) => raw as { ok: boolean },
     onSuccess,
   });
-  Upload.configure({});
+  Upload.configure({ definitions: [ping] });
   const { id } = await ping.mutate();
   expect(native.entries).toEqual([
     expect.objectContaining({ id, key: 'ping', vars: null }),

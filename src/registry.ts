@@ -1,5 +1,6 @@
 import type { Spec } from './NativeRNFileUploader';
 import type {
+  AnyDefined,
   Define,
   Defined,
   Definition,
@@ -108,9 +109,10 @@ export type AnyDefinition = Definition<any, any>;
 
 type RegistryDeps = {
   native: Pick<Spec, 'enqueue'>;
+  /** The definitions that outcomes route to. Only `register()` fills it. */
   definitions: Map<string, AnyDefinition>;
   getSettings: () => Settings;
-  /** Called with every enqueue promise, so delivery can wait for it. */
+  /** Called with every mutate() promise, so delivery can wait for it. */
   trackMutate: (id: string, pending: Promise<unknown>) => void;
   warn?: (message: string) => void;
   now?: () => number;
@@ -118,6 +120,12 @@ type RegistryDeps = {
 
 export type Registry = {
   define: Define;
+  /**
+   * Makes `list` the definitions that outcomes route to, and releases the
+   * `mutate()` calls that wait for it. The first call fixes the keys. A later
+   * call must list the same keys, and changes nothing.
+   */
+  register: (list: readonly AnyDefined[]) => void;
 };
 
 declare const __DEV__: boolean | undefined;
@@ -497,6 +505,7 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
 
 /**
  * Holds the definitions of one client and builds `define()`. Every `mutate()`
+ * waits for `configure()`, refuses a key that `configure()` did not list,
  * validates `vars` and the descriptor, merges the configured headers under the
  * descriptor's (names matched without regard to case), defaults `expiresAt`,
  * hands the entry to native, and resolves with the entry's own id.
@@ -509,6 +518,51 @@ export const createRegistry = ({
   warn = console.warn,
   now = Date.now,
 }: RegistryDeps): Registry => {
+  // Every handle define() returned, so register() takes only this client's.
+  const created = new WeakMap<object, AnyDefinition>();
+  const definedKeys = new Set<string>();
+  let registered = false;
+  let release: () => void = () => undefined;
+  const configured = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const register = (list: readonly AnyDefined[]): void => {
+    if (!Array.isArray(list)) {
+      throw new Error('configure: definitions must be an array');
+    }
+    const byKey = new Map<string, AnyDefinition>();
+    list.forEach((handle) => {
+      const definition =
+        typeof handle === 'object' && handle !== null
+          ? created.get(handle)
+          : undefined;
+      if (!definition) {
+        throw new Error(
+          "configure: every definition must be one that this client's define() returned",
+        );
+      }
+      if (byKey.has(definition.key)) {
+        throw new Error(`configure: "${definition.key}" is listed twice`);
+      }
+      byKey.set(definition.key, definition);
+    });
+    if (registered) {
+      const sameKeys =
+        byKey.size === definitions.size &&
+        [...byKey.keys()].every((key) => definitions.has(key));
+      if (!sameKeys) {
+        throw new Error(
+          'configure: the first call fixes the definitions. A later call must list the same keys.',
+        );
+      }
+      return;
+    }
+    byKey.forEach((definition, key) => definitions.set(key, definition));
+    registered = true;
+    release();
+  };
+
   // The overloads on Define keep the with-parser and without-parser shapes
   // apart for callers. One implementation serves both.
   const define = (<V extends Vars, T>(
@@ -521,48 +575,64 @@ export const createRegistry = ({
     if (typeof definition.request !== 'function') {
       throw new Error(`define: "${key}" needs a request function`);
     }
-    // Hot reload re-evaluates modules, so a duplicate key replaces instead of
-    // throwing. The warning catches two modules that share a key by mistake.
-    if (definitions.has(key) && isDev()) {
-      warn(
-        `define: "${key}" is already defined. The new definition replaces it.`,
-      );
+    // The warnings catch two modules that share a key by mistake, and a
+    // module that loads too late to be listed.
+    if (isDev()) {
+      if (registered && !definitions.has(key)) {
+        warn(
+          `define: "${key}" is defined after configure() and is not in its definitions, so its mutate() rejects.`,
+        );
+      } else if (definedKeys.has(key)) {
+        warn(
+          registered
+            ? `define: "${key}" is already defined. The new definition replaces it.`
+            : `define: "${key}" is already defined. configure() routes the key to the one definition it lists.`,
+        );
+      }
     }
-    definitions.set(key, definition);
+    definedKeys.add(key);
+    // Hot reload re-evaluates a module after configure(), so a registered
+    // key takes the new definition.
+    if (definitions.has(key)) {
+      definitions.set(key, definition);
+    }
 
-    const mutate = async (
-      input: V | undefined,
-      options?: { id?: string },
-    ): Promise<{ id: string }> => {
-      // A no-vars definition calls mutate() with nothing; native stores null.
-      const vars = (input === undefined ? null : input) as V;
+    const enqueue = async ({
+      id,
+      varsJson,
+      descriptor,
+      calledAt,
+    }: {
+      id: string;
+      varsJson: string;
+      descriptor: NativeDescriptor;
+      calledAt: number;
+    }): Promise<void> => {
+      await configured;
+      if (!definitions.has(key)) {
+        throw new Error(
+          `mutate: "${key}" is not in configure().definitions, so its outcome would have no handler`,
+        );
+      }
       const settings = getSettings();
-      const varsJson = serializeVars(vars);
       const bytes = utf8ByteLength(varsJson);
       if (bytes > settings.maxVarsBytes) {
         throw new Error(
           `mutate: vars for "${key}" is ${bytes} bytes; the limit is ${settings.maxVarsBytes} (configure().maxVarsBytes)`,
         );
       }
-      if (options?.id !== undefined && !options.id) {
-        throw new Error('mutate: id must be a non-empty string when given');
-      }
-      // The current definition under this key, so a replaced definition's
-      // request() is the one that runs.
-      const current = (definitions.get(key) ?? definition) as Definition<V, T>;
-      const descriptor = validateDescriptor(current.request(vars));
       const provided = settings.headers?.() ?? {};
       if (!isPlainObject(provided)) {
         throw new Error('mutate: configure().headers() must return an object');
       }
       const entry: EnqueueEntry = {
-        id: options?.id ?? uuidV4(),
+        id,
         key,
         varsJson,
         descriptor: {
           ...descriptor,
           headers: mergeHeaders(provided, descriptor.headers),
-          expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
+          expiresAt: descriptor.expiresAt ?? calledAt + settings.lifetimeMs,
         },
       };
       // Watchdog. Turn a native enqueue() that never settles into a rejection
@@ -572,24 +642,48 @@ export const createRegistry = ({
       // means native did not answer, not that the request failed. If native
       // did persist the entry, its outcome still reaches the handlers, and a
       // same-id retry resumes instead of duplicating.
-      const pending = withTimeout(
+      await withTimeout(
         native.enqueue(entry),
         settings.enqueueTimeoutMs,
         () => {
-          const message = `mutate: native enqueue for "${key}" (id ${entry.id}) did not settle within ${settings.enqueueTimeoutMs} ms. Native did not answer; the entry may still be persisted.`;
+          const message = `mutate: native enqueue for "${key}" (id ${id}) did not settle within ${settings.enqueueTimeoutMs} ms. Native did not answer; the entry may still be persisted.`;
           warn(message);
           return new Error(message);
         },
       );
-      trackMutate(entry.id, pending);
-      // The JS id is the one the caller may have chosen and the one the
-      // entry carries. Native's return value is not trusted for it.
-      await pending;
-      return { id: entry.id };
     };
 
-    return { key, mutate } as Defined<V, T>;
+    const mutate = async (
+      input: V | undefined,
+      options?: { id?: string },
+    ): Promise<{ id: string }> => {
+      // A no-vars definition calls mutate() with nothing; native stores null.
+      const vars = (input === undefined ? null : input) as V;
+      const varsJson = serializeVars(vars);
+      if (options?.id !== undefined && !options.id) {
+        throw new Error('mutate: id must be a non-empty string when given');
+      }
+      // The vars, the descriptor and the call time are taken now, as the
+      // caller passed them, even when the entry waits for configure(). The
+      // registered definition under this key runs, so a replaced
+      // definition's request() is the one that runs.
+      const current = (definitions.get(key) ?? definition) as Definition<V, T>;
+      const descriptor = validateDescriptor(current.request(vars));
+      // The JS id is the one the caller may have chosen and the one the
+      // entry carries. Native's return value is not trusted for it.
+      const id = options?.id ?? uuidV4();
+      const pending = enqueue({ id, varsJson, descriptor, calledAt: now() });
+      // Tracked before it waits for configure(), so an outcome replayed for
+      // this id is delivered after the caller has the id.
+      trackMutate(id, pending);
+      await pending;
+      return { id };
+    };
+
+    const handle = { key, mutate } as Defined<V, T>;
+    created.set(handle, definition);
+    return handle;
   }) as Define;
 
-  return { define };
+  return { define, register };
 };

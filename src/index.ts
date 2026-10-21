@@ -109,7 +109,7 @@ export const createUploadClient = ({
     lookup: (key) => definitions.get(key),
     emitState,
   });
-  const { define } = createRegistry({
+  const { define, register } = createRegistry({
     native,
     definitions,
     getSettings: () => settings,
@@ -117,11 +117,12 @@ export const createUploadClient = ({
   });
 
   /**
-   * One-time setup. Call it at boot, after every define() call. Stores the
-   * lifetime, the vars cap, the headers provider and the retry defaults, forwards the
+   * One-time setup at boot. Registers the definitions, stores the lifetime,
+   * the vars cap, the headers provider and the retry defaults, forwards the
    * lifetime, retry and Android notification settings to native, then starts
-   * replaying journaled outcomes. A second call updates the settings and does
-   * not replay again. Each call replaces the full configuration.
+   * replaying journaled outcomes. A second call must list the same
+   * definitions; it updates the settings and does not replay again. Each
+   * call replaces the full settings.
    */
   const configure = (options: ConfigureOptions): void => {
     const lifetimeMs = options.lifetimeMs ?? DEFAULT_LIFETIME_MS;
@@ -130,7 +131,6 @@ export const createUploadClient = ({
         `configure: lifetimeMs must be a positive number, got ${options.lifetimeMs}`,
       );
     }
-    settings.lifetimeMs = lifetimeMs;
     const enqueueTimeoutMs =
       options.enqueueTimeoutMs ?? DEFAULT_ENQUEUE_TIMEOUT_MS;
     if (!Number.isFinite(enqueueTimeoutMs) || enqueueTimeoutMs <= 0) {
@@ -138,13 +138,17 @@ export const createUploadClient = ({
         `configure: enqueueTimeoutMs must be a positive number, got ${options.enqueueTimeoutMs}`,
       );
     }
-    settings.enqueueTimeoutMs = enqueueTimeoutMs;
     const maxVarsBytes = options.maxVarsBytes ?? MAX_VARS_BYTES;
     if (!Number.isFinite(maxVarsBytes) || maxVarsBytes <= 0) {
       throw new Error(
         `configure: maxVarsBytes must be a positive number, got ${options.maxVarsBytes}`,
       );
     }
+    // A refused list leaves the settings as they were. The mutate() calls it
+    // releases run after this call returns, with the settings below.
+    register(options.definitions);
+    settings.lifetimeMs = lifetimeMs;
+    settings.enqueueTimeoutMs = enqueueTimeoutMs;
     settings.maxVarsBytes = maxVarsBytes;
     settings.headers = options.headers;
     settings.retry = options.retry;
@@ -225,7 +229,7 @@ export const createUploadClient = ({
    * Listens for one event type across all requests. Listeners are global; use
    * the event's id to tell requests apart. 'state' carries a full RequestRow
    * per transition, plus a row with reason 'unhandled-key' for an outcome
-   * whose key has no definition. 'progress' is byte-weighted. 'attempt' is
+   * whose key configure() did not list. 'progress' is byte-weighted. 'attempt' is
    * one HTTP attempt, emitted live before the library settles the entry.
    */
   const addListener = ((
