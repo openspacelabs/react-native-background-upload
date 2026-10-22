@@ -371,4 +371,31 @@ final class CoordinatorChunkedTests: XCTestCase {
     let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
     XCTAssertEqual(error["errorKind"] as? String, "file")
   }
+
+  func testPartWindowCoveringEveryPartCreatesThemAllAtEnqueue() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, extra: ["ios": ["partWindow": 5]])).get()
+    XCTAssertEqual(h.transport.live.count, 5, "every part reaches the session at enqueue")
+    XCTAssertEqual(h.store.load("cap")?.partWindow, 5, "persisted with the entry")
+  }
+
+  func testPartWindowOfOneSendsOnePartAtATime() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3, extra: ["ios": ["partWindow": 1]])).get()
+    XCTAssertEqual(h.transport.live.count, 1)
+    h.complete(try XCTUnwrap(partTask(0)))
+    XCTAssertEqual(h.transport.live.count, 1, "refilled to the window")
+    XCTAssertNotNil(partTask(1))
+  }
+
+  func testPartWindowSurvivesARelaunch() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, extra: ["ios": ["partWindow": 1]])).get()
+    let first = try XCTUnwrap(partTask(0))
+    let fresh = Harness(root: h.root)
+    let survivor = FakeTask(key: first.key, description: first.taskDescription, request: first.request,
+                            beginAt: first.beginAt)
+    fresh.relaunch(daemonTasks: [survivor])
+    fresh.boot()
+    fresh.complete(survivor)
+    let live = fresh.transport.live.filter { ChunkedEngine.parsePartDescription($0.taskDescription) != nil }
+    XCTAssertEqual(live.count, 1, "the relaunched queue keeps the entry's window")
+  }
 }

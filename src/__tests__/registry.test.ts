@@ -593,6 +593,38 @@ describe('mutate', () => {
       ).rejects.toThrow(/unknown descriptor field "wifionly".*"wifiOnly"/);
     });
 
+    it('forwards ios.partWindow to native with parts', async () => {
+      const chunked = mutateWith({
+        file: '/f',
+        parts: [{ url: 'https://p', range: { start: 0, end: 1 } }],
+        ios: { partWindow: 1 },
+      });
+      await chunked.promise;
+      expect(chunked.enqueue.mock.calls[0][0].descriptor.ios).toEqual({
+        partWindow: 1,
+      });
+    });
+
+    it('rejects an ios.partWindow that is not a positive integer, or has no parts', async () => {
+      const chunked = {
+        file: '/f',
+        parts: [{ url: 'https://p', range: { start: 0, end: 1 } }],
+      };
+      await expect(
+        mutateWith({ ...chunked, ios: { partWindow: 0 } }).promise,
+      ).rejects.toThrow(/ios\.partWindow must be an integer of 1 or more/);
+      await expect(
+        mutateWith({ ...chunked, ios: { partWindow: 2.5 } }).promise,
+      ).rejects.toThrow(/ios\.partWindow must be an integer of 1 or more/);
+      await expect(
+        mutateWith({ ...chunked, ios: { window: 3 } }).promise,
+      ).rejects.toThrow(/unknown ios field "window"/);
+      await expect(
+        mutateWith({ url: 'https://x', data: {}, ios: { partWindow: 3 } })
+          .promise,
+      ).rejects.toThrow(/ios\.partWindow requires parts/);
+    });
+
     it('never reaches native on a rejected descriptor', async () => {
       const { promise, enqueue } = mutateWith({ data: {} });
       await expect(promise).rejects.toThrow();

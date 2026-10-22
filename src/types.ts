@@ -107,6 +107,19 @@ export type RequestDescriptor = {
    */
   wifiOnly?: boolean;
   android?: { noNotification?: boolean };
+  ios?: {
+    /**
+     * With `parts`: how many part tasks the background session holds at one
+     * time. Default 3. iOS starts a task created while the app is in the
+     * background at its own discretion, and a part task after the first
+     * window is usually created then. A window that covers every part creates
+     * them all at `mutate()`, which is usually in the foreground. Each part
+     * task in the window has its own part file, so a window of every part
+     * needs the file's size again on disk. An integer of 1 or more.
+     * Persisted with the entry.
+     */
+    partWindow?: number;
+  };
 };
 
 /**

@@ -1,3 +1,14 @@
+## Unreleased
+
+Added `ios.partWindow` to the request descriptor. With `parts`, it sets how
+many part tasks the iOS background session holds at one time (default 3). iOS
+starts a task created while the app is in the background at its own
+discretion, so a chunked upload's later parts could wait for the system. A
+window that covers every part creates them all at `mutate()`. It needs the
+file's size again in free space, because each part task has its own part
+file. Entries saved before this change keep the default window. Android
+ignores the field.
+
 ## 10.0.0
 
 The library now owns a durable request queue. A consumer describes each

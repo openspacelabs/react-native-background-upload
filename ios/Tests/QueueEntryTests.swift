@@ -73,6 +73,22 @@ final class EnqueueParserTests: XCTestCase {
     invalid(["id": "i", "key": "k", "varsJson": "null", "descriptor": d])
   }
 
+  func testPartWindowParsesAndRejectsBadValues() throws {
+    let chunked: [String: Any] = [
+      "file": "/f", "method": "PUT",
+      "parts": [["url": "https://p.test/1", "range": ["start": 0, "end": 1]]],
+    ]
+    var ok = chunked
+    ok["ios"] = ["partWindow": 4]
+    XCTAssertEqual(try EnqueueParser.parse(raw(ok)).partWindow, 4)
+    XCTAssertNil(try EnqueueParser.parse(raw(chunked)).partWindow)
+    for bad: Any in [0, 2.5, "3"] {
+      var d = chunked
+      d["ios"] = ["partWindow": bad]
+      invalid(raw(d))
+    }
+  }
+
   func testGetWithABodyIsInvalid() throws {
     invalid(raw(["url": "https://a.test", "method": "GET", "data": ["a": 1]]))
     invalid(raw(["url": "https://a.test", "method": "get", "file": "/tmp/a"]))

@@ -39,6 +39,9 @@ struct QueueEntry: Codable, Equatable {
   /// descriptor.wifiOnly. nil follows the queue setting (setWifiOnly), so a
   /// toggle moves this entry; true or false pins it.
   var wifiOnly: Bool?
+  /// descriptor.ios.partWindow: part tasks held in the session at one time.
+  /// nil uses ChunkedEngine.window. Absent from entries saved before it.
+  var partWindow: Int?
   var bodyKind: BodyKind
   /// File name inside the entry directory: "body-<uuid>" or a blob name.
   /// nil for a legacy row with no bytes.
@@ -130,7 +133,7 @@ extension QueueEntry {
                       paused: Bool, now: Double, createdAt: Double? = nil) -> QueueEntry {
     QueueEntry(
       id: p.id, key: p.key, varsJSON: p.varsJSON, url: p.url, method: p.method, accept: p.accept, retry: p.retry,
-      wifiOnly: p.wifiOnly, bodyKind: staged.kind, bodyPath: staged.relativePath,
+      wifiOnly: p.wifiOnly, partWindow: p.partWindow, bodyKind: staged.kind, bodyPath: staged.relativePath,
       bodyContentType: staged.contentType, forceContentType: staged.forceContentType,
       bodyFingerprint: p.fingerprint, parts: p.parts, incarnation: UUID().uuidString,
       headers: p.headers, headerGeneration: headerGeneration,
@@ -154,6 +157,7 @@ extension QueueEntry {
     next.accept = p.accept
     next.retry = p.retry
     next.wifiOnly = p.wifiOnly
+    next.partWindow = p.partWindow
     // Same parts by definition of "same body"; the incoming ones carry the
     // new per-part headers.
     if isChunked, p.parts.count == parts.count {
