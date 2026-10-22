@@ -6,7 +6,8 @@ import Foundation
 /// daemon still holds.
 ///
 /// Every call runs on the QueueCoordinator's serial queue, which enforces the
-/// binding invariants: at most the entry's window of part tasks, and
+/// binding invariants: at most ChunkedEngine.window part tasks per entry
+/// (every part with ios.queueAllParts), and
 /// never two for one part index. `inFlight` maps each enqueued part to the
 /// key of the one task that owns it. Only enqueuePart creates part tasks.
 ///
@@ -272,7 +273,7 @@ final class ChunkedCoordinator {
       return
     }
     let flight = Set((inFlight[id] ?? [:]).keys)
-    let window = e.partWindow ?? ChunkedEngine.window
+    let window = e.queueAllParts == true ? e.parts.count : ChunkedEngine.window
     for index in ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight, window: window) {
       if !enqueuePart(id, index, delayMs: nil) { return } // settled or deferred inside
     }

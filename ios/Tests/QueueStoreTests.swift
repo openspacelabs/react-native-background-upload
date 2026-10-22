@@ -150,11 +150,11 @@ final class QueueStoreTests: XCTestCase {
     XCTAssertEqual(m?.incarnation, "inc")
   }
 
-  func testEntrySavedBeforePartWindowLoadsWithoutOne() throws {
+  func testEntrySavedBeforeQueueAllPartsLoadsWithoutIt() throws {
     var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: QueueStore.encode(entry("old"))) as? [String: Any])
-    json.removeValue(forKey: "partWindow")
+    json.removeValue(forKey: "queueAllParts")
     let back = try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: json))
-    XCTAssertNil(back.partWindow)
+    XCTAssertNil(back.queueAllParts)
     XCTAssertEqual(back.id, "old")
   }
 }

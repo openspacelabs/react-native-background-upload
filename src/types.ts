@@ -109,16 +109,14 @@ export type RequestDescriptor = {
   android?: { noNotification?: boolean };
   ios?: {
     /**
-     * With `parts`: how many part tasks the background session holds at one
-     * time. Default 3. iOS starts a task created while the app is in the
-     * background at its own discretion, and a part task after the first
-     * window is usually created then. A window that covers every part creates
-     * them all at `mutate()`, which is usually in the foreground. Each part
-     * task in the window has its own part file, so a window of every part
-     * needs the file's size again on disk. An integer of 1 or more.
-     * Persisted with the entry.
+     * With `parts`: create every part task at `mutate()`, in place of 3 at a
+     * time. iOS starts a task created while the app is in the background at
+     * its own discretion, and without this, parts after the first 3 are
+     * usually created then. A `mutate()` in the foreground keeps iOS from
+     * deferring them. Each part task has its own part file, so it needs the
+     * file's size again on disk. Persisted with the entry.
      */
-    partWindow?: number;
+    queueAllParts?: boolean;
   };
 };
 

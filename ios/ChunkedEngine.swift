@@ -7,11 +7,11 @@ import Foundation
 enum ChunkedEngine {
 
   // The number of part tasks of one upload enqueued with the daemon at one
-  // time, unless the entry sets ios.partWindow. It is also a liveness
+  // time, unless the entry sets ios.queueAllParts. It is also a liveness
   // decision: a background session only progresses tasks already enqueued,
   // so `window` tasks of runway let an upload proceed while the app is dead.
-  // iOS starts a task created in the background at its own discretion, so a
-  // larger window moves more of the upload ahead of that.
+  // iOS starts a task created in the background at its own discretion;
+  // queueAllParts creates every part task while the caller is in mutate().
   static let window = 3
 
   /// The part indexes to enqueue now: pending (not accepted) and not already

@@ -130,7 +130,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `retry` | Per-request override of the `configure()` retry defaults. |
 | `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
 | `android` | `{ noNotification?: boolean }`. See Silent uploads. |
-| `ios` | `{ partWindow?: number }`. With `parts`, how many part tasks iOS holds at one time. Default 3. See iOS platform notes. |
+| `ios` | `{ queueAllParts?: boolean }`. With `parts`, creates every part task at `mutate()`. See iOS platform notes. |
 
 `vars` and `data` cross to native as JSON strings, and native parses them.
 React Native on iOS drops object keys whose value is `null`, so a string is
@@ -224,18 +224,18 @@ The store and journal are excluded from iCloud and iTunes backups.
 **No global cap.** iOS has no hard limit on requests in flight. Each of the
 two background sessions (cellular allowed, and Wi-Fi only) sets
 `httpMaximumConnectionsPerHost = 4` as a per-host backstop, and a chunked
-upload sends at most 3 parts at a time unless `ios.partWindow` says otherwise.
+upload sends at most 3 parts at a time unless `ios.queueAllParts` is set.
 
-**Part window.** A chunked upload gives the background session a window of
-part tasks, 3 by default, and creates the next part task as each one
-finishes. iOS starts a task created while the app is in the background at
-its own discretion and ignores `isDiscretionary = false` for it, so after the
-first window the parts can wait for the system, for example until the device
-charges. `ios: { partWindow: parts.length }` creates every part task at
-`mutate()`, which is usually in the foreground. Each part task in the window
-reads its own part file, so that window needs the file's size again in free
-space while the parts are queued. A same-id `mutate()` replaces the window;
-the next refill uses it.
+**Queue all parts.** A chunked upload gives the background session 3 part
+tasks and creates the next one as each finishes. iOS starts a task created
+while the app is in the background at its own discretion and ignores
+`isDiscretionary = false` for it. So after the first 3, the parts can wait
+for the system, for example until the device charges.
+`ios: { queueAllParts: true }` creates every part task at `mutate()`. Call
+`mutate()` in the foreground and iOS cannot defer them. A part that fails is
+retried as a new task, and a retry created in the background is still at
+the system's discretion. Each part task reads its own part file, so this
+needs the file's size again in free space while the parts are queued.
 
 **Force-quit.** When the user swipes the app away, iOS cancels the session's
 tasks. The library treats that as a transient failure: no outcome is

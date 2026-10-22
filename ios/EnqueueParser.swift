@@ -32,8 +32,8 @@ struct ParsedEnqueue {
   let retry: RetryOverride?
   /// nil when the descriptor has none: the entry follows the queue setting.
   let wifiOnly: Bool?
-  /// descriptor.ios.partWindow. nil uses ChunkedEngine.window.
-  let partWindow: Int?
+  /// descriptor.ios.queueAllParts. nil when absent.
+  let queueAllParts: Bool?
   /// Body identity for the same-id rules.
   let fingerprint: String
 }
@@ -75,12 +75,10 @@ enum EnqueueParser {
       wifiOnly = b
     }
 
-    var partWindow: Int?
-    if let ios = present(d["ios"]) as? [String: Any], let raw = present(ios["partWindow"]) {
-      guard let n = raw as? NSNumber, n.doubleValue == n.doubleValue.rounded(), n.intValue >= 1 else {
-        throw ParseError(message: "'ios.partWindow' must be an integer of 1 or more")
-      }
-      partWindow = n.intValue
+    var queueAllParts: Bool?
+    if let ios = present(d["ios"]) as? [String: Any], let raw = present(ios["queueAllParts"]) {
+      guard let b = raw as? Bool else { throw ParseError(message: "'ios.queueAllParts' must be a boolean") }
+      queueAllParts = b
     }
 
     var kinds: [ParsedEnqueue.Body] = []
@@ -109,7 +107,7 @@ enum EnqueueParser {
       id: id, key: key, varsJSON: varsJSON, url: url,
       method: method, headers: try headers(present(d["headers"])), body: body, parts: parts,
       accept: UploadOutcome.parseAcceptRules(present(d["accept"])), expiresAt: expiresAt,
-      retry: RetryOverride.parse(present(d["retry"])), wifiOnly: wifiOnly, partWindow: partWindow,
+      retry: RetryOverride.parse(present(d["retry"])), wifiOnly: wifiOnly, queueAllParts: queueAllParts,
       fingerprint: fingerprint(body, parts: parts, url: url, method: method))
   }
 

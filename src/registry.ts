@@ -51,7 +51,7 @@ const BACKOFF_KEYS = ['baseMs', 'maxMs', 'jitter'];
 const TERMINAL_HTTP_KEYS = ['exempt'];
 const ACCEPT_RULE_KEYS = ['status', 'bodyIncludes'];
 const ANDROID_KEYS = ['noNotification'];
-const IOS_KEYS = ['partWindow'];
+const IOS_KEYS = ['queueAllParts'];
 
 /** The JS-side settings that `configure()` stores. */
 export type Settings = {
@@ -397,12 +397,12 @@ const validateAndroid = (android: unknown): void => {
 const validateIos = (ios: unknown, hasParts: boolean): void => {
   const o = requireObject(ios, 'ios');
   rejectUnknownKeys(o, IOS_KEYS, 'ios');
-  if (o.partWindow === undefined) return;
-  if (!Number.isInteger(o.partWindow) || (o.partWindow as number) < 1) {
-    throw new Error('mutate: ios.partWindow must be an integer of 1 or more');
+  if (o.queueAllParts === undefined) return;
+  if (typeof o.queueAllParts !== 'boolean') {
+    throw new Error('mutate: ios.queueAllParts must be a boolean');
   }
   if (!hasParts) {
-    throw new Error('mutate: ios.partWindow requires parts');
+    throw new Error('mutate: ios.queueAllParts requires parts');
   }
 };
 
