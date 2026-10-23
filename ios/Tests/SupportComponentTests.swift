@@ -189,6 +189,17 @@ final class TaskMapTests: XCTestCase {
     XCTAssertNil(TaskMap(fileURL: url).meta(forKey: "s:1"))
   }
 
+  func testSetPurposeForManyTasksInOneWrite() {
+    let url = makeTempDir().appendingPathComponent("map.json")
+    let map = TaskMap(fileURL: url)
+    map.set(.init(id: "a", attempt: 1, generation: 1, purpose: .attempt), forKey: "s:1")
+    map.setPurpose(.superseded, for: [(key: "s:1", id: "a"), (key: "s:2", id: "b")])
+    let reread = TaskMap(fileURL: url)
+    XCTAssertEqual(reread.meta(forKey: "s:1")?.purpose, .superseded)
+    XCTAssertEqual(reread.meta(forKey: "s:1")?.attempt, 1, "the rest of the meta is kept")
+    XCTAssertEqual(reread.meta(forKey: "s:2"), .init(id: "b", purpose: .superseded), "a key with no meta gets one")
+  }
+
   func testV9EntryDecodes() throws {
     let url = makeTempDir().appendingPathComponent("map.json")
     try Data(#"{"s:9":{"id":"old","acceptStatus":[409]},"s:10":{"id":"new","purpose":"future"}}"#.utf8).write(to: url)

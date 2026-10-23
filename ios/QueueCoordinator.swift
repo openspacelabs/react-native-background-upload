@@ -360,6 +360,8 @@ final class QueueCoordinator {
   /// for a simple request. Either copy that lands completes the entry.
   func replaceBackgroundTasks() {
     guard ready, activity.isActive else { return }
+    // Parts are replaced per entry, so each entry is saved once.
+    var parts: [String: [ChunkedCoordinator.Replaced]] = [:]
     for (key, owner) in liveTasks {
       let meta = taskMap.meta(forKey: key)
       guard meta?.foreground != true, meta?.purpose != .superseded, owner.task.isLive,
@@ -367,10 +369,13 @@ final class QueueCoordinator {
             let resolved = TaskOwner.resolve(description: owner.task.taskDescription, meta: meta) else { continue }
       switch resolved {
       case .part(let id, let part, let incarnation):
-        chunked.replace(id, part: part, incarnation: incarnation, key: key)
+        parts[id, default: []].append(.init(part: part, incarnation: incarnation, key: key))
       case .request(let id, let generation, let attempt):
         replaceRequestTask(id, generation: generation, attempt: attempt, key: key)
       }
+    }
+    for (id, replaced) in parts {
+      chunked.replace(id, replaced.sorted { $0.part < $1.part })
     }
   }
 
@@ -456,17 +461,24 @@ final class QueueCoordinator {
 
   /// Records why, then cancels every task this process holds for `id`.
   func cancelTasks(_ id: String, purpose: TaskMap.Purpose) {
-    for (key, owner) in liveTasks where owner.id == id {
-      cancelTask(key, purpose: purpose)
-    }
+    cancelTasks(keys: liveTasks.filter { $0.value.id == id }.map { $0.key }, purpose: purpose)
   }
 
   /// One task, by TaskMap key.
   func cancelTask(_ key: String, purpose: TaskMap.Purpose) {
-    guard let owner = liveTasks[key] else { return }
-    taskMap.setPurpose(purpose, forKey: key, id: owner.id)
-    owner.task.cancel()
-    liveTasks[key] = nil
+    cancelTasks(keys: [key], purpose: purpose)
+  }
+
+  /// Records why for every task in one TaskMap write, then cancels them.
+  /// Keys this process does not hold are skipped.
+  func cancelTasks(keys: [String], purpose: TaskMap.Purpose) {
+    let held = keys.compactMap { key in liveTasks[key].map { (key: key, owner: $0) } }
+    guard !held.isEmpty else { return }
+    taskMap.setPurpose(purpose, for: held.map { (key: $0.key, id: $0.owner.id) })
+    for (key, owner) in held {
+      owner.task.cancel()
+      liveTasks[key] = nil
+    }
   }
 
   func emitProgress(_ id: String, sent: Int64, total: Int64) {

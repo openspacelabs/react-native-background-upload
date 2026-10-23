@@ -108,10 +108,18 @@ final class TaskMap {
   /// Records why the library is about to cancel a task. Creates the entry
   /// when the task has none (a v9 task).
   func setPurpose(_ purpose: Purpose, forKey key: String, id: String) {
+    setPurpose(purpose, for: [(key: key, id: id)])
+  }
+
+  /// setPurpose for many tasks, in one write of the file.
+  func setPurpose(_ purpose: Purpose, for tasks: [(key: String, id: String)]) {
+    guard !tasks.isEmpty else { return }
     queue.sync {
-      var meta = cache[key] ?? Meta(id: id)
-      meta.purpose = purpose
-      cache[key] = meta
+      for (key, id) in tasks {
+        var meta = cache[key] ?? Meta(id: id)
+        meta.purpose = purpose
+        cache[key] = meta
+      }
       write()
     }
   }
