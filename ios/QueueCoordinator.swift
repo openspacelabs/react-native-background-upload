@@ -30,6 +30,20 @@ enum Outcome {
   }
 }
 
+/// Whether the app is active. Set from the UIApplication notifications, on
+/// the main thread, and read on the coordinator queue when a task is
+/// created. Lock-guarded and set without a hop, so a task created right after
+/// the app resigns is tagged as a background task.
+final class AppActivity {
+  private let lock = NSLock()
+  private var active = false
+
+  var isActive: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return active }
+    set { lock.lock(); active = newValue; lock.unlock() }
+  }
+}
+
 /// The queue's owner. It holds the store, the settings, the in-memory index,
 /// the journal and the task map, schedules every entry, and makes every
 /// emit. Every state change runs on one serial queue, which the chunked
@@ -55,6 +69,7 @@ final class QueueCoordinator {
   weak var sink: EventSink?
   let index = RequestIndex()
   let throttle = ProgressThrottle()
+  let activity = AppActivity()
 
   let now: () -> Double
   let random: () -> Double
@@ -301,6 +316,58 @@ final class QueueCoordinator {
       }
       resolve()
     }
+  }
+
+  /// The app became active. Tasks created from now on are foreground tasks,
+  /// and the background tasks that have not started are replaced.
+  func appBecameActive() {
+    activity.isActive = true
+    queue.async { self.replaceBackgroundTasks() }
+  }
+
+  /// The app is about to leave the foreground. Tasks created from now on are
+  /// background tasks.
+  func appResignedActive() {
+    activity.isActive = false
+  }
+
+  /// Replaces every live task that was created while the app was not active
+  /// and has not sent a body byte. Apple's isDiscretionary docs: for a
+  /// transfer started in the background, the system assumes true and ignores
+  /// the value set. So such a task can wait for the system, for example
+  /// until the device charges. The replacement is created now, while the
+  /// app is active, and keeps what is left of a backoff. Tasks from builds
+  /// without the tag count as background tasks, so the first activation
+  /// after an upgrade replaces them too. Runs when the app becomes active,
+  /// and at the end of reconcile while it is.
+  func replaceBackgroundTasks() {
+    guard ready, activity.isActive else { return }
+    for (key, owner) in liveTasks {
+      let meta = taskMap.meta(forKey: key)
+      guard meta?.foreground != true, meta?.purpose != .superseded, owner.task.isLive,
+            owner.task.bytesSent == 0,
+            let resolved = TaskOwner.resolve(description: owner.task.taskDescription, meta: meta) else { continue }
+      switch resolved {
+      case .part(let id, let part, let incarnation):
+        chunked.replace(id, part: part, incarnation: incarnation, key: key)
+      case .request(let id, let generation, let attempt):
+        replaceRequestTask(id, generation: generation, attempt: attempt, key: key)
+      }
+    }
+  }
+
+  /// A simple entry's current attempt, sent again from a new task. The
+  /// attempt never sent its body, so it keeps its ordinal and request id.
+  /// An empty body is left alone: 0 bytes sent cannot tell whether it went.
+  private func replaceRequestTask(_ id: String, generation: Int, attempt: Int, key: String) {
+    guard var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
+          e.attempts == attempt, e.state == .queued || e.state == .running, e.totalBytes > 0,
+          !settings.isPaused(e.key) else { return }
+    let remaining = e.nextAttemptAt.map { Int($0 - now()) }.flatMap { $0 > 0 ? $0 : nil }
+    cancelTask(key, purpose: .superseded)
+    e.state = .queued
+    index.upsert(e)
+    issue(id, delayMs: remaining, replacing: true)
   }
 
   /// Synchronous: the in-memory index, under its lock. Called from the JS

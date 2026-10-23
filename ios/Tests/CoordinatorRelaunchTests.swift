@@ -250,17 +250,16 @@ final class CoordinatorRelaunchTests: XCTestCase {
     fresh.coordinator.reconcileAll { released = true }
     fresh.drain()
     fresh.drain()
-    XCTAssertTrue(fresh.transport.created.isEmpty, "no second PUT of part 0, and no part 3 past the window")
+    XCTAssertTrue(fresh.transport.created.isEmpty, "no second PUT of part 0")
     XCTAssertFalse(released, "the background completion handler waits for the grace")
     let file = fresh.store.partFileURL("cap", 0, incarnation: fresh.entry("cap")!.incarnation, start: 0, end: 10)
     XCTAssertTrue(FileIO.exists(file), "the part file stays for the replay")
     fresh.complete(FakeTask(key: part0.key, description: part0.taskDescription, request: part0.request))
     XCTAssertEqual(fresh.entry("cap")?.parts[0].accepted, true)
-    XCTAssertEqual(fresh.transport.created.count, 1)
-    XCTAssertEqual(ChunkedEngine.parsePartDescription(fresh.transport.created[0].taskDescription)?.part, 3)
+    XCTAssertTrue(fresh.transport.created.isEmpty, "every other part already has its task")
     XCTAssertTrue(released, "the replay came, so the handler releases at once")
     fresh.advance(Double(QueueCoordinator.graceMs))
-    XCTAssertEqual(fresh.transport.created.count, 1, "the grace timer releases nothing")
+    XCTAssertTrue(fresh.transport.created.isEmpty, "the grace timer releases nothing")
   }
 
   func testChunkedPendingPartWithNoReplayIsSentAfterTheGrace() throws {
@@ -383,9 +382,10 @@ final class CoordinatorRelaunchTests: XCTestCase {
     fresh.relaunch(daemonTasks: survivors + [duplicate])
     fresh.boot()
     XCTAssertTrue(duplicate.cancelled, "never two tasks for one part")
-    XCTAssertTrue(fresh.transport.created.isEmpty, "the window is full with the adopted tasks")
+    XCTAssertTrue(fresh.transport.created.isEmpty, "every part has its adopted task")
     fresh.complete(survivors[0])
-    XCTAssertEqual(fresh.transport.created.count, 1, "refill after the adopted part completes")
+    XCTAssertTrue(fresh.transport.created.isEmpty, "nothing left to add after the adopted part completes")
+    XCTAssertEqual(fresh.entry("cap")?.parts[0].accepted, true)
   }
 
   func testV9ImportMakesLegacyRowsAndKeepsDormantManifests() throws {

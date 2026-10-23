@@ -593,33 +593,14 @@ describe('mutate', () => {
       ).rejects.toThrow(/unknown descriptor field "wifionly".*"wifiOnly"/);
     });
 
-    it('forwards ios.queueAllParts to native with parts', async () => {
-      const chunked = mutateWith({
-        file: '/f',
-        parts: [{ url: 'https://p', range: { start: 0, end: 1 } }],
-        ios: { queueAllParts: true },
-      });
-      await chunked.promise;
-      expect(chunked.enqueue.mock.calls[0][0].descriptor.ios).toEqual({
-        queueAllParts: true,
-      });
-    });
-
-    it('rejects an ios.queueAllParts that is not a boolean, or has no parts', async () => {
-      const chunked = {
-        file: '/f',
-        parts: [{ url: 'https://p', range: { start: 0, end: 1 } }],
-      };
+    it('rejects the removed ios field', async () => {
       await expect(
-        mutateWith({ ...chunked, ios: { queueAllParts: 'yes' } }).promise,
-      ).rejects.toThrow(/ios\.queueAllParts must be a boolean/);
-      await expect(
-        mutateWith({ ...chunked, ios: { queueAllPart: true } }).promise,
-      ).rejects.toThrow(/unknown ios field "queueAllPart"/);
-      await expect(
-        mutateWith({ url: 'https://x', data: {}, ios: { queueAllParts: true } })
-          .promise,
-      ).rejects.toThrow(/ios\.queueAllParts requires parts/);
+        mutateWith({
+          file: '/f',
+          parts: [{ url: 'https://p', range: { start: 0, end: 1 } }],
+          ios: { queueAllParts: true },
+        }).promise,
+      ).rejects.toThrow(/unknown descriptor field "ios"/);
     });
 
     it('never reaches native on a rejected descriptor', async () => {

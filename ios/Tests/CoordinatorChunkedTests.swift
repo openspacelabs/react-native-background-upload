@@ -1,7 +1,7 @@
 import XCTest
 @testable import RNBGUCore
 
-/// Chunked entries: window, accept, part failures, recreate, parking.
+/// Chunked entries: a task per part, accept, part failures, recreate, parking.
 final class CoordinatorChunkedTests: XCTestCase {
   private var h: Harness!
 
@@ -18,13 +18,13 @@ final class CoordinatorChunkedTests: XCTestCase {
     h.transport.live.first { ChunkedEngine.parsePartDescription($0.taskDescription)?.part == index }
   }
 
-  func testWindowOfThreeAndCompletion() throws {
+  func testEveryPartGetsATaskAtEnqueueAndCompletion() throws {
     let src = h.root.appendingPathComponent("capture.mp4")
     writeFile(src, bytes: 50)
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, source: src)).get()
     XCTAssertFalse(FileIO.exists(src), "moved into the library")
     XCTAssertEqual(h.sink.stateNames, ["queued", "running"])
-    XCTAssertEqual(h.transport.live.count, 3, "window of 3")
+    XCTAssertEqual(h.transport.live.count, 5, "a task for every part")
     let first = try XCTUnwrap(partTask(0))
     XCTAssertEqual(first.request.httpMethod, "PUT")
     XCTAssertEqual(first.header("Content-Range"), "0-9/50")
@@ -33,8 +33,8 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(FileIO.size(first.file!), 10)
 
     h.complete(first)
-    XCTAssertEqual(h.transport.live.count, 3, "refilled")
-    XCTAssertNotNil(partTask(3))
+    XCTAssertEqual(h.transport.live.count, 4, "nothing left to add")
+    XCTAssertEqual(h.transport.created.count, 5)
     XCTAssertEqual(h.sink.progress.last?["bytesSent"] as? Int64, 10)
     XCTAssertEqual(h.entry("cap")?.parts[0].accepted, true)
     XCTAssertEqual(h.store.load("cap")?.parts[0].accepted, true, "accept is persisted")
@@ -61,7 +61,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertTrue(h.sink.settled.isEmpty, "the blob is whole: not terminal")
     h.transport.failUpload = nil
     h.advance(4 * 3_600_000)
-    XCTAssertEqual(h.transport.live.count, 3, "the window fills again")
+    XCTAssertEqual(h.transport.live.count, 5, "every part gets its task")
   }
 
   func testPartTheSessionCannotOpenOverAShortBlobSettlesFile() throws {
@@ -143,7 +143,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     let retry = try XCTUnwrap(partTask(0))
     XCTAssertTrue(retry !== first)
     XCTAssertNotNil(retry.beginAt)
-    XCTAssertEqual(h.transport.live.count, 3, "no extra part enters the window")
+    XCTAssertEqual(h.transport.live.count, 5, "the retry replaces the part's task, nothing more")
     XCTAssertEqual(h.entry("cap")?.parts[0].rejections, 1)
     XCTAssertEqual(h.entry("cap")?.state, .running)
   }
@@ -195,7 +195,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     let attempts = h.entry("cap")?.attempts
     h.complete(try XCTUnwrap(partTask(0)), status: 500)
     XCTAssertNil(partTask(0), "no task without the saved attempt")
-    XCTAssertEqual(h.transport.live.count, 2)
+    XCTAssertEqual(h.transport.live.count, 4)
     XCTAssertEqual(h.entry("cap")?.attempts, attempts)
     setReadOnly(dir, false)
     h.advance(1_000)
@@ -206,11 +206,12 @@ final class CoordinatorChunkedTests: XCTestCase {
   func testPartFileBuildFailureWithAnIntactBlobRefillsLater() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
     let e = try XCTUnwrap(h.entry("cap"))
-    // A non-empty directory where part 3's file goes: the rename fails, as
-    // on a full disk. The blob is whole.
+    // A non-empty directory where part 3's file goes: the rebuild for its
+    // retry fails, as on a full disk. The blob is whole.
     let blocker = h.store.partFileURL("cap", 3, incarnation: e.incarnation, start: 30, end: 40)
+    try FileManager.default.removeItem(at: blocker)
     writeFile(blocker.appendingPathComponent("x"), "x")
-    h.complete(try XCTUnwrap(partTask(0)))
+    h.complete(try XCTUnwrap(partTask(3)), status: 500)
     XCTAssertTrue(h.sink.settled.isEmpty, "not a file terminal")
     XCTAssertEqual(h.entry("cap")?.state, .running)
     XCTAssertNil(partTask(3))
@@ -226,12 +227,12 @@ final class CoordinatorChunkedTests: XCTestCase {
     let others = h.transport.live.filter { $0 !== rejected }
     h.complete(rejected, status: 401)
     XCTAssertEqual(h.entry("cap")?.state, .awaitingAuth)
-    XCTAssertEqual(others.count, 2)
+    XCTAssertEqual(others.count, 3)
     XCTAssertTrue(others.allSatisfy(\.cancelled), "the other in-flight parts stop")
     XCTAssertTrue(h.transport.live.isEmpty)
     h.updateHeaders(["Authorization": "fresh"])
     XCTAssertEqual(h.entry("cap")?.state, .running)
-    XCTAssertEqual(h.transport.live.count, 3)
+    XCTAssertEqual(h.transport.live.count, 4)
     XCTAssertTrue(h.transport.live.allSatisfy { $0.header("Authorization") == "fresh" })
     XCTAssertNil(partTask(0), "accepted parts are not sent again")
   }
@@ -246,7 +247,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertTrue(again !== first)
     XCTAssertNil(again.beginAt, "no backoff")
     XCTAssertEqual(again.header("Authorization"), "fresh")
-    XCTAssertEqual(h.transport.live.count, 3)
+    XCTAssertEqual(h.transport.live.count, 5)
   }
 
   func testUpdateHeadersReplacesAHeaderAPartCarries() throws {
@@ -289,7 +290,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(h.entry("cap")?.state, .paused)
     h.resume()
     XCTAssertEqual(h.entry("cap")?.state, .running)
-    XCTAssertEqual(h.transport.live.count, 3)
+    XCTAssertEqual(h.transport.live.count, 4)
     XCTAssertNil(partTask(0))
   }
 
@@ -345,9 +346,10 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(h.entry("cap")?.state, .running)
     XCTAssertEqual(h.sink.states.count, states)
     XCTAssertTrue(h.sink.settled.isEmpty)
-    // The window still refills: the chunked side did not stop.
+    // Parts still land: the chunked side did not stop.
     h.complete(live[0])
     XCTAssertEqual(h.transport.live.count, 3)
+    XCTAssertEqual(h.entry("cap")?.parts.filter(\.accepted).count, 2)
     setReadOnly(h.journal.root, false)
     XCTAssertNil(h.cancel("cap"))
     XCTAssertTrue(h.transport.live.isEmpty)
@@ -372,21 +374,8 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(error["errorKind"] as? String, "file")
   }
 
-  func testQueueAllPartsCreatesEveryPartTaskAtEnqueue() throws {
-    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, extra: ["ios": ["queueAllParts": true]])).get()
-    XCTAssertEqual(h.transport.live.count, 5, "every part reaches the session at enqueue")
-    XCTAssertEqual(h.store.load("cap")?.queueAllParts, true, "persisted with the entry")
-    h.complete(try XCTUnwrap(partTask(0)))
-    XCTAssertEqual(h.transport.live.count, 4, "nothing left to add")
-  }
-
-  func testQueueAllPartsFalseKeepsTheWindowOfThree() throws {
-    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, extra: ["ios": ["queueAllParts": false]])).get()
-    XCTAssertEqual(h.transport.live.count, 3)
-  }
-
-  func testQueueAllPartsSurvivesARelaunch() throws {
-    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, extra: ["ios": ["queueAllParts": true]])).get()
+  func testRelaunchGivesEveryLostPartATask() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
     let survivors = h.transport.live.map {
       FakeTask(key: $0.key, description: $0.taskDescription, request: $0.request, beginAt: $0.beginAt)
     }
@@ -396,6 +385,6 @@ final class CoordinatorChunkedTests: XCTestCase {
     fresh.boot()
     fresh.advance(Double(QueueCoordinator.graceMs))
     let recreated = fresh.transport.created.compactMap { ChunkedEngine.parsePartDescription($0.taskDescription)?.part }
-    XCTAssertEqual(recreated.sorted(), [0, 1], "past a window of 3, every pending part gets its task again")
+    XCTAssertEqual(recreated.sorted(), [0, 1], "every pending part gets its task again")
   }
 }

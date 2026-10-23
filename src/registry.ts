@@ -41,7 +41,6 @@ const DESCRIPTOR_KEYS = [
   'retry',
   'wifiOnly',
   'android',
-  'ios',
 ];
 const PART_KEYS = ['url', 'headers', 'range'];
 const RANGE_KEYS = ['start', 'end'];
@@ -51,7 +50,6 @@ const BACKOFF_KEYS = ['baseMs', 'maxMs', 'jitter'];
 const TERMINAL_HTTP_KEYS = ['exempt'];
 const ACCEPT_RULE_KEYS = ['status', 'bodyIncludes'];
 const ANDROID_KEYS = ['noNotification'];
-const IOS_KEYS = ['queueAllParts'];
 
 /** The JS-side settings that `configure()` stores. */
 export type Settings = {
@@ -394,18 +392,6 @@ const validateAndroid = (android: unknown): void => {
   }
 };
 
-const validateIos = (ios: unknown, hasParts: boolean): void => {
-  const o = requireObject(ios, 'ios');
-  rejectUnknownKeys(o, IOS_KEYS, 'ios');
-  if (o.queueAllParts === undefined) return;
-  if (typeof o.queueAllParts !== 'boolean') {
-    throw new Error('mutate: ios.queueAllParts must be a boolean');
-  }
-  if (!hasParts) {
-    throw new Error('mutate: ios.queueAllParts requires parts');
-  }
-};
-
 /**
  * The descriptor's headers over the provider's. Names match without regard
  * to case, and the descriptor's spelling is the one kept.
@@ -493,9 +479,6 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
   }
   if (d.android !== undefined) {
     validateAndroid(d.android);
-  }
-  if (d.ios !== undefined) {
-    validateIos(d.ios, d.parts !== undefined);
   }
   if (d.wifiOnly !== undefined && typeof d.wifiOnly !== 'boolean') {
     throw new Error('mutate: wifiOnly must be a boolean when present');

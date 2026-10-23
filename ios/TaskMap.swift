@@ -29,10 +29,16 @@ final class TaskMap {
     var headerGeneration: Int?
     var generation: Int?
     var purpose: Purpose?
+    /// true when the task was created while the app was active. iOS starts
+    /// a task created in the background at its own discretion and ignores
+    /// isDiscretionary = false, so such a task is replaced when the app
+    /// becomes active. nil in tasks created before this field: those count
+    /// as background tasks.
+    var foreground: Bool?
 
     init(id: String, partIndex: Int? = nil, incarnation: String? = nil, attempt: Int? = nil,
          requestId: String? = nil, headerGeneration: Int? = nil, generation: Int? = nil,
-         purpose: Purpose? = nil) {
+         purpose: Purpose? = nil, foreground: Bool? = nil) {
       self.id = id
       self.partIndex = partIndex
       self.incarnation = incarnation
@@ -41,10 +47,11 @@ final class TaskMap {
       self.headerGeneration = headerGeneration
       self.generation = generation
       self.purpose = purpose
+      self.foreground = foreground
     }
 
     private enum CodingKeys: String, CodingKey {
-      case id, partIndex, incarnation, attempt, requestId, headerGeneration, generation, purpose
+      case id, partIndex, incarnation, attempt, requestId, headerGeneration, generation, purpose, foreground
     }
 
     init(from decoder: Decoder) throws {
@@ -58,6 +65,7 @@ final class TaskMap {
       generation = try c.decodeIfPresent(Int.self, forKey: .generation)
       // An unknown purpose from a newer build reads as nil.
       purpose = (try? c.decodeIfPresent(String.self, forKey: .purpose)).flatMap { Purpose(rawValue: $0) }
+      foreground = try c.decodeIfPresent(Bool.self, forKey: .foreground)
     }
   }
 

@@ -1,15 +1,14 @@
 import Foundation
 
-/// Runs chunked entries against the background sessions: keeps the sliding
-/// window of part tasks enqueued with the daemon, evaluates each part's
-/// outcome, and after a relaunch rebuilds the window from the tasks the
+/// Runs chunked entries against the background sessions: keeps a task
+/// enqueued with the daemon for every pending part, evaluates each part's
+/// outcome, and after a relaunch rebuilds the part tasks from the ones the
 /// daemon still holds.
 ///
 /// Every call runs on the QueueCoordinator's serial queue, which enforces the
-/// binding invariants: at most ChunkedEngine.window part tasks per entry
-/// (every part with ios.queueAllParts), and
-/// never two for one part index. `inFlight` maps each enqueued part to the
-/// key of the one task that owns it. Only enqueuePart creates part tasks.
+/// binding invariant: never two tasks for one part index. `inFlight` maps
+/// each enqueued part to the key of the one task that owns it. Only
+/// enqueuePart creates part tasks.
 ///
 /// The entry (QueueEntry) is the durable truth: parts, accepted flags,
 /// incarnation. Terminals go through QueueCoordinator.settle.
@@ -27,7 +26,7 @@ final class ChunkedCoordinator {
   // progress.
   private var partSent: [String: [Int: Int64]] = [:]
   // id -> part index -> when its delayed task begins (epoch ms), until it
-  // begins. When every part in the window waits, the row shows the earliest
+  // begins. When every part in flight waits, the row shows the earliest
   // as nextAttemptAt.
   private var partBeginAt: [String: [Int: Double]] = [:]
 
@@ -37,7 +36,7 @@ final class ChunkedCoordinator {
 
   // MARK: - Called by QueueCoordinator
 
-  /// queued -> running, then fill the window.
+  /// queued -> running, then give every pending part a task.
   func start(_ id: String) {
     guard var e = q.index.entry(id), e.isChunked, e.state == .queued || e.state == .running,
           !q.settings.isPaused(e.key) else { return }
@@ -49,7 +48,7 @@ final class ChunkedCoordinator {
     refill(id)
   }
 
-  /// Forgets the window. The caller cancels the tasks.
+  /// Forgets the part tasks. The caller cancels them.
   func stop(_ id: String) {
     inFlight[id] = nil
     partSent[id] = nil
@@ -123,8 +122,8 @@ final class ChunkedCoordinator {
       partSent[id]?[part] = nil
       partBeginAt[id]?[part] = nil
     }
-    // Every path below may change the window; a settle or park makes this
-    // a no-op.
+    // Every path below may change the parts in flight; a settle or park
+    // makes this a no-op.
     defer { updateWait(id) }
     guard var e = q.index.entry(id), e.isChunked, !e.legacy else {
       if owned { q.store.removePartFile(id, part) }
@@ -248,11 +247,33 @@ final class ChunkedCoordinator {
     emitProgress(q.index.entry(id) ?? e)
   }
 
-  // MARK: - Window
+  // MARK: - Part tasks
 
-  /// Fills the window back up. Called after every part completion (the
-  /// background-wake refill that keeps the upload moving while the app is
-  /// dead), at start, and at the end of every reconcile.
+  /// Gives one part a new task in place of `key`, which has not sent a body
+  /// byte (QueueCoordinator.replaceBackgroundTasks). The new task keeps what
+  /// is left of the old one's backoff. The old one is cancelled as
+  /// superseded, so its callback produces no outcome. If it landed before
+  /// the cancel took effect, partCompleted accepts the part and stops the
+  /// new task.
+  func replace(_ id: String, part: Int, incarnation: String?, key: String) {
+    guard let e = q.index.entry(id), e.isChunked, e.state == .running, incarnation == e.incarnation,
+          e.parts.indices.contains(part), !e.parts[part].accepted, inFlight[id]?[part] == key,
+          !q.settings.isPaused(e.key) else { return }
+    let remaining = partBeginAt[id]?[part].map { Int($0 - q.now()) }.flatMap { $0 > 0 ? $0 : nil }
+    q.cancelTask(key, purpose: .superseded)
+    inFlight[id]?[part] = nil
+    partSent[id]?[part] = nil
+    partBeginAt[id]?[part] = nil
+    // On false no task exists: enqueuePart settled the entry or scheduled a
+    // refill, which gives the part a task.
+    _ = enqueuePart(id, part, delayMs: remaining)
+    updateWait(id)
+  }
+
+  /// Gives every pending part with no task one. Called at start, after every
+  /// part completion, and at the end of every reconcile. After start, it
+  /// only replaces a task that ended without its part being accepted (a
+  /// lost task, or one that could not be built).
   func refill(_ id: String) {
     guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
           !q.settings.isPaused(e.key) else { return }
@@ -273,8 +294,7 @@ final class ChunkedCoordinator {
       return
     }
     let flight = Set((inFlight[id] ?? [:]).keys)
-    let window = e.queueAllParts == true ? e.parts.count : ChunkedEngine.window
-    for index in ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight, window: window) {
+    for index in ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight) {
       if !enqueuePart(id, index, delayMs: nil) { return } // settled or deferred inside
     }
   }
@@ -319,7 +339,7 @@ final class ChunkedCoordinator {
     let meta = TaskMap.Meta(
       id: id, partIndex: index, incarnation: e.incarnation, attempt: e.attempts,
       requestId: requestId, headerGeneration: q.settings.headerGeneration,
-      generation: e.generation, purpose: .attempt)
+      generation: e.generation, purpose: .attempt, foreground: q.activity.isActive)
     let task: UploadTask
     do {
       task = try q.transport.upload(
@@ -349,9 +369,8 @@ final class ChunkedCoordinator {
     return true
   }
 
-  /// No task was made for a part (a failed save or part file). Fill the
-  /// window again after the wait it asked for, or a backoff, whichever is
-  /// longer.
+  /// No task was made for a part (a failed save or part file). Refill after
+  /// the wait it asked for, or a backoff, whichever is longer.
   private func refillLater(_ e: QueueEntry, part: QueueEntry.Part, delayMs: Int?) {
     let backoff = RetryClassifier.backoffMs(
       attempt: max(part.rejections, 1), policy: q.policy(e), random: q.random)
@@ -359,8 +378,8 @@ final class ChunkedCoordinator {
   }
 
   /// A transient part failure: the next task is created now with a
-  /// backoff delay, so it holds the part's window slot and the daemon starts
-  /// it on time even while the app is dead.
+  /// backoff delay, so it holds the part's slot and the daemon starts it on
+  /// time even while the app is dead.
   private func retryPart(_ e: QueueEntry, _ part: Int) {
     var n = e
     n.parts[part].rejections += 1
@@ -374,8 +393,8 @@ final class ChunkedCoordinator {
     _ = enqueuePart(n.id, part, delayMs: delay)
   }
 
-  /// Sets nextAttemptAt to the earliest begin date when every part in the
-  /// window is a delayed task that has not begun, and clears it otherwise.
+  /// Sets nextAttemptAt to the earliest begin date when every part in
+  /// flight is a delayed task that has not begun, and clears it otherwise.
   /// The state stays running. Emits `state` only on a change.
   private func updateWait(_ id: String) {
     guard var e = q.index.entry(id), e.isChunked, e.state == .running else { return }

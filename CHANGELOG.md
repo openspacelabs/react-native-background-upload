@@ -1,3 +1,19 @@
+## Unreleased
+
+Breaking: removed `ios.queueAllParts` from the request descriptor. A chunked
+upload now always creates every part task at `mutate()`, and `mutate()` with
+`ios` rejects as an unknown field. It needs the file's size again in free
+space until the parts are sent.
+
+iOS starts a task created while the app is in the background at its own
+discretion and ignores `isDiscretionary = false` for it. The library now
+records whether the app was active when it created each task. When the app
+becomes active, it replaces the tasks created while it was not that have
+not sent a body byte. That covers retries, `mutate()` from a background
+wake, and tasks a relaunch rebuilds. Tasks created by earlier versions
+count as background tasks, so uploads already deferred by the system start
+again the first time the app becomes active after the upgrade.
+
 ## 10.1.0
 
 Added `ios.queueAllParts` to the request descriptor. With `parts`, it creates

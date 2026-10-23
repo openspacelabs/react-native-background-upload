@@ -14,7 +14,11 @@ extension QueueCoordinator {
   /// session move, or a delayed task that never reached the daemon). It keeps
   /// the ordinal and request id. It applies only while the entry holds such
   /// an attempt (nextAttemptAt set); otherwise a new attempt is minted.
-  func issue(_ id: String, delayMs: Int? = nil, advanceAttempt: Bool = true) {
+  ///
+  /// `replacing: true` re-creates the current attempt, whose task the caller
+  /// cancelled before it sent a body byte (replaceBackgroundTasks). It keeps
+  /// the ordinal and request id whether or not the attempt was waiting.
+  func issue(_ id: String, delayMs: Int? = nil, advanceAttempt: Bool = true, replacing: Bool = false) {
     guard var e = index.entry(id), !e.legacy, e.state == .queued,
           !settings.isPaused(e.key) else { return }
     let t = now()
@@ -52,7 +56,8 @@ extension QueueCoordinator {
     }
 
     let before = e
-    let reuse = !advanceAttempt && e.nextAttemptAt != nil && e.attempts > 0 && e.lastRequestId != nil
+    let reuse = (replacing || (!advanceAttempt && e.nextAttemptAt != nil)) && e.attempts > 0
+      && e.lastRequestId != nil
     let requestId = reuse ? e.lastRequestId! : UUID().uuidString
     if !reuse {
       e.attempts += 1
@@ -75,7 +80,8 @@ extension QueueCoordinator {
 
     let meta = TaskMap.Meta(
       id: id, attempt: e.attempts, requestId: requestId,
-      headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt)
+      headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt,
+      foreground: activity.isActive)
     let task: UploadTask
     do {
       task = try transport.upload(

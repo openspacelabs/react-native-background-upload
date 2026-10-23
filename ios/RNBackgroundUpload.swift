@@ -296,18 +296,30 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   // MARK: - App state
 
   // The progress throttle is 1 s in the foreground and 10 min in the
-  // background. The flag is set from notifications, because reading
+  // background. The flags are set from notifications, because reading
   // applicationState needs the main thread.
+  //
+  // The coordinator's active flag is narrower: only an active app counts as
+  // the foreground for a new task. When the app becomes active, the
+  // coordinator replaces the tasks created while it was not.
   private func observeAppState() {
     let center = NotificationCenter.default
     let throttle = coordinator.throttle
+    let coordinator = self.coordinator
     for name in [UIApplication.willEnterForegroundNotification, UIApplication.didBecomeActiveNotification] {
       center.addObserver(forName: name, object: nil, queue: nil) { _ in throttle.isForeground = true }
     }
     center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil,
                        queue: nil) { _ in throttle.isForeground = false }
+    center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil,
+                       queue: nil) { _ in coordinator.appBecameActive() }
+    center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil,
+                       queue: nil) { _ in coordinator.appResignedActive() }
     DispatchQueue.main.async {
-      throttle.isForeground = UIApplication.shared.applicationState != .background
+      let state = UIApplication.shared.applicationState
+      throttle.isForeground = state != .background
+      // `shared` may be created after didBecomeActive was posted.
+      if state == .active { coordinator.appBecameActive() }
     }
   }
 }
@@ -394,7 +406,8 @@ private final class SessionTransport: Transport {
                                   delegate: URLSessionDelegate) -> URLSession {
     let config = URLSessionConfiguration.background(withIdentifier: identifier)
     config.isDiscretionary = false
-    // A per-host backstop. The chunked window of 3 is the real limiter.
+    // The limit on transfers to one host at a time. Every part of a chunked
+    // upload has its task, so this is what paces the parts.
     config.httpMaximumConnectionsPerHost = 4
     config.waitsForConnectivity = true
     config.allowsCellularAccess = !wifiOnly
@@ -416,5 +429,6 @@ private final class SessionTask: UploadTask {
   var taskDescription: String? { task.taskDescription }
   var isLive: Bool { task.state == .running || task.state == .suspended }
   var beginAt: Date? { task.earliestBeginDate }
+  var bytesSent: Int64 { task.countOfBytesSent }
   func cancel() { task.cancel() }
 }

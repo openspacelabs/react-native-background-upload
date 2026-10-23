@@ -107,17 +107,6 @@ export type RequestDescriptor = {
    */
   wifiOnly?: boolean;
   android?: { noNotification?: boolean };
-  ios?: {
-    /**
-     * With `parts`: create every part task at `mutate()`, in place of 3 at a
-     * time. iOS starts a task created while the app is in the background at
-     * its own discretion, and without this, parts after the first 3 are
-     * usually created then. A `mutate()` in the foreground keeps iOS from
-     * deferring them. Each part task has its own part file, so it needs the
-     * file's size again on disk. Persisted with the entry.
-     */
-    queueAllParts?: boolean;
-  };
 };
 
 /**

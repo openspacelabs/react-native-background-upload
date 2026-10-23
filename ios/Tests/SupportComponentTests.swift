@@ -214,10 +214,10 @@ final class TaskMapTests: XCTestCase {
 }
 
 final class ChunkedEngineTests: XCTestCase {
-  func testWindowAndOneTaskPerPart() {
-    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [0, 1, 2, 3, 4], inFlight: []), [0, 1, 2])
-    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [0, 1, 2, 3, 4], inFlight: [0, 1]), [2])
-    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [1, 2, 3], inFlight: [0, 1, 2]), [])
+  func testEveryPendingPartAndOneTaskPerPart() {
+    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [0, 1, 2, 3, 4], inFlight: []), [0, 1, 2, 3, 4])
+    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [0, 1, 2, 3, 4], inFlight: [0, 1]), [2, 3, 4])
+    XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [1, 2], inFlight: [0, 1, 2]), [])
     XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [3, 4], inFlight: [3]), [4], "never an in-flight index")
   }
 

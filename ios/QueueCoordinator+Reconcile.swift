@@ -116,6 +116,10 @@ extension QueueCoordinator {
     // A crash between the settings save and the entry saves of a pause or
     // resume leaves rows that do not match the gates. Match them now.
     applyPauseGates()
+    // A launch into the foreground: replace the adopted tasks that were
+    // created in the background, and any this reconcile created before the
+    // app became active.
+    replaceBackgroundTasks()
   }
 
   /// A queued or running entry with no live task. Either the daemon finished

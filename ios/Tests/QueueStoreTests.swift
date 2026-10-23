@@ -150,11 +150,11 @@ final class QueueStoreTests: XCTestCase {
     XCTAssertEqual(m?.incarnation, "inc")
   }
 
-  func testEntrySavedBeforeQueueAllPartsLoadsWithoutIt() throws {
+  func testEntrySavedWithQueueAllPartsStillLoads() throws {
+    // 10.1.0 saved ios.queueAllParts with the entry. The field is gone.
     var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: QueueStore.encode(entry("old"))) as? [String: Any])
-    json.removeValue(forKey: "queueAllParts")
+    json["queueAllParts"] = true
     let back = try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: json))
-    XCTAssertNil(back.queueAllParts)
     XCTAssertEqual(back.id, "old")
   }
 }

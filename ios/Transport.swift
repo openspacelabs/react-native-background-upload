@@ -15,6 +15,9 @@ protocol UploadTask: AnyObject {
   var isLive: Bool { get }
   /// earliestBeginDate: set on a delayed retry.
   var beginAt: Date? { get }
+  /// countOfBytesSent: body bytes sent so far. 0 means the body has not
+  /// started, so the request can be sent again without a second copy.
+  var bytesSent: Int64 { get }
   func cancel()
 }
 

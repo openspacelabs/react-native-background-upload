@@ -1,27 +1,19 @@
 import Foundation
 
-// The pure half of task scheduling: the chunked window and the task identity
-// encodings. Free of session state, so the high-consequence invariants (at
-// most `window` part tasks per upload, never two for one part index) can be
-// examined in one place. ChunkedCoordinator owns the session side.
+// The pure half of task scheduling: which parts get a task, and the task
+// identity encodings. Free of session state, so the high-consequence
+// invariant (never two tasks for one part index) can be examined in one
+// place. ChunkedCoordinator owns the session side.
 enum ChunkedEngine {
 
-  // The number of part tasks of one upload enqueued with the daemon at one
-  // time, unless the entry sets ios.queueAllParts. It is also a liveness
-  // decision: a background session only progresses tasks already enqueued,
-  // so `window` tasks of runway let an upload proceed while the app is dead.
-  // iOS starts a task created in the background at its own discretion;
-  // queueAllParts creates every part task while the caller is in mutate().
-  static let window = 3
-
-  /// The part indexes to enqueue now: pending (not accepted) and not already
-  /// in flight, up to the free window slots. It never returns an index in
-  /// `inFlight`: the one-task-per-part invariant. A part waiting out a
-  /// backoff is in flight (its delayed task holds the slot).
-  static func indexesToEnqueue(pending: [Int], inFlight: Set<Int>, window: Int = window) -> [Int] {
-    let slots = window - inFlight.count
-    guard slots > 0 else { return [] }
-    return Array(pending.filter { !inFlight.contains($0) }.prefix(slots))
+  /// The part indexes to enqueue now: every pending (not accepted) part not
+  /// already in flight. Every part gets its task at once, so the tasks are
+  /// created while the caller is in mutate(), usually in the foreground. iOS
+  /// starts a task created in the background at its own discretion. It never
+  /// returns an index in `inFlight`: the one-task-per-part invariant. A part
+  /// waiting out a backoff is in flight (its delayed task holds the slot).
+  static func indexesToEnqueue(pending: [Int], inFlight: Set<Int>) -> [Int] {
+    pending.filter { !inFlight.contains($0) }
   }
 
   // MARK: - Task identity

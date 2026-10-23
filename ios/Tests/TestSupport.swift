@@ -60,6 +60,7 @@ final class FakeTask: UploadTask {
   let key: String
   var taskDescription: String?
   var isLive = true
+  var bytesSent: Int64 = 0
   private(set) var cancelled = false
   let request: URLRequest
   let file: URL?
@@ -233,6 +234,17 @@ final class Harness {
   func updateHeaders(_ patch: [String: Any]) {
     coordinator.updateHeaders(patch, resolve: {}, reject: { _, _ in XCTFail("updateHeaders rejected") })
     drain()
+  }
+
+  /// The app becomes active, as on didBecomeActive.
+  func becomeActive() {
+    coordinator.appBecameActive()
+    drain()
+  }
+
+  /// The app resigns active, as on willResignActive.
+  func resignActive() {
+    coordinator.appResignedActive()
   }
 
   func setWifiOnly(_ on: Bool) {
