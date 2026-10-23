@@ -146,18 +146,21 @@ extension QueueCoordinator {
                             completion: c)
       return
     }
-    // Only the current attempt of the current generation may drive the entry.
+    // Only the current attempt of the current generation may drive the
+    // entry, or an older one the library replaced (see below).
     guard case .request(let id, let generation, let attempt) = owner,
-          var e = index.entry(id), !e.legacy, !e.isChunked,
-          e.generation == generation, e.attempts == attempt else { return }
+          var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
+          e.attempts == attempt || (meta?.purpose == .superseded && attempt < e.attempts) else { return }
 
     let cancelled = RetryClassifier.isCancellation(c.error)
     if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
     let accepted = c.error == nil
       && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
     // A replaced task that finished before its cancel took effect. Its
-    // replacement drives the entry, unless this one landed.
-    if meta?.purpose == .superseded && !accepted { return }
+    // replacement drives the entry, unless this one landed while the entry
+    // is live. The server has the body then, so the entry completes, even
+    // when the replacement failed and the entry moved to a later attempt.
+    if meta?.purpose == .superseded && (!accepted || !e.isLive) { return }
     // A cancel the library did not ask for (the system, a force-quit) is not
     // an attempt: no event. It retries below.
     if !cancelled {
@@ -250,9 +253,13 @@ extension QueueCoordinator {
     queue.async {
       switch owner {
       case .part(let id, let part, let incarnation):
-        self.chunked.partProgress(id: id, part: part, incarnation: incarnation, sent: sent)
+        self.chunked.partProgress(id: id, part: part, incarnation: incarnation, key: key, sent: sent)
       case .request(let id, let generation, let attempt):
-        guard var e = self.index.entry(id), e.generation == generation, e.attempts == attempt,
+        // A replacement shares its attempt with the task it replaced, so
+        // only the task this process holds may report. Before reconcile no
+        // task is held yet, and none was replaced.
+        guard !self.ready || self.liveTasks[key] != nil,
+              var e = self.index.entry(id), e.generation == generation, e.attempts == attempt,
               e.state == .queued || e.state == .running else { return }
         if e.state == .queued {
           e.state = .running

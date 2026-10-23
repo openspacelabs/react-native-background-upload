@@ -61,6 +61,7 @@ final class FakeTask: UploadTask {
   var taskDescription: String?
   var isLive = true
   var bytesSent: Int64 = 0
+  var hasResponse = false
   private(set) var cancelled = false
   let request: URLRequest
   let file: URL?

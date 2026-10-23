@@ -222,8 +222,8 @@ The store and journal are excluded from iCloud and iTunes backups.
 
 **No global cap.** iOS has no hard limit on requests in flight. Each of the
 two background sessions (cellular allowed, and Wi-Fi only) sets
-`httpMaximumConnectionsPerHost = 4`, and that is what paces transfers to one
-host.
+`httpMaximumConnectionsPerHost = 4`. That caps connections to one host, not
+requests: over HTTP/2, every queued part can be in flight at once.
 
 **Every part is queued at once.** A chunked upload creates a task for every
 part at `mutate()`. Each part task reads its own part file, so a chunked
@@ -232,16 +232,24 @@ upload needs the file's size again in free space until its parts are sent.
 **Not at the system's discretion.** Both sessions set
 `isDiscretionary = false`, but iOS only honors that for a task created while
 the app is in the foreground. It starts a task created in the background at
-its own discretion, for example when the device charges. Some tasks are
-always created in the background: a retry after a failure, a `mutate()` from
-a background wake, and the tasks a relaunch rebuilds. So the library records
-whether the app was active when it created each task. When the app becomes
-active, it replaces every task created while it was not that has not sent a
-byte of its body. The replacement keeps the attempt's request id and what is
-left of its backoff. Tasks created by an earlier version of the library
-count as background tasks, so the first activation after an upgrade
-replaces those too. A task created in the background can still wait for the
-system until the app next becomes active.
+its own discretion, for example when the device charges. Tasks are often
+created in the background: a retry scheduled while the app is there, a
+`mutate()` from a background wake, and the tasks a relaunch rebuilds. So the library records whether the app was active when it created
+each task. Two seconds after the app becomes active, it replaces every task
+created while the app was not active, unless the task has sent a byte of its
+body or has a response. The delay lets the system report what the task did
+while the app was suspended. A simple request's replacement keeps the
+attempt's request id; a part's replacement is a new attempt. Either keeps
+what is left of a backoff. A request with an empty body is never replaced,
+because it cannot show that it started. Tasks created by an earlier version
+of the library count as background tasks, so the first activation after an
+upgrade replaces those too.
+
+Two limits remain. A task created in the background can wait for the system
+until the app next becomes active. And if the system has sent a body without
+reporting it yet, the replacement sends it again. The server sees the same
+`X-Request-Id` for a simple request, and either copy that is accepted
+completes the entry.
 
 **Force-quit.** When the user swipes the app away, iOS cancels the session's
 tasks. The library treats that as a transient failure: no outcome is
