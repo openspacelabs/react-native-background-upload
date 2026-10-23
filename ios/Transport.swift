@@ -15,9 +15,11 @@ protocol UploadTask: AnyObject {
   var isLive: Bool { get }
   /// earliestBeginDate: set on a delayed retry.
   var beginAt: Date? { get }
-  /// countOfBytesSent: body bytes sent so far. 0 means the body has not
-  /// started, so the request can be sent again without a second copy.
+  /// countOfBytesSent: body bytes sent so far, as this process last heard
+  /// from the daemon. After a suspension it can lag what the daemon did.
   var bytesSent: Int64 { get }
+  /// The task has a response: the server answered, whatever bytesSent says.
+  var hasResponse: Bool { get }
   func cancel()
 }
 

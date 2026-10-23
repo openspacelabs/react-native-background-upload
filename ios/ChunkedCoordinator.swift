@@ -238,8 +238,11 @@ final class ChunkedCoordinator {
                           partHeaders: e.parts[part].headers)
   }
 
-  func partProgress(id: String, part: Int, incarnation: String?, sent: Int64) {
-    guard let e = q.index.entry(id), e.incarnation == incarnation, e.state == .running else { return }
+  /// Only the task that owns the part reports: a replaced one's queued
+  /// progress is dropped. Before reconcile nothing is owned yet.
+  func partProgress(id: String, part: Int, incarnation: String?, key: String, sent: Int64) {
+    guard !q.ready || inFlight[id]?[part] == key,
+          let e = q.index.entry(id), e.incarnation == incarnation, e.state == .running else { return }
     partSent[id, default: [:]][part] = sent
     // A delayed part that began while the app was dead reports progress
     // before any willBegin.

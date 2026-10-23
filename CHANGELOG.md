@@ -7,12 +7,18 @@ space until the parts are sent.
 
 iOS starts a task created while the app is in the background at its own
 discretion and ignores `isDiscretionary = false` for it. The library now
-records whether the app was active when it created each task. When the app
-becomes active, it replaces the tasks created while it was not that have
-not sent a body byte. That covers retries, `mutate()` from a background
-wake, and tasks a relaunch rebuilds. Tasks created by earlier versions
-count as background tasks, so uploads already deferred by the system start
-again the first time the app becomes active after the upgrade.
+records whether the app was active when it created each task. Two seconds
+after the app becomes active, it replaces the tasks created while it was not
+that have neither sent a body byte nor had a response. That covers retries,
+`mutate()` from a background wake, and tasks a relaunch rebuilds. Tasks
+created by earlier versions count as background tasks, so uploads already
+deferred by the system start again the first time the app becomes active
+after the upgrade. See "Not at the system's discretion" in the README for
+the limits.
+
+A replaced simple request whose body landed anyway now completes its entry,
+even when its replacement failed and the entry moved to a later attempt.
+Before, the late success was dropped and the request was sent again.
 
 ## 10.1.0
 

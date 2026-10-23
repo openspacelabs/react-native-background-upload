@@ -430,5 +430,6 @@ private final class SessionTask: UploadTask {
   var isLive: Bool { task.state == .running || task.state == .suspended }
   var beginAt: Date? { task.earliestBeginDate }
   var bytesSent: Int64 { task.countOfBytesSent }
+  var hasResponse: Bool { task.response != nil }
   func cancel() { task.cancel() }
 }

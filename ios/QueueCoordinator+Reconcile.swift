@@ -81,8 +81,15 @@ extension QueueCoordinator {
     let liveKeys = Set(tasks.filter(\.isLive).map(\.key))
 
     for task in tasks where task.isLive {
-      let owner = TaskOwner.resolve(description: task.taskDescription,
-                                    meta: taskMap.meta(forKey: task.key))
+      let meta = taskMap.meta(forKey: task.key)
+      // A task the library replaced or dropped, still live because the
+      // process died before the daemon applied the cancel. Never adopt it:
+      // its replacement, or the re-issue below, drives the entry.
+      if meta?.purpose == .superseded {
+        task.cancel()
+        continue
+      }
+      let owner = TaskOwner.resolve(description: task.taskDescription, meta: meta)
       let entry = owner.flatMap { index.entry($0.id) }
       let runnable = entry.map { !$0.legacy && ($0.state == .queued || $0.state == .running) } ?? false
       switch owner {
@@ -119,7 +126,7 @@ extension QueueCoordinator {
     // A launch into the foreground: replace the adopted tasks that were
     // created in the background, and any this reconcile created before the
     // app became active.
-    replaceBackgroundTasks()
+    scheduleReplace()
   }
 
   /// A queued or running entry with no live task. Either the daemon finished

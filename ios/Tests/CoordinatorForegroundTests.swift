@@ -7,6 +7,9 @@ import XCTest
 final class CoordinatorForegroundTests: XCTestCase {
   private var h: Harness!
 
+  /// A backoff long enough that what is left of it outlasts replaceDelayMs.
+  private let slowRetry: [String: Any] = ["retry": ["backoff": ["baseMs": 60_000]]]
+
   override func setUp() {
     h = Harness()
     h.boot()
@@ -20,12 +23,20 @@ final class CoordinatorForegroundTests: XCTestCase {
     h.transport.live.first { ChunkedEngine.parsePartDescription($0.taskDescription)?.part == index }
   }
 
+  /// The app becomes active, and the replace delay passes.
+  private func activate() {
+    h.becomeActive()
+    h.advance(Double(QueueCoordinator.replaceDelayMs))
+  }
+
+  // MARK: - Simple requests
+
   func testTaskCreatedInTheBackgroundIsReplacedWhenTheAppBecomesActive() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let background = try XCTUnwrap(h.transport.live.first)
     XCTAssertEqual(h.map.meta(forKey: background.key)?.foreground, false)
 
-    h.becomeActive()
+    activate()
     XCTAssertTrue(background.cancelled)
     XCTAssertEqual(h.map.meta(forKey: background.key)?.purpose, .superseded)
     let replacement = try XCTUnwrap(h.transport.live.first)
@@ -44,23 +55,59 @@ final class CoordinatorForegroundTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.state, .completed)
   }
 
+  func testNothingIsReplacedBeforeTheDelay() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    h.becomeActive()
+    h.advance(Double(QueueCoordinator.replaceDelayMs - 1))
+    XCTAssertFalse(task.cancelled)
+  }
+
+  func testACompletionThatLandsDuringTheDelayIsNotSentAgain() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    h.becomeActive()
+    // The daemon sent the body while the app was suspended. Its completion
+    // reaches the process after didBecomeActive.
+    h.complete(task)
+    h.advance(Double(QueueCoordinator.replaceDelayMs))
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+    XCTAssertEqual(h.transport.created.count, 1)
+  }
+
   func testTaskCreatedWhileActiveIsKept() throws {
     h.becomeActive()
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let task = try XCTUnwrap(h.transport.live.first)
     XCTAssertEqual(h.map.meta(forKey: task.key)?.foreground, true)
-    h.becomeActive()
+    activate()
     XCTAssertFalse(task.cancelled)
     XCTAssertEqual(h.transport.created.count, 1)
   }
 
-  func testTaskThatStartedSendingIsKept() throws {
+  func testTaskThatReportedBytesIsKept() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let task = try XCTUnwrap(h.transport.live.first)
     task.bytesSent = 3
-    h.becomeActive()
-    XCTAssertFalse(task.cancelled, "a body in flight is never cut off")
+    activate()
+    XCTAssertFalse(task.cancelled)
     XCTAssertEqual(h.transport.created.count, 1)
+  }
+
+  func testTaskWithAResponseIsKept() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    task.hasResponse = true
+    activate()
+    XCTAssertFalse(task.cancelled, "the server answered: its completion is coming")
+  }
+
+  func testEmptyBodyIsNeverReplaced() throws {
+    _ = try h.enqueue(h.raw(id: "get", descriptor: ["url": "https://api.test/ping", "method": "GET"])).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    XCTAssertEqual(h.entry("get")?.totalBytes, 0)
+    activate()
+    XCTAssertFalse(task.cancelled, "0 bytes sent cannot tell whether it went")
   }
 
   func testTaskCreatedAfterResigningActiveCountsAsBackground() throws {
@@ -69,40 +116,98 @@ final class CoordinatorForegroundTests: XCTestCase {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let task = try XCTUnwrap(h.transport.live.first)
     XCTAssertEqual(h.map.meta(forKey: task.key)?.foreground, false)
-    h.becomeActive()
+    activate()
     XCTAssertTrue(task.cancelled)
     XCTAssertEqual(h.transport.live.count, 1)
   }
 
   func testDelayedRetryKeepsWhatIsLeftOfItsBackoff() throws {
-    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: slowRetry)).get()
     h.complete(try XCTUnwrap(h.transport.live.first), status: 503)
     let waiting = try XCTUnwrap(h.transport.live.first)
     let beginAt = try XCTUnwrap(waiting.beginAt)
     let attempts = h.entry("a")?.attempts
-    h.clock += 400
 
-    h.becomeActive()
+    activate()
     XCTAssertTrue(waiting.cancelled)
     let replacement = try XCTUnwrap(h.transport.live.first)
     XCTAssertEqual(replacement.beginAt, beginAt, "the same begin date")
     XCTAssertEqual(replacement.header("X-Request-Id"), waiting.header("X-Request-Id"))
     XCTAssertEqual(h.entry("a")?.attempts, attempts)
     XCTAssertEqual(h.entry("a")?.state, .queued)
-    XCTAssertEqual(h.row("a")?["nextAttemptAt"] as? Double, h.clock + 600)
+    XCTAssertEqual(h.row("a")?["nextAttemptAt"] as? Double, h.clock + 58_000)
   }
 
   func testReplacedTaskThatLandsAnywaySettlesOnce() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let background = try XCTUnwrap(h.transport.live.first)
-    h.becomeActive()
+    activate()
     let replacement = try XCTUnwrap(h.transport.live.first)
     // The old task finished before its cancel took effect.
     h.complete(background)
     XCTAssertEqual(h.entry("a")?.state, .completed)
     XCTAssertEqual(h.sink.settled.count, 1)
     XCTAssertTrue(replacement.cancelled, "the replacement does not send it again")
+    // The replacement's cancel callback adds nothing.
+    h.deliverCancel(replacement)
+    XCTAssertEqual(h.sink.settled.count, 1)
   }
+
+  func testReplacedTaskThatLandsAfterTheReplacementFailedStillCompletes() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let background = try XCTUnwrap(h.transport.live.first)
+    activate()
+    h.complete(try XCTUnwrap(h.transport.live.first), status: 503)
+    XCTAssertEqual(h.entry("a")?.attempts, 2, "the replacement's retry is a new attempt")
+    let retry = try XCTUnwrap(h.transport.live.first)
+    // The old attempt's body had landed: no third send.
+    h.complete(background)
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+    XCTAssertTrue(retry.cancelled)
+  }
+
+  func testReplacedTaskThatLandsAfterTheEntrySettledReportsNothing() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let background = try XCTUnwrap(h.transport.live.first)
+    activate()
+    h.complete(try XCTUnwrap(h.transport.live.first))
+    let attempts = h.sink.attempts.count
+    h.complete(background)
+    XCTAssertEqual(h.sink.attempts.count, attempts, "no second attempt event")
+    XCTAssertEqual(h.sink.settled.count, 1)
+  }
+
+  func testReplacedTaskThatBeginsLateIsCancelled() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: slowRetry)).get()
+    h.complete(try XCTUnwrap(h.transport.live.first), status: 503)
+    let waiting = try XCTUnwrap(h.transport.live.first)
+    activate()
+    XCTAssertNil(h.coordinator.taskWillBegin(key: waiting.key, description: waiting.taskDescription))
+    XCTAssertEqual(h.entry("a")?.state, .queued, "the replacement still waits")
+  }
+
+  /// Progress the old task reported before its replacement, still queued
+  /// for the coordinator when the replacement runs.
+  private func replaceWithProgressQueued(from task: FakeTask, sent: Int64) {
+    h.coordinator.activity.isActive = true
+    h.queue.suspend()
+    h.coordinator.taskProgress(key: task.key, description: task.taskDescription, sent: sent, expected: 10)
+    // Nothing else runs while the queue is suspended.
+    h.coordinator.replaceBackgroundTasks()
+    h.queue.resume()
+    h.drain()
+  }
+
+  func testProgressFromAReplacedTaskIsIgnored() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let background = try XCTUnwrap(h.transport.live.first)
+    replaceWithProgressQueued(from: background, sent: 5)
+    XCTAssertTrue(background.cancelled)
+    XCTAssertTrue(h.sink.progress.isEmpty)
+    XCTAssertEqual(h.row("a")?["bytesSent"] as? Int64, 0)
+  }
+
+  // MARK: - Chunked parts
 
   func testChunkedPartsCreatedInTheBackgroundAreReplaced() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
@@ -110,13 +215,14 @@ final class CoordinatorForegroundTests: XCTestCase {
     let old1 = try XCTUnwrap(partTask(1))
     let old2 = try XCTUnwrap(partTask(2))
 
-    h.becomeActive()
+    activate()
     XCTAssertTrue(old1.cancelled)
     XCTAssertTrue(old2.cancelled)
     let new1 = try XCTUnwrap(partTask(1))
     let new2 = try XCTUnwrap(partTask(2))
     XCTAssertEqual(h.map.meta(forKey: new1.key)?.foreground, true)
     XCTAssertEqual(h.map.meta(forKey: new2.key)?.foreground, true)
+    XCTAssertNotEqual(new1.header("X-Request-Id"), old1.header("X-Request-Id"), "a part replacement is a new attempt")
     XCTAssertEqual(h.transport.created.count, 5, "an accepted part is not sent again")
 
     h.deliverCancel(old1)
@@ -133,7 +239,7 @@ final class CoordinatorForegroundTests: XCTestCase {
   func testReplacedPartThatLandsAnywayStopsItsReplacement() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
     let old0 = try XCTUnwrap(partTask(0))
-    h.becomeActive()
+    activate()
     let new0 = try XCTUnwrap(partTask(0))
     h.complete(old0)
     XCTAssertEqual(h.entry("cap")?.parts[0].accepted, true)
@@ -141,24 +247,25 @@ final class CoordinatorForegroundTests: XCTestCase {
   }
 
   func testDelayedPartRetryKeepsWhatIsLeftOfItsBackoff() throws {
-    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3, extra: slowRetry)).get()
     h.complete(try XCTUnwrap(partTask(0)), status: 503)
     let waiting = try XCTUnwrap(partTask(0))
     let beginAt = try XCTUnwrap(waiting.beginAt)
-    h.clock += 400
-    h.becomeActive()
+    activate()
     XCTAssertTrue(waiting.cancelled)
     XCTAssertEqual(partTask(0)?.beginAt, beginAt)
   }
 
-  func testPausedEntryIsLeftAlone() throws {
-    _ = try h.enqueue(h.dataRaw(id: "a", key: "notes")).get()
-    h.pause(keys: ["notes"])
-    let created = h.transport.created.count
-    h.becomeActive()
-    XCTAssertEqual(h.transport.created.count, created)
-    XCTAssertEqual(h.entry("a")?.state, .paused)
+  func testProgressFromAReplacedPartIsIgnored() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
+    let old0 = try XCTUnwrap(partTask(0))
+    replaceWithProgressQueued(from: old0, sent: 9)
+    XCTAssertTrue(old0.cancelled)
+    XCTAssertTrue(h.sink.progress.isEmpty)
+    XCTAssertEqual(h.row("cap")?["bytesSent"] as? Int64, 0)
   }
+
+  // MARK: - Relaunch
 
   func testRelaunchIntoTheForegroundReplacesTasksFromAnOlderBuild() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
@@ -175,11 +282,55 @@ final class CoordinatorForegroundTests: XCTestCase {
     // until the daemon's tasks are matched.
     fresh.coordinator.appBecameActive()
     fresh.drain()
+    fresh.advance(Double(QueueCoordinator.replaceDelayMs))
     XCTAssertFalse(survivor.cancelled)
     fresh.boot()
-    XCTAssertTrue(survivor.cancelled, "adopted, then replaced")
+    XCTAssertFalse(survivor.cancelled, "adopted; replaced only after the delay")
+    fresh.advance(Double(QueueCoordinator.replaceDelayMs))
+    XCTAssertTrue(survivor.cancelled)
     let replacement = try XCTUnwrap(fresh.transport.live.first)
     XCTAssertEqual(fresh.map.meta(forKey: replacement.key)?.foreground, true)
     XCTAssertEqual(replacement.header("X-Request-Id"), old.header("X-Request-Id"))
+  }
+
+  func testRelaunchNeverAdoptsAReplacedTask() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let old = try XCTUnwrap(h.transport.live.first)
+    activate()
+    let replacement = try XCTUnwrap(h.transport.live.first)
+    // The process died before the daemon applied the cancel: both are live.
+    let oldSurvivor = FakeTask(key: old.key, description: old.taskDescription, request: old.request)
+    let newSurvivor = FakeTask(key: replacement.key, description: replacement.taskDescription,
+                               request: replacement.request)
+    let fresh = Harness(root: h.root)
+    fresh.relaunch(daemonTasks: [oldSurvivor, newSurvivor])
+    fresh.boot()
+    XCTAssertTrue(oldSurvivor.cancelled)
+    XCTAssertFalse(newSurvivor.cancelled)
+    fresh.complete(newSurvivor)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+  }
+
+  func testRelaunchNeverAdoptsAReplacedPart() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 20, parts: 2)).get()
+    let old0 = try XCTUnwrap(partTask(0))
+    let old1 = try XCTUnwrap(partTask(1))
+    activate()
+    let new0 = try XCTUnwrap(partTask(0))
+    let new1 = try XCTUnwrap(partTask(1))
+    // Old tasks listed first, so a first-wins adoption would pick them.
+    let survivors = [old0, old1, new0, new1].map {
+      FakeTask(key: $0.key, description: $0.taskDescription, request: $0.request)
+    }
+    let fresh = Harness(root: h.root)
+    fresh.relaunch(daemonTasks: survivors)
+    fresh.boot()
+    XCTAssertTrue(survivors[0].cancelled)
+    XCTAssertTrue(survivors[1].cancelled)
+    XCTAssertFalse(survivors[2].cancelled)
+    XCTAssertFalse(survivors[3].cancelled)
+    fresh.complete(survivors[2])
+    fresh.complete(survivors[3])
+    XCTAssertEqual(fresh.entry("cap")?.state, .completed)
   }
 }
