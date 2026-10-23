@@ -64,6 +64,22 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(h.transport.live.count, 5, "every part gets its task")
   }
 
+  func testATransientFailureMidBatchKeepsTheTasksBeforeIt() throws {
+    var failed = false
+    h.transport.failUpload = { file in
+      guard !failed, file.lastPathComponent.hasPrefix("part-2.") else { return nil }
+      failed = true
+      return NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
+    XCTAssertEqual(h.transport.live.count, 2, "parts 0 and 1 keep their tasks")
+    XCTAssertTrue(h.sink.settled.isEmpty, "the blob is whole: not terminal")
+    h.advance(4 * 3_600_000)
+    XCTAssertEqual(h.transport.live.count, 5, "the refill gives the rest their tasks")
+    let attempts = h.transport.live.compactMap { h.map.meta(forKey: $0.key)?.attempt }
+    XCTAssertEqual(Set(attempts).count, 5, "every task has its own ordinal")
+  }
+
   func testPartTheSessionCannotOpenOverAShortBlobSettlesFile() throws {
     let src = h.root.appendingPathComponent("capture.mp4")
     writeFile(src, bytes: 50)
