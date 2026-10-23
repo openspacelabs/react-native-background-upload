@@ -169,9 +169,9 @@ extension QueueCoordinator {
     }
 
     guard e.state == .running || e.state == .queued else {
-      // A pause raced this completion. An accepted response did land, so
-      // settle it: a resume must not send it twice.
-      if accepted && e.state == .paused { settle(id, .completed(response(c))) }
+      // A pause or a park raced this completion. An accepted response did
+      // land, so settle it: a resume or new headers must not send it twice.
+      if accepted && (e.state == .paused || e.state == .awaitingAuth) { settle(id, .completed(response(c))) }
       return
     }
     // A system cancel is a transient failure, never a 'cancelled' outcome.

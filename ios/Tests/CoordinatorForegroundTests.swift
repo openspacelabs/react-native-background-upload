@@ -75,6 +75,19 @@ final class CoordinatorForegroundTests: XCTestCase {
     XCTAssertEqual(h.transport.created.count, 1)
   }
 
+  func testAReturnBeforeTheDelayWaitsTheFullDelayAgain() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    h.becomeActive()
+    h.advance(500)
+    h.resignActive()
+    h.becomeActive()
+    h.advance(Double(QueueCoordinator.replaceDelayMs - 1))
+    XCTAssertFalse(task.cancelled, "the first activation's timer does not run")
+    h.advance(1)
+    XCTAssertTrue(task.cancelled)
+  }
+
   func testTaskCreatedWhileActiveIsKept() throws {
     h.becomeActive()
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
@@ -166,6 +179,18 @@ final class CoordinatorForegroundTests: XCTestCase {
     XCTAssertTrue(retry.cancelled)
   }
 
+  func testReplacedTaskThatLandsWhileParkedForAuthCompletes() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let background = try XCTUnwrap(h.transport.live.first)
+    activate()
+    h.complete(try XCTUnwrap(h.transport.live.first), status: 401)
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    // The old copy's body had landed: new headers must not send it again.
+    h.complete(background)
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+    XCTAssertEqual(h.sink.settled.count, 1)
+  }
+
   func testReplacedTaskThatLandsAfterTheEntrySettledReportsNothing() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let background = try XCTUnwrap(h.transport.live.first)
@@ -254,6 +279,27 @@ final class CoordinatorForegroundTests: XCTestCase {
     activate()
     XCTAssertTrue(waiting.cancelled)
     XCTAssertEqual(partTask(0)?.beginAt, beginAt)
+  }
+
+  func testAPartLeftOverByAFailedReplaceKeepsItsBackoff() throws {
+    let retry: [String: Any] = ["retry": ["backoff": ["baseMs": 60_000, "maxMs": 600_000]]]
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3, extra: retry)).get()
+    // Two rejections: part 1 waits 120 s, longer than the refill's backoff.
+    h.complete(try XCTUnwrap(partTask(1)), status: 503)
+    h.complete(try XCTUnwrap(partTask(1)), status: 503)
+    let beginAt = try XCTUnwrap(partTask(1)?.beginAt)
+    // The session cannot open part 0's file once, which stops the batch
+    // before part 1.
+    var failed = false
+    h.transport.failUpload = { _ in
+      defer { failed = true }
+      return failed ? nil : NSError(domain: NSCocoaErrorDomain, code: NSFileWriteOutOfSpaceError)
+    }
+    activate()
+    XCTAssertNil(partTask(1), "part 1 waits for the refill")
+    h.advance(60_000)
+    XCTAssertNotNil(partTask(0))
+    XCTAssertEqual(partTask(1)?.beginAt, beginAt, "the refill keeps what is left of part 1's backoff")
   }
 
   func testProgressFromAReplacedPartIsIgnored() throws {

@@ -275,19 +275,16 @@ final class ChunkedCoordinator {
         && inFlight[id]?[$0.part] == $0.key
     }
     guard !stale.isEmpty else { return }
-    let now = q.now()
-    let requests: [(index: Int, delayMs: Int?)] = stale.map { r in
-      let remaining = partBeginAt[id]?[r.part].map { Int($0 - now) }
-      return (index: r.part, delayMs: remaining.flatMap { $0 > 0 ? $0 : nil })
-    }
+    let requests: [(index: Int, delayMs: Int?)] = stale.map { (index: $0.part, delayMs: remainingMs(id, $0.part)) }
     q.cancelTasks(keys: stale.map(\.key), purpose: .superseded)
     for r in stale {
       inFlight[id]?[r.part] = nil
       partSent[id]?[r.part] = nil
-      partBeginAt[id]?[r.part] = nil
     }
     // On false a part got no task: enqueueParts settled the entry or
-    // scheduled a refill, which gives the part a task.
+    // scheduled a refill, which gives the part a task. partBeginAt still
+    // holds the begin date of each part left over, so the refill keeps
+    // what is left of its backoff.
     _ = enqueueParts(id, requests)
     updateWait(id)
   }
@@ -317,8 +314,13 @@ final class ChunkedCoordinator {
     }
     let flight = Set((inFlight[id] ?? [:]).keys)
     let indexes = ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight)
-    let requests: [(index: Int, delayMs: Int?)] = indexes.map { (index: $0, delayMs: nil) }
+    let requests: [(index: Int, delayMs: Int?)] = indexes.map { (index: $0, delayMs: remainingMs(id, $0)) }
     _ = enqueueParts(id, requests) // settled or deferred inside
+  }
+
+  /// What is left of a part's begin date, or nil once it has passed.
+  private func remainingMs(_ id: String, _ part: Int) -> Int? {
+    partBeginAt[id]?[part].map { Int($0 - q.now()) }.flatMap { $0 > 0 ? $0 : nil }
   }
 
   // MARK: - Private

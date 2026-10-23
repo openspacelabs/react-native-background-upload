@@ -89,6 +89,8 @@ final class QueueCoordinator {
   /// Every task this process created or adopted, by TaskMap key.
   var liveTasks: [String: (id: String, task: UploadTask)] = [:]
   var expiryTokens: [String: UUID] = [:]
+  /// Bumped by scheduleReplace: only the latest scheduled replace runs.
+  var replaceGeneration = 0
   /// Open grace waits (a completion that may still replay), by name. While
   /// any is open, `afterGrace` holds the background completion handler
   /// release.
@@ -332,10 +334,16 @@ final class QueueCoordinator {
   }
 
   /// Runs replaceBackgroundTasks after replaceDelayMs, while the app is
-  /// active. A second call before then runs it again; it is idempotent.
+  /// active. A later call supersedes an earlier one, so a quick trip to the
+  /// background and back still waits the full delay after the return.
   func scheduleReplace() {
     guard activity.isActive else { return }
-    schedule(Self.replaceDelayMs) { [weak self] in self?.replaceBackgroundTasks() }
+    replaceGeneration += 1
+    let generation = replaceGeneration
+    schedule(Self.replaceDelayMs) { [weak self] in
+      guard let self, generation == self.replaceGeneration else { return }
+      self.replaceBackgroundTasks()
+    }
   }
 
   /// The app is about to leave the foreground. Tasks created from now on are
