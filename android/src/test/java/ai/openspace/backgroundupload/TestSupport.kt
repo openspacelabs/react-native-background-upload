@@ -109,11 +109,16 @@ internal class RecordingEvents : QueueEvents {
 
 internal class FakeScheduler : WorkScheduler {
   val scheduled = mutableListOf<String>()
+  val restarted = mutableListOf<String>()
   val wakes = mutableListOf<Pair<String, Long>>()
   val cancelled = mutableListOf<String>()
 
   override fun schedule(entry: QueueEntry) {
     scheduled += entry.id
+  }
+
+  override fun restart(entry: QueueEntry) {
+    restarted += entry.id
   }
 
   override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {

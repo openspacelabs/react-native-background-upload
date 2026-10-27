@@ -1,3 +1,12 @@
+## Unreleased
+
+Android restarts every queued entry when the module starts. Before, the boot
+sweep skipped an entry whose WorkManager chain already held a run that had
+not started, so a run left over from an earlier process could hold the
+entry back for good: the entry stayed queued with nothing sent across
+launches and force-stops. The sweep now replaces the chain. An entry whose
+worker runs in the same process is still left alone.
+
 ## 11.0.1
 
 iOS waits two seconds after the app becomes active before replacing

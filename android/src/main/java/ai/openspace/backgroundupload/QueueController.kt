@@ -383,7 +383,10 @@ class QueueController(
    *    orphans from a cancel race. Ack them.
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
-   * 5. Schedule every queued entry, and the expiry wake of every parked one.
+   * 5. Restart every queued entry on a fresh main chain, and schedule the
+   *    expiry wake of every parked one. A plain schedule skips an entry
+   *    whose chain already holds a run that has not started, and a run left
+   *    by an earlier process can sit there for good, so the boot replaces it.
    */
   fun sweep() {
     val now = clock()
@@ -433,7 +436,7 @@ class QueueController(
       }
     }
     toForget.forEach { scheduler.cancel(it) }
-    toSchedule.forEach { scheduleRun(it, keepWake = true) }
+    toSchedule.forEach { scheduleRun(it, boot = true) }
     changed.forEach { events.state(it.toRow()) }
   }
 
@@ -450,20 +453,23 @@ class QueueController(
   /**
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
    * to the wake; a parked entry gets a wake at its expiry, so it settles
-   * 'expired' on time.
+   * 'expired' on time. [boot] restarts the main chain and keeps a wake that
+   * already exists.
    */
-  private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false) {
+  private fun scheduleRun(entry: QueueEntry, boot: Boolean = false) {
     val now = clock()
     when (entry.state) {
       EntryState.QUEUED -> {
         val at = entry.nextAttemptAt
         if (at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
-          scheduler.scheduleWake(entry, at, replace = !keepWake)
+          scheduler.scheduleWake(entry, at, replace = !boot)
+        } else if (boot) {
+          scheduler.restart(entry)
         } else {
           scheduler.schedule(entry)
         }
       }
-      EntryState.AWAITING_AUTH -> scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
+      EntryState.AWAITING_AUTH -> scheduler.scheduleWake(entry, entry.expiresAt, replace = !boot)
       else -> Unit
     }
   }

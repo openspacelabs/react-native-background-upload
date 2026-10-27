@@ -710,7 +710,7 @@ class QueueControllerTest {
     assertNull(store.load("e1"))
     assertNull(journal.find(id))
     controller.sweep()
-    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<String>(), scheduler.restarted)
   }
 
   @Test
@@ -725,7 +725,7 @@ class QueueControllerTest {
     assertNull(journal.find(id))
     assertEquals(listOf("state:e1:error"), events.log)
     controller.sweep()
-    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<String>(), scheduler.restarted)
   }
 
   @Test
@@ -784,18 +784,20 @@ class QueueControllerTest {
     journal.append(record(id, kind = EventJournal.KIND_CANCELLED))
     controller.sweep()
     assertEquals(EntryState.CANCELLED, store.load("e1")!!.state)
-    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<String>(), scheduler.restarted)
   }
 
   @Test
-  fun `sweep queues a running entry with no worker and schedules queued work`() {
+  fun `sweep queues a running entry with no worker and restarts queued work`() {
     store.save(entry(id = "r", state = EntryState.RUNNING))
     store.save(entry(id = "q", state = EntryState.QUEUED))
     store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, expiresAt = now + 50))
     controller.sweep()
     assertEquals(EntryState.QUEUED, store.load("r")!!.state)
-    assertEquals(setOf("r", "q"), scheduler.scheduled.toSet())
+    assertEquals(setOf("r", "q"), scheduler.restarted.toSet())
+    // Not schedule(): it would skip an entry whose chain holds a stale run.
+    assertEquals(emptyList<String>(), scheduler.scheduled)
     assertEquals(setOf("w" to now + 3_600_000, "p" to now + 50), scheduler.wakes.toSet())
   }
 
@@ -806,6 +808,8 @@ class QueueControllerTest {
     running += "e1"
     controller.sweep()
     assertEquals(EntryState.RUNNING, store.load("e1")!!.state)
+    // A restart would replace the chain and stop that worker.
+    assertEquals(emptyList<String>(), scheduler.restarted)
   }
 
   @Test
@@ -846,7 +850,7 @@ class QueueControllerTest {
     store.save(entry(state = EntryState.PAUSED))
     controller.sweep()
     assertEquals(EntryState.PAUSED, store.load("e1")!!.state)
-    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<String>(), scheduler.restarted)
   }
 
   @Test
@@ -855,7 +859,7 @@ class QueueControllerTest {
     store.save(entry(id = "p", state = EntryState.PAUSED))
     controller.sweep()
     assertEquals(EntryState.QUEUED, store.load("p")!!.state)
-    assertEquals(listOf("p"), scheduler.scheduled)
+    assertEquals(listOf("p"), scheduler.restarted)
 
     // pause() saved the setting, then died before the rows.
     settings.update { it.copy(paused = true) }
@@ -864,7 +868,7 @@ class QueueControllerTest {
     controller.sweep()
     assertEquals(EntryState.PAUSED, store.load("q")!!.state)
     assertEquals(EntryState.PAUSED, store.load("r")!!.state)
-    assertEquals(listOf("p"), scheduler.scheduled)
+    assertEquals(listOf("p"), scheduler.restarted)
   }
 
   @Test
@@ -879,6 +883,6 @@ class QueueControllerTest {
     assertEquals(EntryState.PAUSED, store.load("c")!!.state)
     assertEquals(EntryState.QUEUED, store.load("n")!!.state)
     assertEquals(EntryState.QUEUED, store.load("v")!!.state)
-    assertEquals(setOf("n", "v"), scheduler.scheduled.toSet())
+    assertEquals(setOf("n", "v"), scheduler.restarted.toSet())
   }
 }

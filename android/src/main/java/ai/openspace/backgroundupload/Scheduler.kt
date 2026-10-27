@@ -19,6 +19,14 @@ interface WorkScheduler {
   fun schedule(entry: QueueEntry)
 
   /**
+   * A run as soon as possible, on a fresh main chain that replaces whatever
+   * WorkManager holds for the entry. The boot sweep uses it: no worker of
+   * this process owns the entry, so an unfinished row there is left over
+   * from an earlier process and may never run.
+   */
+  fun restart(entry: QueueEntry)
+
+  /**
    * A run at [at] under a second unique name. Used for long backoffs and for
    * the expiry of a parked entry. [replace] false keeps a wake that already
    * exists (the boot sweep).
@@ -74,6 +82,10 @@ class WorkManagerScheduler(context: Context) : WorkScheduler {
     workManager
       .beginUniqueWork(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, request(entry, 0L))
       .enqueue()
+  }
+
+  override fun restart(entry: QueueEntry) {
+    workManager.enqueueUniqueWork(entry.id, ExistingWorkPolicy.REPLACE, request(entry, 0L))
   }
 
   override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
