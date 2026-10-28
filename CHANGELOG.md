@@ -5,6 +5,11 @@ warnings and errors, including ones from background runs with no JS, and a
 snapshot of the queue and its WorkManager runs each time the module starts.
 Before, these went to logcat only. iOS returns an empty list.
 
+Added `priority` to the request descriptor. On Android, normal requests now
+use at most 3 of the 4 transmit slots, and the fourth is kept for requests
+with `priority: 'high'`. A small request then no longer waits behind a
+backlog of file parts. iOS ignores the field for now.
+
 ## 11.0.2
 
 Android no longer lets stale wakes stop the queue. A parked entry got a wake

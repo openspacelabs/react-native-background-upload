@@ -16,7 +16,8 @@ internal fun desc(
   retry: RetryOverride? = null,
   noNotification: Boolean = false,
   wifiOnly: Boolean? = null,
-) = Descriptor(url, method, headers, dataJson, form, file, parts, accept, retry, noNotification, wifiOnly)
+  highPriority: Boolean = false,
+) = Descriptor(url, method, headers, dataJson, form, file, parts, accept, retry, noNotification, wifiOnly, highPriority)
 
 internal fun part(start: Long, end: Long, accepted: Boolean = false, url: String? = null) = Part(
   url = url ?: "https://example.com/part?start=$start",

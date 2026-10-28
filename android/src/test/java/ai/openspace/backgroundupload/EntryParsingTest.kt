@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EntryParsingTest {
@@ -123,6 +124,19 @@ class EntryParsingTest {
     assertNull(EntryParsing.parse(entryMap(base())).descriptor.wifiOnly)
     assertThrows(EntryParsing.InvalidEntryException::class.java) {
       EntryParsing.parse(entryMap(base("wifiOnly", "yes")))
+    }
+  }
+
+  @Test
+  fun `priority parses high, normal, or absent`() {
+    assertTrue(EntryParsing.parse(entryMap(base("priority", "high"))).descriptor.highPriority)
+    assertFalse(EntryParsing.parse(entryMap(base("priority", "normal"))).descriptor.highPriority)
+    assertFalse(EntryParsing.parse(entryMap(base())).descriptor.highPriority)
+    assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.parse(entryMap(base("priority", "urgent")))
+    }
+    assertThrows(EntryParsing.InvalidEntryException::class.java) {
+      EntryParsing.parse(entryMap(base("priority", true)))
     }
   }
 
