@@ -279,6 +279,14 @@ class WorkerOpsTest {
   }
 
   @Test
+  fun `park with an expiry past the horizon schedules no wake`() {
+    store.save(entry(state = EntryState.RUNNING, expiresAt = FAR_FUTURE))
+    assertEquals(WorkerOps.ParkResult.PARKED, ops.park("e1", 1, headerGeneration = 0))
+    assertEquals(EntryState.AWAITING_AUTH, store.load("e1")!!.state)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+  }
+
+  @Test
   fun `a 401 sent under older headers re-issues instead of parking`() {
     store.save(entry(state = EntryState.RUNNING))
     controller.updateHeaders(mapOf("Authorization" to "Bearer new"))

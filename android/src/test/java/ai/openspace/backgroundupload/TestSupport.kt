@@ -111,6 +111,7 @@ internal class FakeScheduler : WorkScheduler {
   val scheduled = mutableListOf<String>()
   val wakes = mutableListOf<Pair<String, Long>>()
   val cancelled = mutableListOf<String>()
+  val cancelledWakes = mutableListOf<String>()
 
   override fun schedule(entry: QueueEntry) {
     scheduled += entry.id
@@ -122,5 +123,9 @@ internal class FakeScheduler : WorkScheduler {
 
   override fun cancel(id: String) {
     cancelled += id
+  }
+
+  override fun cancelWake(id: String) {
+    cancelledWakes += id
   }
 }

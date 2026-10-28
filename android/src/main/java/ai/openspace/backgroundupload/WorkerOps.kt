@@ -264,8 +264,8 @@ class WorkerOps(
     }
     if (result == ParkResult.PARKED && next != null) {
       events.state(next.toRow())
-      // A parked entry still expires on time.
-      scheduler.scheduleWake(next, next.expiresAt, replace = true)
+      // A parked entry still expires on time. A far expiry waits for a later boot sweep.
+      if (expiryWakeIsNear(next.expiresAt, now)) scheduler.scheduleWake(next, next.expiresAt, replace = true)
     }
     return result
   }
