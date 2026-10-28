@@ -114,7 +114,7 @@ class UploaderModule(context: ReactApplicationContext) :
       // The emitter callback exists only while the C++ TurboModule does, so a
       // null callback is expected before setup and after teardown. It is also
       // null for the whole process on the old architecture, so warn.
-      Diag.warn("live event dropped (no event emitter; New Architecture required)")
+      Diag.warn("live event dropped (no event emitter; New Architecture required)", persist = false)
     } catch (exc: Throwable) {
       Diag.error("failed to emit live event", exc)
     }

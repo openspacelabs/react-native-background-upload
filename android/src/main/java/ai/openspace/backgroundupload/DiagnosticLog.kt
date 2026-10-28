@@ -59,10 +59,16 @@ class DiagnosticLog(private val file: File) {
       error?.let { "${it.javaClass.name}: ${it.message ?: ""}".trimEnd(' ', ':') }
   }
 
+  // The file's records, read once. Every write goes through this instance.
+  private var cached: List<Record>? = null
+
+  private fun records(): List<Record> = cached ?: read().also { cached = it }
+
   @Synchronized
   fun append(record: Record) {
     runCatching {
-      val next = (read() + record).takeLast(MAX_RECORDS)
+      val next = (records() + record).takeLast(MAX_RECORDS)
+      cached = next
       AtomicFiles.writeText(file, gson.toJson(next))
     }
   }
@@ -70,8 +76,12 @@ class DiagnosticLog(private val file: File) {
   /** Every record, oldest first, then an empty log. */
   @Synchronized
   fun drain(): List<Record> {
-    val records = read()
-    if (records.isNotEmpty()) runCatching { file.delete() }
+    val records = records()
+    cached = emptyList()
+    if (records.isNotEmpty()) {
+      // A file that will not delete is emptied, so the next process does not report these again.
+      runCatching { if (!file.delete()) AtomicFiles.writeText(file, "[]") }
+    }
     return records
   }
 

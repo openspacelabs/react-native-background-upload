@@ -18,9 +18,13 @@ internal object Diag {
   /** Clock for the records. Tests replace it. */
   var clock: () -> Long = System::currentTimeMillis
 
-  fun warn(message: String, error: Throwable? = null) {
+  /**
+   * [persist] false keeps an expected, repeating warning out of [log], so it
+   * cannot crowd out the rest.
+   */
+  fun warn(message: String, error: Throwable? = null, persist: Boolean = true) {
     runCatching { Log.w(TAG, message, error) }
-    record(DiagnosticLog.WARN, message, error, null)
+    if (persist) record(DiagnosticLog.WARN, message, error, null)
   }
 
   fun error(message: String, error: Throwable? = null) {

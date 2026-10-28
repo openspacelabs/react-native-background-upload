@@ -390,6 +390,9 @@ class QueueController(
     val changed = mutableListOf<QueueEntry>()
     val toForget = mutableListOf<String>()
     val toSchedule = mutableListOf<QueueEntry>()
+    // toSchedule as the sweep found it, before toStopped or toResumed reset
+    // state and updatedAt. The boot snapshot describes these.
+    val found = mutableListOf<QueueEntry>()
     val s = settings.load()
     store.locked {
       val records = journal.unacknowledged().groupBy { it.id }
@@ -420,7 +423,10 @@ class QueueController(
           if (cur !== e) {
             if (trySave(cur)) changed += cur else continue
           }
-          if (!paused || cur.state == EntryState.AWAITING_AUTH) toSchedule += cur
+          if (!paused || cur.state == EntryState.AWAITING_AUTH) {
+            toSchedule += cur
+            found += e
+          }
         } else {
           val orphans = own.filter { it.eventId != e.settledEventId }
           if (orphans.isNotEmpty()) journal.ack(orphans.map { it.eventId })
@@ -438,7 +444,7 @@ class QueueController(
     toForget.forEach { scheduler.cancel(it) }
     toSchedule.forEach { scheduleRun(it, keepWake = true) }
     if (toSchedule.isNotEmpty() || !runs.isNullOrEmpty()) {
-      Diag.info(BootSnapshot.MESSAGE, BootSnapshot.of(toSchedule, runs, now))
+      Diag.info(BootSnapshot.MESSAGE, BootSnapshot.of(found, runs, now))
     }
     changed.forEach { events.state(it.toRow()) }
   }
