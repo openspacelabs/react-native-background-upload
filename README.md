@@ -129,7 +129,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
 | `retry` | Per-request override of the `configure()` retry defaults. |
 | `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
-| `priority` | `'high'` or `'normal'` (default). On Android at most 4 requests transmit at once, and one of those slots is kept for `'high'`. A high-priority request, such as a small JSON POST that creates a session, never waits behind a backlog of file parts. iOS ignores it for now. |
+| `priority` | `'high'` or `'normal'` (default). On Android at most 4 requests transmit at once, and one of those slots is kept for `'high'`. Normal requests can use only the other 3, so a high-priority request, such as a small JSON POST that creates a session, gets a slot without waiting behind a backlog of file parts. It can still wait when other high-priority requests hold every slot. iOS ignores it for now. |
 | `android` | `{ noNotification?: boolean }`. See Silent uploads. |
 
 `vars` and `data` cross to native as JSON strings, and native parses them.
