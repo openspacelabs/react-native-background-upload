@@ -550,7 +550,9 @@ class QueueControllerTest {
     assertEquals(EntryState.AWAITING_AUTH, store.load("a")!!.state)
     assertEquals(EntryState.QUEUED, store.load("s")!!.state)
     assertTrue(scheduler.scheduled.containsAll(listOf("q", "r", "s")))
-    assertEquals(listOf("a" to FAR_FUTURE), scheduler.wakes) // the parked one waits for its expiry
+    // The parked one waits for its expiry, which is too far ahead for a wake.
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertTrue("a" in scheduler.cancelledWakes)
   }
 
   @Test
@@ -650,6 +652,22 @@ class QueueControllerTest {
   fun `setWifiOnly persists`() {
     controller.setWifiOnly(true)
     assertTrue(QueueSettingsStore(File(root, "settings.json")).load().wifiOnly)
+  }
+
+  @Test
+  fun `updateHeaders cancels the expiry wake of the entries it unparks`() {
+    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+    assertEquals(listOf("p"), scheduler.cancelledWakes)
+    assertEquals(listOf("p"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `updateHeaders leaves the wake of an entry whose worker runs in this process`() {
+    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    running += "p"
+    controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+    assertEquals(emptyList<String>(), scheduler.cancelledWakes)
   }
 
   @Test
@@ -797,6 +815,20 @@ class QueueControllerTest {
     assertEquals(EntryState.QUEUED, store.load("r")!!.state)
     assertEquals(setOf("r", "q"), scheduler.scheduled.toSet())
     assertEquals(setOf("w" to now + 3_600_000, "p" to now + 50), scheduler.wakes.toSet())
+  }
+
+  @Test
+  fun `sweep cancels the stale wakes of due work and of a parked entry with a far expiry`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
+    store.save(entry(id = "far", state = EntryState.AWAITING_AUTH, expiresAt = FAR_FUTURE))
+    store.save(entry(id = "near", state = EntryState.AWAITING_AUTH, expiresAt = now + EXPIRY_WAKE_HORIZON_MS))
+    controller.sweep()
+    assertEquals(setOf("q", "far"), scheduler.cancelledWakes.toSet())
+    assertEquals(
+      setOf("w" to now + 3_600_000, "near" to now + EXPIRY_WAKE_HORIZON_MS),
+      scheduler.wakes.toSet(),
+    )
   }
 
   @Test

@@ -450,7 +450,8 @@ class QueueController(
   /**
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
    * to the wake; a parked entry gets a wake at its expiry, so it settles
-   * 'expired' on time.
+   * 'expired' on time, once that expiry is near (see [EXPIRY_WAKE_HORIZON_MS]).
+   * Any other wake of the entry is stale, so it is cancelled.
    */
   private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false) {
     val now = clock()
@@ -460,12 +461,23 @@ class QueueController(
         if (at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
           scheduler.scheduleWake(entry, at, replace = !keepWake)
         } else {
+          cancelStaleWake(entry.id)
           scheduler.schedule(entry)
         }
       }
-      EntryState.AWAITING_AUTH -> scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
+      EntryState.AWAITING_AUTH ->
+        if (expiryWakeIsNear(entry.expiresAt, now)) {
+          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
+        } else {
+          cancelStaleWake(entry.id)
+        }
       else -> Unit
     }
+  }
+
+  // A running wake is the entry's worker; it finishes its own run.
+  private fun cancelStaleWake(id: String) {
+    if (!isWorkerRunning(id)) scheduler.cancelWake(id)
   }
 
   /** Applies [transform] to every non-legacy entry under the store lock. Returns the ones it changed. */

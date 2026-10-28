@@ -10,6 +10,20 @@ import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 /**
+ * How far ahead a parked entry's expiry wake may be scheduled. A delayed
+ * WorkManager row holds one of the app's JobScheduler slots (20 by default)
+ * until it runs, and WorkManager's in-process scheduler reads only the 200
+ * oldest enqueued rows. Wakes years ahead, from long-lived requests that
+ * parked, filled both, so no other work started. An entry that expires past
+ * this horizon gets its wake from a later boot sweep, and settles at the
+ * first launch after it expires at the latest.
+ */
+const val EXPIRY_WAKE_HORIZON_MS = 24L * 60 * 60 * 1000
+
+/** Whether an expiry wake at [expiresAt] is near enough to schedule now. */
+fun expiryWakeIsNear(expiresAt: Long, now: Long): Boolean = expiresAt - now <= EXPIRY_WAKE_HORIZON_MS
+
+/**
  * Starts and stops worker runs for entries. A run only carries the entry id;
  * the worker reads everything else from the store. So an extra run is always
  * harmless: it finds nothing to do and exits.
@@ -27,6 +41,9 @@ interface WorkScheduler {
 
   /** Cancels the main chain and the wake. */
   fun cancel(id: String)
+
+  /** Cancels the wake only. A wake that is no longer needed still holds a WorkManager slot. */
+  fun cancelWake(id: String)
 }
 
 /**
@@ -88,6 +105,13 @@ class WorkManagerScheduler(context: Context) : WorkScheduler {
   override fun cancel(id: String) {
     workManager.cancelUniqueWork(id)
     workManager.cancelUniqueWork(wakeName(id))
+  }
+
+  // A cancel reschedules all pending work even when the name has none, and
+  // the boot sweep calls this for every queued entry.
+  override fun cancelWake(id: String) {
+    val states = workManager.getWorkInfosForUniqueWork(wakeName(id)).get().map { it.state }
+    if (states.any { !it.isFinished }) workManager.cancelUniqueWork(wakeName(id))
   }
 
   /** First v10 launch: the v9 rows. Their workers are gone. */
