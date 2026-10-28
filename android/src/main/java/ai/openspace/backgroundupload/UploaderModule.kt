@@ -47,6 +47,7 @@ class UploaderModule(context: ReactApplicationContext) :
     }
   }
 
+  private val diagnostics = DiagnosticLog.get(context)
   private val store = QueueStore.get(context)
   private val journal = EventJournal.get(context)
   private val settings = QueueSettingsStore.get(context)
@@ -221,6 +222,15 @@ class UploaderModule(context: ReactApplicationContext) :
     onQueue(promise) {
       val out = Arguments.createArray()
       controller.unacknowledged(this) { !invalidated }.forEach { out.pushMap(it.toWritableMap()) }
+      out
+    }
+  }
+
+  /** The persisted diagnostic records, oldest first. The log is empty after. */
+  override fun takeDiagnostics(promise: Promise) {
+    onQueue(promise) {
+      val out = Arguments.createArray()
+      diagnostics.drain().forEach { out.pushMap(JsonBridge.toWritableMap(it.toMap())) }
       out
     }
   }

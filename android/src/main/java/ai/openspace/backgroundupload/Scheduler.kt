@@ -44,7 +44,23 @@ interface WorkScheduler {
 
   /** Cancels the wake only. A wake that is no longer needed still holds a WorkManager slot. */
   fun cancelWake(id: String)
+
+  /** Every unfinished WorkManager run of the library, main chains and wakes. For the boot snapshot. */
+  fun libraryRuns(): List<PendingRun>
 }
+
+/**
+ * One unfinished WorkManager run. [entryId] comes from the run's id tag.
+ * [delayed] is a run enqueued with an initial delay, which only a wake has.
+ * [nextScheduleAt] is null when WorkManager reports none.
+ */
+data class PendingRun(
+  val entryId: String?,
+  val state: String,
+  val runAttemptCount: Int,
+  val nextScheduleAt: Long?,
+  val delayed: Boolean,
+)
 
 /**
  * WorkManager unique work per entry id, APPEND_OR_REPLACE, as v9.
@@ -113,6 +129,21 @@ class WorkManagerScheduler(context: Context) : WorkScheduler {
     val states = workManager.getWorkInfosForUniqueWork(wakeName(id)).get().map { it.state }
     if (states.any { !it.isFinished }) workManager.cancelUniqueWork(wakeName(id))
   }
+
+  // One query for every row, not one per entry: the boot sweep runs this on
+  // the queue's only thread.
+  override fun libraryRuns(): List<PendingRun> =
+    workManager.getWorkInfosByTag(WORK_TAG).get()
+      .filter { !it.state.isFinished }
+      .map { info ->
+        PendingRun(
+          entryId = info.tags.firstOrNull { it.startsWith(ID_TAG_PREFIX) }?.removePrefix(ID_TAG_PREFIX),
+          state = info.state.name,
+          runAttemptCount = info.runAttemptCount,
+          nextScheduleAt = info.nextScheduleTimeMillis.takeIf { it != Long.MAX_VALUE },
+          delayed = info.initialDelayMillis > 0,
+        )
+      }
 
   /** First v10 launch: the v9 rows. Their workers are gone. */
   fun cancelV9Work() {

@@ -28,6 +28,7 @@ jest.mock('react-native', () => {
     getRequests: jest.fn(() => []),
     getUnacknowledgedEvents: jest.fn(async () => []),
     ackEvents: jest.fn(async () => undefined),
+    takeDiagnostics: jest.fn(async () => []),
     onState: emitter('state'),
     onProgress: emitter('progress'),
     onAttempt: emitter('attempt'),
@@ -115,6 +116,7 @@ describe('client shape', () => {
         'pause',
         'resume',
         'setWifiOnly',
+        'takeDiagnostics',
         'updateHeaders',
       ].sort(),
     );
@@ -310,6 +312,18 @@ describe('queue control forwards', () => {
   it('propagates a native rejection', async () => {
     native.pause.mockRejectedValueOnce(new Error('E_NOT_IMPLEMENTED'));
     await expect(client.pause()).rejects.toThrow('E_NOT_IMPLEMENTED');
+  });
+});
+
+describe('takeDiagnostics', () => {
+  it('returns the native records', async () => {
+    const client = createUploadClient();
+    const records = [
+      { at: 1, level: 'error', message: 'run failed', error: 'java.io.IOException: disk full' },
+      { at: 2, level: 'info', message: 'boot sweep restarted queued entries', data: { entries: 3 } },
+    ];
+    native.takeDiagnostics.mockResolvedValueOnce(records);
+    await expect(client.takeDiagnostics()).resolves.toEqual(records);
   });
 });
 

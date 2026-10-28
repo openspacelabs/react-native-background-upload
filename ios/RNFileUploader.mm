@@ -128,6 +128,12 @@
   [RNBackgroundUpload.shared getUnacknowledgedEvents:resolve reject:reject];
 }
 
+- (void)takeDiagnostics:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject
+{
+  [RNBackgroundUpload.shared takeDiagnostics:resolve reject:reject];
+}
+
 - (void)ackEvents:(NSArray *)ids
           resolve:(RCTPromiseResolveBlock)resolve
            reject:(RCTPromiseRejectBlock)reject

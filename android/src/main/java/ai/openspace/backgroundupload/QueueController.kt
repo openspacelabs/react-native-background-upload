@@ -432,8 +432,14 @@ class QueueController(
         }
       }
     }
+    // Read before the cleanup below changes it: this is what an earlier
+    // process left in WorkManager.
+    val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
     toForget.forEach { scheduler.cancel(it) }
     toSchedule.forEach { scheduleRun(it, keepWake = true) }
+    if (toSchedule.isNotEmpty() || !runs.isNullOrEmpty()) {
+      Diag.info(BootSnapshot.MESSAGE, BootSnapshot.of(toSchedule, runs, now))
+    }
     changed.forEach { events.state(it.toRow()) }
   }
 
