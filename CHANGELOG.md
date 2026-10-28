@@ -1,3 +1,15 @@
+## 11.0.2
+
+Android no longer lets stale wakes stop the queue. A parked entry got a wake
+at its expiry, which for long-lived requests is years ahead, and the wake
+stayed after the entry unparked. Each delayed WorkManager row holds a
+JobScheduler slot until it runs, and WorkManager's in-process scheduler
+reads only the 200 oldest enqueued rows, so enough stale wakes stopped all
+queued work from starting. A parked entry now gets a wake only when it
+expires within 24 hours, and scheduling an entry cancels any wake it no
+longer needs. The boot sweep does this too, so a stuck queue starts again
+on the first launch after the update.
+
 ## 11.0.1
 
 iOS waits two seconds after the app becomes active before replacing
