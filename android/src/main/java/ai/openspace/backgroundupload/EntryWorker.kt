@@ -53,6 +53,8 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
 
   final override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     val id = inputData.getString(WorkManagerScheduler.ENTRY_ID_KEY) ?: return@withContext Result.success()
+    // A headless run has no module, so it opens the log that its Diag calls write to.
+    DiagnosticLog.get(context)
     // Acquire before the first store read: a cancel-then-enqueue can start
     // this run while the old one still winds down.
     while (!WorkerGate.tryAcquire(id, this@EntryWorker)) delay(GATE_POLL_MS)

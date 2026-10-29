@@ -459,6 +459,25 @@ uploads
   .forEach((row) => uploads.cancel(row.id));
 ```
 
+### `takeDiagnostics(): Promise<Diagnostic[]>`
+The library's persisted diagnostic records, oldest first. Each call returns
+the records since the last call and clears them, so send them somewhere
+they can be seen, such as an error tracker, once per launch. A record is
+`{ at, level, message, error?, data? }`, with `level` one of `info`, `warn`
+or `error`. `error` is the exception's class and message.
+
+Android keeps the newest 50 records. They are the module's warnings and
+errors, including those from background runs that had no JS, and one `info`
+record each time the module starts and finds queued or parked entries or
+WorkManager runs. That is once per launch, plus once per JS reload. The
+record's `data` counts the entries the start schedules, by state and by key,
+and gives the oldest `updatedAt` among them, all as the start found them: an
+entry that was running when its process died counts as running. It also
+describes every unfinished WorkManager run the library had before the start
+changed them: the count by state, how many are delayed wakes, how many of
+those are due more than 24 hours out, the highest run attempt count, and how
+many queued or running entries had no run at all. iOS returns an empty list.
+
 ### `chunkPlan(sizeBytes, { min?, max? }): Array<{ start, end }>`
 Splits a byte count into contiguous, end-exclusive ranges: a deterministic
 greedy walk of `max`-sized chunks (default 20 MB), with a final remainder

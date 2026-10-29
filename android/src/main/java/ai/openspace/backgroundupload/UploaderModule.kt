@@ -47,6 +47,7 @@ class UploaderModule(context: ReactApplicationContext) :
     }
   }
 
+  private val diagnostics = DiagnosticLog.get(context)
   private val store = QueueStore.get(context)
   private val journal = EventJournal.get(context)
   private val settings = QueueSettingsStore.get(context)
@@ -113,7 +114,7 @@ class UploaderModule(context: ReactApplicationContext) :
       // The emitter callback exists only while the C++ TurboModule does, so a
       // null callback is expected before setup and after teardown. It is also
       // null for the whole process on the old architecture, so warn.
-      Diag.warn("live event dropped (no event emitter; New Architecture required)")
+      Diag.warn("live event dropped (no event emitter; New Architecture required)", persist = false)
     } catch (exc: Throwable) {
       Diag.error("failed to emit live event", exc)
     }
@@ -221,6 +222,15 @@ class UploaderModule(context: ReactApplicationContext) :
     onQueue(promise) {
       val out = Arguments.createArray()
       controller.unacknowledged(this) { !invalidated }.forEach { out.pushMap(it.toWritableMap()) }
+      out
+    }
+  }
+
+  /** The persisted diagnostic records, oldest first. The log is empty after. */
+  override fun takeDiagnostics(promise: Promise) {
+    onQueue(promise) {
+      val out = Arguments.createArray()
+      diagnostics.drain().forEach { out.pushMap(JsonBridge.toWritableMap(it.toMap())) }
       out
     }
   }

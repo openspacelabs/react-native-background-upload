@@ -100,6 +100,13 @@ export interface Spec extends TurboModule {
   // ids are ignored. An acknowledged 'completed' is the one moment native
   // deletes the entry's row and bytes.
   ackEvents(ids: string[]): Promise<void>;
+  // The persisted diagnostic records, oldest first, in the ./types
+  // Diagnostic shape: { at, level, message, error?, data? }. Native clears
+  // them as it returns them. Android keeps the newest 50: its warnings and
+  // errors, including ones from headless workers, and one 'info' record per
+  // boot sweep with the queue and its WorkManager runs. iOS resolves an
+  // empty list.
+  takeDiagnostics(): Promise<CodegenTypes.UnsafeObject[]>;
 
   // Events. state carries a full RequestRow per transition. progress is
   // byte-weighted across a chunked upload's parts. notification is

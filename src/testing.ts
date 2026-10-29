@@ -27,6 +27,7 @@ import type { EnqueueEntry } from './registry';
 import type {
   AttemptEvent,
   CancelReason,
+  Diagnostic,
   ErrorKind,
   Json,
   OutcomeError,
@@ -85,7 +86,8 @@ export type FailableMethod =
   | 'updateHeaders'
   | 'getRequests'
   | 'getUnacknowledgedEvents'
-  | 'ackEvents';
+  | 'ackEvents'
+  | 'takeDiagnostics';
 
 export type FakeNativeOptions = {
   /**
@@ -153,13 +155,15 @@ export type FakeNative = Spec & {
    * configure() replays them.
    */
   seedUnacknowledged: (events: SettledEvent[]) => void;
+  /** Adds diagnostic records. The next takeDiagnostics() returns and clears them. */
+  seedDiagnostics: (records: Diagnostic[]) => void;
   /**
    * The next call of `method` rejects (getRequests throws) with an Error
    * that carries `code`, as a native rejection does.
    */
   failNext: (method: FailableMethod, code: string, message?: string) => void;
   /**
-   * Clears entries, rows, journal, calls, acks, the pause state and queued
+   * Clears entries, rows, journal, diagnostics, calls, acks, the pause state and queued
    * failures. A
    * settle() that still waits for its ack resolves now, so it cannot reject
    * later inside another test. Keeps the subscriptions, because a client subscribes one time, at its first
@@ -249,6 +253,7 @@ export const createFakeNative = (
   const entries: FakeEntry[] = [];
   const rows = new Map<string, RequestRow>();
   const journal: SettledEvent[] = [];
+  const diagnostics: Diagnostic[] = [];
   const ackedEventIds: string[] = [];
   const calls: FakeNative['calls'] = {
     configure: [],
@@ -551,6 +556,11 @@ export const createFakeNative = (
         });
       }),
 
+    takeDiagnostics: () =>
+      run('takeDiagnostics', () =>
+        diagnostics.splice(0).map((record) => ({ ...record })),
+      ),
+
     onState: (handler) =>
       state.subscribe(handler as (row: RequestRow) => void | Promise<void>),
     onProgress: (handler) => progress.subscribe(handler),
@@ -582,6 +592,10 @@ export const createFakeNative = (
       journal.push(...events.map((event) => ({ ...event })));
     },
 
+    seedDiagnostics: (records) => {
+      diagnostics.push(...records.map((record) => ({ ...record })));
+    },
+
     failNext: (method, code, message) => {
       const queue = failures.get(method) ?? [];
       queue.push(nativeError(code, message));
@@ -592,6 +606,7 @@ export const createFakeNative = (
       entries.length = 0;
       rows.clear();
       journal.length = 0;
+      diagnostics.length = 0;
       ackedEventIds.length = 0;
       calls.configure.length = 0;
       calls.pause.length = 0;

@@ -19,6 +19,7 @@ import {
 import type {
   AddListener,
   ConfigureOptions,
+  Diagnostic,
   PauseScope,
   RequestRow,
   StateEvent,
@@ -222,6 +223,17 @@ export const createUploadClient = ({
   };
 
   /**
+   * The library's persisted diagnostic records, oldest first. Each call
+   * returns the records since the last one, so report them where they can
+   * be seen, such as an error tracker. Android keeps the newest 50: native
+   * warnings and errors, including ones from background runs with no JS,
+   * and an 'info' record per launch that describes the queue and its
+   * WorkManager runs. iOS returns an empty list.
+   */
+  const takeDiagnostics = async (): Promise<Diagnostic[]> =>
+    (await native.takeDiagnostics()) as Diagnostic[];
+
+  /**
    * Listens for one event type across all requests. Listeners are global; use
    * the event's id to tell requests apart. 'state' carries a full RequestRow
    * per transition, plus a row with reason 'unhandled-key' for an outcome
@@ -275,6 +287,7 @@ export const createUploadClient = ({
     setWifiOnly,
     updateHeaders,
     getRequests,
+    takeDiagnostics,
     addListener,
     chunkPlan,
     android,

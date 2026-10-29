@@ -251,6 +251,16 @@ describe('queue controls', () => {
   });
 });
 
+describe('takeDiagnostics', () => {
+  it('returns seeded records once, then an empty list', async () => {
+    const fake = createFakeNative();
+    const record = { at: 1, level: 'warn' as const, message: 'foreground start failed' };
+    fake.seedDiagnostics([record]);
+    await expect(fake.takeDiagnostics()).resolves.toEqual([record]);
+    await expect(fake.takeDiagnostics()).resolves.toEqual([]);
+  });
+});
+
 describe('emitters', () => {
   it('delivers emit helpers to subscribers and stops after remove()', () => {
     const fake = createFakeNative();

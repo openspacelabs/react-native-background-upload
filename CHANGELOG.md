@@ -1,3 +1,10 @@
+## Unreleased
+
+Added `takeDiagnostics()`. On Android it returns the module's recent
+warnings and errors, including ones from background runs with no JS, and a
+snapshot of the queue and its WorkManager runs each time the module starts.
+Before, these went to logcat only. iOS returns an empty list.
+
 ## 11.0.2
 
 Android no longer lets stale wakes stop the queue. A parked entry got a wake
