@@ -1,4 +1,4 @@
-## Unreleased
+## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
 warnings and errors, including ones from background runs with no JS, and a
