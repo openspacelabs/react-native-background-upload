@@ -655,6 +655,13 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `same body with a new priority resumes with that priority`() {
+    controller.enqueue(parsed(id = "s", descriptor = desc(dataJson = """{"a":1}""")))
+    controller.enqueue(parsed(id = "s", descriptor = desc(dataJson = """{"a":1}""", highPriority = true)))
+    assertTrue(store.load("s")!!.descriptor!!.highPriority)
+  }
+
+  @Test
   fun `setWifiOnly persists`() {
     controller.setWifiOnly(true)
     assertTrue(QueueSettingsStore(File(root, "settings.json")).load().wifiOnly)

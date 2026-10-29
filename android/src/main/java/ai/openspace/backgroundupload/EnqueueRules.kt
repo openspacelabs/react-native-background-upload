@@ -121,11 +121,11 @@ object EnqueueRules {
   )
 
   /**
-   * Same body. New headers, expiresAt, vars, accept, retry, wifiOnly, and
-   * notification flag replace the stored ones; the body and accepted parts
-   * stay. A settled entry reopens with a fresh generation and attempts 0
-   * (attempts count the current generation). A running one stays running
-   * (the worker reads the new headers before its next attempt).
+   * Same body. New headers, expiresAt, vars, accept, retry, wifiOnly,
+   * priority, and notification flag replace the stored ones; the body and
+   * accepted parts stay. A settled entry reopens with a fresh generation and
+   * attempts 0 (attempts count the current generation). A running one stays
+   * running (the worker reads the new headers before its next attempt).
    */
   fun resumed(
     existing: QueueEntry,
@@ -149,6 +149,7 @@ object EnqueueRules {
         retry = p.descriptor.retry,
         noNotification = p.descriptor.noNotification,
         wifiOnly = p.descriptor.wifiOnly,
+        highPriority = p.descriptor.highPriority,
       ),
       state = if (running) EntryState.RUNNING else initialState(paused),
       attempts = if (reopen) 0 else existing.attempts,

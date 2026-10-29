@@ -66,6 +66,8 @@ object EntryParsing {
     val headers = parseHeaderMap(d.map("headers"))
     requireValidHeaders(headers, "headers")
     if (d.isSet("wifiOnly") && d.bool("wifiOnly") == null) invalid("wifiOnly must be a boolean")
+    val priority = if (d.isSet("priority")) d.string("priority") else "normal"
+    if (priority != "high" && priority != "normal") invalid("priority must be 'high' or 'normal'")
 
     return Descriptor(
       url = url,
@@ -79,6 +81,7 @@ object EntryParsing {
       retry = d.map("retry")?.let { parseRetry(it) },
       noNotification = d.map("android")?.bool("noNotification") ?: false,
       wifiOnly = d.bool("wifiOnly"),
+      highPriority = priority == "high",
     )
   }
 

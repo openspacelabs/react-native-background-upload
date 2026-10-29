@@ -128,6 +128,14 @@ class EntryRunTest {
   }
 
   @Test
+  fun `a high-priority entry sends its request as high priority`() {
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", highPriority = true)))
+    respond(200)
+    run()
+    assertTrue(host.requests.single().highPriority)
+  }
+
+  @Test
   fun `a transient response waits a short backoff in place, with nextAttemptAt on the running row`() {
     controller.enqueue(parsed())
     respond(503, 200)

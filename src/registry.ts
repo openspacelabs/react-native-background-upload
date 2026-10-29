@@ -40,6 +40,7 @@ const DESCRIPTOR_KEYS = [
   'expiresAt',
   'retry',
   'wifiOnly',
+  'priority',
   'android',
 ];
 const PART_KEYS = ['url', 'headers', 'range'];
@@ -482,6 +483,13 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
   }
   if (d.wifiOnly !== undefined && typeof d.wifiOnly !== 'boolean') {
     throw new Error('mutate: wifiOnly must be a boolean when present');
+  }
+  if (
+    d.priority !== undefined &&
+    d.priority !== 'high' &&
+    d.priority !== 'normal'
+  ) {
+    throw new Error("mutate: priority must be 'high' or 'normal' when present");
   }
   if (
     d.expiresAt !== undefined &&

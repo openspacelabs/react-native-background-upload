@@ -40,6 +40,8 @@ data class TransferRequest(
   val method: String,
   val headers: Map<String, String>,
   val body: RequestBody?,
+  /** Whether the request may use the slots kept for high priority. See [TransferGate]. */
+  val highPriority: Boolean = false,
 )
 
 /** Sends one request and reports bytes written. The headers are sent as they are. */

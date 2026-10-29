@@ -106,6 +106,13 @@ export type RequestDescriptor = {
    * entry.
    */
   wifiOnly?: boolean;
+  /**
+   * 'high' lets the request use the transmit slot kept for high priority,
+   * so it does not wait behind a backlog of file parts. Use it for small
+   * requests that other work depends on, such as creating a session.
+   * Default 'normal'. Android only for now; iOS ignores it.
+   */
+  priority?: 'high' | 'normal';
   android?: { noNotification?: boolean };
 };
 

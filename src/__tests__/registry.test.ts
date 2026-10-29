@@ -581,6 +581,23 @@ describe('mutate', () => {
       );
     });
 
+    it('forwards priority to native when set', async () => {
+      const high = mutateWith({ url: 'https://x', priority: 'high' });
+      await high.promise;
+      expect(high.enqueue.mock.calls[0][0].descriptor.priority).toBe('high');
+      const plain = mutateWith({ url: 'https://x' });
+      await plain.promise;
+      expect(plain.enqueue.mock.calls[0][0].descriptor).not.toHaveProperty(
+        'priority',
+      );
+    });
+
+    it('rejects a priority other than high or normal', async () => {
+      await expect(
+        mutateWith({ url: 'https://x', priority: 'urgent' }).promise,
+      ).rejects.toThrow(/priority must be 'high' or 'normal'/);
+    });
+
     it('rejects a wifiOnly that is not a boolean, and a misspelling', async () => {
       await expect(
         mutateWith({ url: 'https://x', wifiOnly: 'yes' }).promise,

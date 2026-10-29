@@ -6,7 +6,12 @@ import androidx.work.WorkInfo.State.ENQUEUED
 import androidx.work.WorkInfo.State.FAILED
 import androidx.work.WorkInfo.State.RUNNING
 import androidx.work.WorkInfo.State.SUCCEEDED
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -159,18 +164,43 @@ class SchedulerTest {
   }
 }
 
-class TransferSemaphoreTest {
+class TransferGateTest {
   @Test
-  fun `the global cap is 4 and a fifth request waits`() = runBlocking {
+  fun `the global cap is 4, with 1 slot kept for high priority`() {
     assertEquals(4, MAX_TRANSFER_CONCURRENCY)
-    repeat(4) { transferSemaphore.acquire() }
-    try {
-      assertFalse(transferSemaphore.tryAcquire()) // no fifth permit
-      transferSemaphore.release()
-      assertTrue(transferSemaphore.tryAcquire()) // one freed, one taken
-    } finally {
-      repeat(4) { transferSemaphore.release() }
+    assertEquals(1, HIGH_PRIORITY_RESERVED)
+    assertEquals(4, transferGate.availableSlots)
+  }
+
+  @Test
+  fun `normal requests take at most 3 slots, and a high-priority request takes the 4th`() = runBlocking {
+    val gate = TransferGate(total = 4, reserved = 1)
+    val release = CompletableDeferred<Unit>()
+    val started = Channel<String>(Channel.UNLIMITED)
+    val normals = (1..4).map { n ->
+      launch { gate.withPermit(highPriority = false) { started.send("normal$n"); release.await() } }
     }
-    assertEquals(4, transferSemaphore.availablePermits)
+    repeat(3) { started.receive() }
+    yield()
+    assertNull(started.tryReceive().getOrNull()) // the 4th normal waits
+    assertEquals(1, gate.availableSlots)
+    val high = launch { gate.withPermit(highPriority = true) { started.send("high"); release.await() } }
+    assertEquals("high", started.receive())
+    assertEquals(0, gate.availableSlots)
+    release.complete(Unit)
+    (normals + high).joinAll()
+    assertEquals(4, gate.availableSlots)
+  }
+
+  @Test
+  fun `high-priority requests may use every slot`() = runBlocking {
+    val gate = TransferGate(total = 4, reserved = 1)
+    val release = CompletableDeferred<Unit>()
+    val started = Channel<Unit>(Channel.UNLIMITED)
+    val highs = (1..4).map { launch { gate.withPermit(highPriority = true) { started.send(Unit); release.await() } } }
+    repeat(4) { started.receive() }
+    assertEquals(0, gate.availableSlots)
+    release.complete(Unit)
+    highs.joinAll()
   }
 }

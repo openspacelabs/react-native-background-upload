@@ -9,7 +9,6 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /**
@@ -79,7 +78,7 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
     override suspend fun sleep(ms: Long) = delay(ms)
 
     override suspend fun send(request: TransferRequest, onProgress: (Long) -> Unit): UploadResponse =
-      transferSemaphore.withPermit { okhttpSend(uploadHttpClient, request, onProgress) }
+      transferGate.withPermit(request.highPriority) { okhttpSend(uploadHttpClient, request, onProgress) }
 
     override fun connectivity(wifiOnly: Boolean): Connectivity {
       connectivity = validateConnectivity(context, wifiOnly)

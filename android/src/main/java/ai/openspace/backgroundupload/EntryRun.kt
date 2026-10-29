@@ -261,7 +261,7 @@ internal class EntryRun(
     val policy = policy(entry)
 
     val response = try {
-      host.send(TransferRequest(url, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
+      host.send(TransferRequest(url, d.method, headersFor(d, part, requestId), body(d, part), d.highPriority), onProgress)
     } catch (error: CancellationException) {
       throw error
     } catch (error: Throwable) {

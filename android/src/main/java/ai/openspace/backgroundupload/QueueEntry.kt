@@ -51,6 +51,8 @@ data class Descriptor(
   val noNotification: Boolean,
   /** The request's own Wi-Fi rule. Null follows the queue's setWifiOnly(). */
   val wifiOnly: Boolean? = null,
+  /** descriptor.priority 'high'. An entry saved before the field reads false. */
+  val highPriority: Boolean = false,
 ) {
   val bodyKind: String
     get() = when {
