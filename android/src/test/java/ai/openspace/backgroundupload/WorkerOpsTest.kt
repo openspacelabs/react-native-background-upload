@@ -52,6 +52,20 @@ class WorkerOpsTest {
   private val ok = UploadResponse(200, """{"id":7}""", mapOf("x" to "y"))
 
   @Test
+  fun `recordTransientHit raises the count under the lock and refuses past the cap`() {
+    store.save(entry())
+    val e = store.load("e1")!!
+    assertTrue(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
+    assertEquals(listOf(0, 1), store.load("e1")!!.transientHits)
+    assertTrue(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
+    assertFalse(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
+    assertEquals(listOf(0, 2), store.load("e1")!!.transientHits) // not raised past the cap
+    assertTrue(ops.recordTransientHit("e1", e.generation, 0, cap = null)) // no cap
+    assertTrue(ops.recordTransientHit("e1", e.generation + 1, 0, cap = 1)) // another generation: ignored, allowed
+    assertEquals(listOf(1, 2), store.load("e1")!!.transientHits)
+  }
+
+  @Test
   fun `begin takes a queued entry and emits running`() {
     store.save(entry(nextAttemptAt = 5))
     val e = ops.begin("e1")!!

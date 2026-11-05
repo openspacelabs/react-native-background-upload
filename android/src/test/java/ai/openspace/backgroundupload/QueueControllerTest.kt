@@ -184,6 +184,17 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `a reopened error entry starts its transient hits at zero, a live one keeps them`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(state = EntryState.ERROR, transientHits = listOf(3), settledEventId = "ev"))
+    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
+    assertEquals(null, store.load("e1")!!.transientHits)
+    store.save(store.load("e1")!!.copy(transientHits = listOf(1)))
+    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 2))
+    assertEquals(listOf(1), store.load("e1")!!.transientHits)
+  }
+
+  @Test
   fun `same body on a live entry keeps its attempts`() {
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(attempts = 3))

@@ -11,6 +11,7 @@ import kotlin.random.Random
  * | 2xx, or an accept rule matches              | Accepted          |
  * | 401, 403                                    | Auth (park)       |
  * | 408, 429, 5xx                               | Transient         |
+ * | other 4xx matching a `transient` rule       | Transient(rule) under its maxRetries, else Terminal http |
  * | other 4xx in `exempt` (default [404])       | Transient         |
  * | other 4xx                                   | Terminal http     |
  * | any other status (1xx, a final 3xx)         | Terminal http     |
@@ -22,12 +23,19 @@ object RetryClassifier {
 
   sealed class Verdict {
     object Accepted : Verdict()
-    object Transient : Verdict()
+    /** [ruleIndex] names the `transient` rule that excused the response; null for the standard table or `exempt`. */
+    data class Transient(val ruleIndex: Int? = null) : Verdict()
     object Auth : Verdict()
     data class Terminal(val errorKind: String, val message: String) : Verdict()
   }
 
-  data class Policy(val baseMs: Long, val maxMs: Long, val jitter: Double, val exempt: List<Int>)
+  data class Policy(
+    val baseMs: Long,
+    val maxMs: Long,
+    val jitter: Double,
+    val exempt: List<Int>,
+    val transient: List<UploadOutcome.TransientRule> = emptyList(),
+  )
 
   /** A wait up to this long happens inside the worker. A longer one releases the worker. */
   const val IN_WORKER_BACKOFF_MAX_MS = 30_000L
@@ -37,18 +45,36 @@ object RetryClassifier {
     maxMs = override?.maxMs ?: defaults.maxMs,
     jitter = override?.jitter ?: defaults.jitter,
     exempt = override?.exempt ?: defaults.exempt,
+    transient = override?.transient ?: defaults.transient,
   )
 
+  /**
+   * [hits] is the entry's count per `transient` rule so far. A matched rule
+   * decides even past its cap: `exempt` does not rescue it.
+   */
   fun classifyResponse(
     code: Int,
     body: String?,
     accept: List<UploadOutcome.AcceptRule>,
     exempt: List<Int>,
+    transient: List<UploadOutcome.TransientRule> = emptyList(),
+    hits: List<Int> = emptyList(),
   ): Verdict = when {
     UploadOutcome.isAccepted(code, body, accept) -> Verdict.Accepted
     code == 401 || code == 403 -> Verdict.Auth
-    code == 408 || code == 429 || code in 500..599 -> Verdict.Transient
-    code in 400..499 && code in exempt -> Verdict.Transient
+    code == 408 || code == 429 || code in 500..599 -> Verdict.Transient()
+    code in 400..499 -> {
+      val index = UploadOutcome.matchesTransient(code, body, transient)
+      when {
+        index != null -> {
+          val cap = transient[index].maxRetries
+          if (cap == null || (hits.getOrNull(index) ?: 0) < cap) Verdict.Transient(index)
+          else Verdict.Terminal("http", "HTTP $code")
+        }
+        code in exempt -> Verdict.Transient()
+        else -> Verdict.Terminal("http", "HTTP $code")
+      }
+    }
     else -> Verdict.Terminal("http", "HTTP $code")
   }
 
@@ -56,7 +82,7 @@ object RetryClassifier {
   fun classifyFailure(error: Throwable, fileExists: Boolean): Verdict = when {
     error is IOException && !fileExists ->
       Verdict.Terminal("file", "request body file is missing: ${error.message ?: error.javaClass.simpleName}")
-    error is IOException -> Verdict.Transient
+    error is IOException -> Verdict.Transient()
     else -> Verdict.Terminal("unknown", error.message ?: error.javaClass.simpleName)
   }
 

@@ -36,6 +36,7 @@
 -keep class ai.openspace.backgroundupload.EventJournal$SettledRecord { *; }
 -keep class ai.openspace.backgroundupload.EventJournal$Response { *; }
 -keep class ai.openspace.backgroundupload.UploadOutcome$AcceptRule { *; }
+-keep class ai.openspace.backgroundupload.UploadOutcome$TransientRule { *; }
 -keep class ai.openspace.backgroundupload.NotificationConfig { *; }
 
 # v9 files read once at the first v10 launch

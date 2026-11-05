@@ -16,6 +16,27 @@ object UploadOutcome {
     val bodyIncludes: String? = null,
   )
 
+  /**
+   * A 4xx to retry instead of settling. `bodyIncludes` narrows the rule by a
+   * response-body substring. `maxRetries` caps the retries the rule causes for
+   * one entry: 3 retries three matching responses, the fourth settles. Gson
+   * persists it inside [RetryOverride] and [RetryDefaults]; see consumer-rules.pro.
+   */
+  data class TransientRule(
+    val status: Int,
+    val bodyIncludes: String? = null,
+    val maxRetries: Int? = null,
+  )
+
+  /** The index of the first rule that matches, or null. */
+  fun matchesTransient(code: Int, body: String?, rules: List<TransientRule>): Int? {
+    val index = rules.indexOfFirst { rule ->
+      rule.status == code &&
+        (rule.bodyIncludes == null || body?.contains(rule.bodyIncludes) == true)
+    }
+    return if (index >= 0) index else null
+  }
+
   // Whether an HTTP response counts as a successful completion. A 2xx always
   // counts, and a matching per-request accept rule counts. Every other response,
   // 4xx and 5xx included, is a terminal http error, not a completion.
