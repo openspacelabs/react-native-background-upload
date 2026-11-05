@@ -15,6 +15,7 @@ import {
   MAX_VARS_BYTES,
   type AnyDefinition,
   type Settings,
+  validateRetryPolicy,
 } from './registry';
 import type {
   AddListener,
@@ -125,6 +126,11 @@ export const createUploadClient = ({
    * not replay again. Each call replaces the full configuration.
    */
   const configure = (options: ConfigureOptions): void => {
+    // Every check runs before any setting changes, so a rejected call leaves
+    // the previous configuration whole.
+    if (options.retry !== undefined) {
+      validateRetryPolicy(options.retry, 'configure');
+    }
     const lifetimeMs = options.lifetimeMs ?? DEFAULT_LIFETIME_MS;
     if (!Number.isFinite(lifetimeMs) || lifetimeMs <= 0) {
       throw new Error(

@@ -1,3 +1,14 @@
+## Unreleased
+
+Added `retry.transient`: rules that make a 4xx response transient when its
+status, and optionally a body substring, match, with a per-rule `maxRetries`
+cap counted per entry. A matching rule is checked before `terminalHttp.exempt`;
+`exempt` stays the uncapped fallback. A same-id `mutate()` resets the count.
+Past the cap the response settles `error` with `errorKind: 'http'`. A rule for
+401, 403, 408 or 429 is rejected, because the standard table decides those
+first. The defaults are unchanged. `configure()` now validates `retry` the way
+`mutate()` does, before it changes any setting.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
