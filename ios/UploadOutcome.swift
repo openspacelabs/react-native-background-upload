@@ -16,6 +16,34 @@ enum UploadOutcome {
     var bodyIncludes: String?
   }
 
+  /// A 4xx to retry instead of settling. `bodyIncludes` narrows the rule by
+  /// a response-body substring. `maxRetries` caps the retries the rule causes
+  /// for one entry: 3 retries three matching responses, the fourth settles.
+  /// Codable: persisted in the entry's retry override and in the settings.
+  struct TransientRule: Codable, Equatable {
+    let status: Int
+    var bodyIncludes: String?
+    var maxRetries: Int?
+  }
+
+  /// The index of the first rule that matches, or nil.
+  static func matchesTransient(_ code: Int, body: String?, rules: [TransientRule]) -> Int? {
+    rules.firstIndex { rule in
+      rule.status == code
+        && (rule.bodyIncludes == nil || body?.contains(rule.bodyIncludes!) == true)
+    }
+  }
+
+  /// A malformed rule is dropped, not guessed at. JS validates the shape.
+  static func parseTransientRules(_ raw: Any?) -> [TransientRule]? {
+    guard let rules = raw as? [[String: Any]] else { return nil }
+    return rules.compactMap { rule in
+      guard let status = (rule["status"] as? NSNumber)?.intValue else { return nil }
+      return TransientRule(status: status, bodyIncludes: rule["bodyIncludes"] as? String,
+                           maxRetries: (rule["maxRetries"] as? NSNumber)?.intValue)
+    }
+  }
+
   // Tells whether an HTTP response counts as a successful completion. A 2xx
   // always counts, plus any matching per-request accept rule. Anything else,
   // 4xx and 5xx included, is an http error, not a completion.
