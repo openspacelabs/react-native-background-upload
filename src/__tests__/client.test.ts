@@ -165,6 +165,37 @@ describe('configure', () => {
     });
   });
 
+  it('validates retry the way mutate() does, naming configure', async () => {
+    const client = createUploadClient();
+    client.configure({ lifetimeMs: 1000 });
+    native.configure.mockClear();
+    expect(() =>
+      client.configure({ retry: { transient: [{ status: 500 }] } }),
+    ).toThrow(
+      /^configure: retry\.transient\[0\]\.status must be an integer from 400 to 499$/,
+    );
+    expect(() =>
+      client.configure({ retry: { terminalHttp: { exmpt: [] } } } as never),
+    ).toThrow(/^configure: unknown retry\.terminalHttp field "exmpt"/);
+    expect(native.configure).not.toHaveBeenCalled();
+    // A rejected call leaves the earlier configuration whole: the 1 s
+    // lifetime from the first call still sets expiresAt.
+    const d = client.define({
+      key: 'k',
+      request: (_v: null) => ({ url: 'https://x', data: 1 }),
+    });
+    const before = Date.now();
+    await d.mutate(null);
+    const entry = native.enqueue.mock.calls[0][0];
+    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
+    expect(entry.descriptor.expiresAt).toBeLessThan(before + 1000 + 5000);
+    const retry = { transient: [{ status: 404, maxRetries: 48 }] };
+    client.configure({ retry });
+    expect(native.configure).toHaveBeenCalledWith(
+      expect.objectContaining({ retry }),
+    );
+  });
+
   it('sends the 14 day default lifetime and no retry when neither is given', () => {
     createUploadClient().configure({});
     expect(native.configure).toHaveBeenCalledWith({
