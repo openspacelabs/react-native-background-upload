@@ -145,6 +145,32 @@ class WorkerOps(
     }
 
   /**
+   * A `transient` rule matched this response. The count is checked and
+   * raised under the store lock, so concurrent parts of one entry cannot
+   * both pass a cap of one. Returns false when the rule is already at
+   * [cap]; the caller then settles the response as terminal. A chunked
+   * entry's parts share the count. A lost write allows one more retry.
+   */
+  fun recordTransientHit(id: String, generation: Int, ruleIndex: Int, cap: Int?): Boolean {
+    var within = true
+    store.update(id) { e ->
+      if (e.generation != generation) e
+      else {
+        val hits = (e.transientHits ?: emptyList()).toMutableList()
+        while (hits.size <= ruleIndex) hits += 0
+        if (cap != null && hits[ruleIndex] >= cap) {
+          within = false
+          e
+        } else {
+          hits[ruleIndex] = hits[ruleIndex] + 1
+          e.copy(transientHits = hits)
+        }
+      }
+    }
+    return within
+  }
+
+  /**
    * Journal, then transition, then emit, all under the store lock, so a
    * cancel, pause, or replace lands either before (this run's outcome is
    * dropped) or after. Returns whether this run's outcome stands.

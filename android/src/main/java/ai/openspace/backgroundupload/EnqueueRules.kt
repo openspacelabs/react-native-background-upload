@@ -162,6 +162,7 @@ object EnqueueRules {
       parkedGeneration = null,
       generation = if (reopen) existing.generation + 1 else existing.generation,
       settledEventId = if (reopen) null else existing.settledEventId,
+      transientHits = if (reopen) null else existing.transientHits,
     )
   }
 

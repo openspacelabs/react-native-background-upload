@@ -80,6 +80,18 @@ class QueueStoreTest {
     assertEquals("POST", e.descriptor!!.method)
     assertEquals(emptyMap<String, String>(), e.descriptor!!.headers)
     assertEquals(1, e.generation)
+    assertNull(e.transientHits)
+  }
+
+  @Test
+  fun `transient hits and rules round-trip across store instances`() {
+    val dir = tmp.newFolder()
+    val rules = listOf(UploadOutcome.TransientRule(400, "Bad Request", 24))
+    val e = entry(descriptor = desc(retry = RetryOverride(null, null, null, null, transient = rules))).copy(transientHits = listOf(0, 2))
+    store(dir).save(e)
+    val loaded = store(dir).load("e1")!!
+    assertEquals(listOf(0, 2), loaded.transientHits)
+    assertEquals(rules, loaded.descriptor!!.retry!!.transient)
   }
 
   @Test
