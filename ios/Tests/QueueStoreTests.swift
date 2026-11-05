@@ -32,6 +32,35 @@ final class QueueStoreTests: XCTestCase {
     XCTAssertFalse(store.dir("a/b:c").lastPathComponent.contains("/"))
   }
 
+  func testTransientHitsRoundTripAndDecodeAsNilWhenAbsent() throws {
+    var e = entry("hits")
+    e.retry = RetryOverride(transient: [.init(status: 400, bodyIncludes: "Bad Request", maxRetries: 24)])
+    e.transientHits = [0, 2]
+    try store.save(e)
+    XCTAssertEqual(QueueStore(root: root).load("hits"), e)
+    // An entry.json written by 11.0.2 has no transientHits key.
+    var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(e)) as? [String: Any])
+    json["transientHits"] = nil
+    var retry = try XCTUnwrap(json["retry"] as? [String: Any])
+    retry["transient"] = nil
+    json["retry"] = retry
+    let older = try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: json))
+    XCTAssertNil(older.transientHits)
+    XCTAssertNil(older.retry?.transient, "an 11.0.2 retry override has no transient key")
+    XCTAssertEqual(RetryPolicy.resolve([nil, older.retry]).transient, [], "and resolves to no rules")
+  }
+
+  func testAnOlderSettingsFileDecodesWithNoTransientRules() throws {
+    // settings.json as 11.0.2 wrote it: the retry override has no transient key.
+    let text = #"{"wifiOnly":true,"paused":false,"pausedKeys":[],"headerGeneration":2,"retry":{"baseMs":5,"exempt":[404]}}"#
+    try text.data(using: .utf8)!.write(to: root.appendingPathComponent("settings.json"))
+    let s = QueueStore(root: root).loadSettings()
+    XCTAssertEqual(s.wifiOnly, true)
+    XCTAssertEqual(s.retry?.baseMs, 5)
+    XCTAssertNil(s.retry?.transient)
+    XCTAssertEqual(RetryPolicy.resolve([s.retry]).transient, [])
+  }
+
   func testAllSkipsCorruptEntryAndTmp() throws {
     try store.save(entry("good"))
     writeFile(store.fileURL("corrupt", QueueStore.entryName), "{ not json")
@@ -86,7 +115,7 @@ final class QueueStoreTests: XCTestCase {
     var s = QueueSettings()
     s.wifiOnly = true
     s.headerGeneration = 4
-    s.retry = RetryOverride(baseMs: 5)
+    s.retry = RetryOverride(baseMs: 5, transient: [.init(status: 404, maxRetries: 48)])
     try store.saveSettings(s)
     XCTAssertEqual(QueueStore(root: root).loadSettings(), s)
   }

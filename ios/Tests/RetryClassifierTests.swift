@@ -4,13 +4,50 @@ import XCTest
 final class RetryClassifierTests: XCTestCase {
   private func classify(_ status: Int? = nil, body: String? = nil, error: NSError? = nil,
                         accept: [UploadOutcome.AcceptRule] = [], exempt: [Int] = [404],
+                        transient: [UploadOutcome.TransientRule] = [], hits: [Int] = [],
                         fileExists: Bool = true, now: Double = 0,
                         expiresAt: Double = 100) -> RetryClassifier.Class {
     var policy = RetryPolicy.defaults
     policy.exempt = exempt
+    policy.transient = transient
     return RetryClassifier.classify(.init(
       statusCode: status, body: body, error: error, accept: accept, policy: policy,
-      fileExists: fileExists, now: now, expiresAt: expiresAt))
+      fileExists: fileExists, now: now, expiresAt: expiresAt, hits: hits))
+  }
+
+  private let bodyStopped = UploadOutcome.TransientRule(status: 400, bodyIncludes: "\"error\":\"Bad Request\"", maxRetries: 2)
+
+  func testTransientRuleMatchesByStatusOrStatusAndBody() {
+    XCTAssertEqual(classify(404, exempt: [], transient: [.init(status: 404)]), .transient(rule: 0))
+    XCTAssertEqual(classify(400, body: #"{"status":400,"error":"Bad Request"}"#, transient: [bodyStopped]), .transient(rule: 0))
+    XCTAssertEqual(classify(400, body: #"{"message":"doc.comment must not be blank"}"#, transient: [bodyStopped]), .terminalHttp,
+                   "a different body falls through: not exempt, so terminal")
+    XCTAssertEqual(classify(400, body: "x", transient: [bodyStopped, .init(status: 400)]), .transient(rule: 1), "only the second rule matches")
+    XCTAssertEqual(classify(400, body: #"{"error":"Bad Request"}"#, transient: [.init(status: 400), bodyStopped]), .transient(rule: 0),
+                   "both match: the first rule in list order wins")
+  }
+
+  func testARuleExcusesMaxRetriesResponsesAndTheNextOneSettles() {
+    let body = #"{"error":"Bad Request"}"#
+    XCTAssertEqual(classify(400, body: body, transient: [bodyStopped], hits: []), .transient(rule: 0))
+    XCTAssertEqual(classify(400, body: body, transient: [bodyStopped], hits: [1]), .transient(rule: 0))
+    XCTAssertEqual(classify(400, body: body, transient: [bodyStopped], hits: [2]), .terminalHttp)
+    XCTAssertEqual(classify(400, body: body, transient: [.init(status: 400)], hits: [1_000]), .transient(rule: 0), "no cap")
+  }
+
+  func testAMatchedRulePastItsCapIsTerminalEvenWhenExemptListsTheStatus() {
+    let capped = UploadOutcome.TransientRule(status: 404, maxRetries: 1)
+    XCTAssertEqual(classify(404, exempt: [404], transient: [capped], hits: []), .transient(rule: 0))
+    XCTAssertEqual(classify(404, exempt: [404], transient: [capped], hits: [1]), .terminalHttp)
+    XCTAssertEqual(classify(404, exempt: [404], hits: [9]), .transient(rule: nil), "exempt alone is uncounted")
+  }
+
+  func testTheStandardTableDecidesBeforeAnyRule() {
+    XCTAssertEqual(classify(429, transient: [.init(status: 429, maxRetries: 1)], hits: [5]), .transient(rule: nil))
+    XCTAssertEqual(classify(401, transient: [.init(status: 401)]), .auth)
+    XCTAssertEqual(classify(409, body: "dup", accept: [.init(status: 409)], transient: [.init(status: 409)]), .accepted)
+    XCTAssertEqual(classify(400, body: #"{"error":"Bad Request"}"#, transient: [bodyStopped], now: 200, expiresAt: 100), .expired,
+                   "a rule's retry past expiresAt still expires")
   }
 
   func testTable() {
@@ -22,11 +59,11 @@ final class RetryClassifierTests: XCTestCase {
                    .terminalHttp)
     XCTAssertEqual(classify(401), .auth)
     XCTAssertEqual(classify(403), .auth)
-    XCTAssertEqual(classify(408), .transient)
-    XCTAssertEqual(classify(429), .transient)
-    XCTAssertEqual(classify(500), .transient)
-    XCTAssertEqual(classify(503), .transient)
-    XCTAssertEqual(classify(404), .transient, "404 is exempt by default")
+    XCTAssertEqual(classify(408), .transient(rule: nil))
+    XCTAssertEqual(classify(429), .transient(rule: nil))
+    XCTAssertEqual(classify(500), .transient(rule: nil))
+    XCTAssertEqual(classify(503), .transient(rule: nil))
+    XCTAssertEqual(classify(404), .transient(rule: nil), "404 is exempt by default")
     XCTAssertEqual(classify(404, exempt: []), .terminalHttp, "the chunked part-404 case")
     XCTAssertEqual(classify(400), .terminalHttp)
     XCTAssertEqual(classify(422), .terminalHttp)
@@ -35,12 +72,12 @@ final class RetryClassifierTests: XCTestCase {
 
   func testErrors() {
     XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)),
-                   .transient)
-    XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)), .transient)
+                   .transient(rule: nil))
+    XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)), .transient(rule: nil))
     let fileError = NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist)
-    XCTAssertEqual(classify(error: fileError, fileExists: true), .transient, "unreadable now, maybe not later")
+    XCTAssertEqual(classify(error: fileError, fileExists: true), .transient(rule: nil), "unreadable now, maybe not later")
     XCTAssertEqual(classify(error: fileError, fileExists: false), .fileMissing)
-    XCTAssertEqual(classify(error: NSError(domain: "Other", code: 1)), .transient)
+    XCTAssertEqual(classify(error: NSError(domain: "Other", code: 1)), .transient(rule: nil))
   }
 
   func testPastExpiresAtOnlyATransientResultIsExpired() {

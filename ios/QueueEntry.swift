@@ -66,6 +66,13 @@ struct QueueEntry: Codable, Equatable {
   /// HTTP attempts issued, parts included. The current simple attempt's
   /// ordinal equals this value.
   var attempts: Int
+  /// How many responses each `retry.transient` rule has excused in this
+  /// generation, by rule index into the rules in effect at classify time.
+  /// Positional: a same-generation mutate that reorders the entry's rules,
+  /// or a configure() that reorders the defaults, shifts what a count means.
+  /// nil before the first; a reopen starts over. Optional, so an entry saved
+  /// before the field decodes.
+  var transientHits: [Int]? = nil
   var bytesSent: Int64
   var totalBytes: Int64
   var expiresAt: Double // epoch ms
@@ -92,6 +99,14 @@ extension QueueEntry {
   var isChunked: Bool { bodyKind == .parts }
 
   var acceptedBytes: Int64 { parts.filter(\.accepted).reduce(0) { $0 + $1.size } }
+
+  /// One more response excused by `retry.transient[rule]`.
+  mutating func recordTransientHit(_ rule: Int) {
+    var hits = transientHits ?? []
+    while hits.count <= rule { hits.append(0) }
+    hits[rule] += 1
+    transientHits = hits
+  }
   var allAccepted: Bool { !parts.isEmpty && parts.allSatisfy(\.accepted) }
   func pendingIndexes() -> [Int] { parts.indices.filter { !parts[$0].accepted } }
 
@@ -164,7 +179,10 @@ extension QueueEntry {
         return merged
       }
     }
-    if resetBudget { next.attempts = 0 }
+    if resetBudget {
+      next.attempts = 0
+      next.transientHits = nil
+    }
     next.updatedAt = now
     return next
   }

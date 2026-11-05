@@ -109,6 +109,20 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", blob)), "bytes survive a non-completed terminal")
   }
 
+  func testPartsShareOneTransientCount() throws {
+    h.coordinator.configure(["retry": ["transient": [["status": 400, "maxRetries": 1]]]])
+    h.drain()
+    _ = try h.enqueue(h.chunkedRaw(id: "cap")).get()
+    h.complete(try XCTUnwrap(partTask(1)), status: 400)
+    XCTAssertEqual(h.entry("cap")?.state, .running, "the one retry excused part 1")
+    XCTAssertEqual(h.entry("cap")?.transientHits, [1])
+    h.complete(try XCTUnwrap(partTask(2)), status: 400)
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "http")
+    XCTAssertEqual(error["partIndex"] as? Int, 2)
+    XCTAssertEqual(h.entry("cap")?.transientHits, [1])
+  }
+
   // The part-404 recovery: a same-id enqueue with new parts over the moved bytes.
   func testRecreateOverKeptBlobWhenTheSourceIsGone() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["retry": ["terminalHttp": ["exempt": []]]])).get()
