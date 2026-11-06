@@ -183,7 +183,8 @@ Native:
   is cancelled (Android WorkManager rows, iOS session tasks). v9 chunked
   manifests and their bytes stay: a same-id `mutate()` with the same parts
   resumes from the accepted parts, and one with different parts starts over
-  on the kept bytes. Wi-Fi only starts off.
+  on the kept bytes. `cancel(id)` on a v9 upload id with no row deletes its
+  kept files. Wi-Fi only starts off.
 - **Platform limits.** Android, API 31 and later: a WorkManager run started
   from the background usually cannot start its foreground service and then
   has JobScheduler's limit of about 10 minutes; a single body that does not

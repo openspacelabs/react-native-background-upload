@@ -68,10 +68,10 @@ export interface Spec extends TurboModule {
   pause(scope: CodegenTypes.UnsafeObject): Promise<void>;
   resume(scope: CodegenTypes.UnsafeObject): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. Settled
-  // entry: forget now: row, bytes, and its unacknowledged outcomes. Unknown
-  // id: resolve, no-op. If the journal or the store cannot be written,
-  // cancel rejects with E_STORAGE and changes nothing; the caller may call
-  // again.
+  // entry: forget now: row, bytes, and its unacknowledged outcomes. No row:
+  // delete the files left under the id, then resolve. If the journal or the
+  // store cannot be written, cancel rejects with E_STORAGE and changes
+  // nothing; the caller may call again.
   cancel(id: string): Promise<void>;
   // The queue's Wi-Fi setting. Persisted natively. Applies to queued and
   // future entries whose descriptor has no wifiOnly. An entry with
