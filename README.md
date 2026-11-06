@@ -417,7 +417,8 @@ kept. A paused entry past `expiresAt` settles `error` with
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
-unacknowledged outcomes. An unknown id resolves and does nothing.
+unacknowledged outcomes. An id with no row resolves. If its directory has
+no entry file, such as a v9 upload's bytes, the directory is deleted.
 
 For a live entry, the journaled `cancelled` outcome is the cancel. Once it is
 written, `cancel()` resolves, even if the entry save that follows fails: the
@@ -523,7 +524,8 @@ What happens to work a v9 build left behind:
 - **v9 chunked uploads resume under the same id.** The v9 manifest and bytes
   stay on disk. A `mutate()` with the v9 upload id and the same parts resumes
   from the accepted parts; different parts start over on the kept bytes. An
-  id with no `mutate()` keeps its bytes until `cancel(id)`.
+  id with no `mutate()` keeps its bytes until `cancel(id)`, which deletes
+  them. Cancel every v9 upload id you will not send again.
 - **Wi-Fi only starts off.** Call `setWifiOnly(true)` again if the app had it
   on.
 

@@ -1,3 +1,18 @@
+## Unreleased
+
+`cancel(id)` on an id with no row now deletes the id's directory when it
+holds no entry file. A v9 chunked upload that was still running at the
+upgrade got no legacy row, so its manifest and blob could never be released.
+Before, `cancel()` on such an id did nothing. A delete that fails is reported
+through `takeDiagnostics()` on Android.
+
+A same-id `mutate()` over a legacy row whose v9 manifest could not be read
+now runs over the kept v9 blob. Before, it ignored the blob and failed with
+`E_FILE_MISSING` once the caller's source was gone. A caller file that exists
+still wins. A plan that does not tile the blob rejects `E_INVALID`, as for
+any chunked body; before, that case was `E_FILE_MISSING` too. Fixed on
+Android and iOS.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
