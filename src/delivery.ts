@@ -58,6 +58,11 @@ export type Delivery = {
   start: () => void;
   /** Delivery for `id` waits until this promise has settled. */
   trackMutate: (id: string, pending: Promise<unknown>) => void;
+  /**
+   * Call after `define()` registers `key`. The outcomes that reached `key`
+   * before it had a definition are routed again, in their original order.
+   */
+  release: (key: string) => void;
 };
 
 const errorMessage = (e: unknown): string =>
@@ -70,7 +75,8 @@ const errorMessage = (e: unknown): string =>
  * the id's in-flight mutate(), ack a cancelled outcome, look up the key, run
  * the handler, ack after its promise resolves. An unknown key or a rejected
  * handler leaves the outcome unacknowledged, so native redelivers it at the
- * next launch.
+ * next launch. An outcome with an unknown key is also held, and `release()`
+ * routes it again when `define()` registers the key in the same session.
  */
 export const createDelivery = ({
   native,
@@ -89,6 +95,12 @@ export const createDelivery = ({
   // outcomes deliver first.
   const buffer: SettledEvent[] = [];
   let live = false;
+  // Outcomes whose key had no definition when they were routed, by key, then
+  // by eventId. A Map keeps insertion order, which is each id's lane order.
+  const held = new Map<string, Map<string, SettledEvent>>();
+  // Held outcomes whose key is now defined, by id, in their original order.
+  // Each waits for its turn in its id's lane.
+  const released = new Map<string, SettledEvent[]>();
 
   const trackMutate = (id: string, pending: Promise<unknown>): void => {
     const settled = pending.then(
@@ -241,9 +253,14 @@ export const createDelivery = ({
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   };
 
-  /** The outcome's own steps, run inside its id's lane. */
-  const route = async (event: SettledEvent): Promise<void> => {
-    await waitForMutate(event.id);
+  const hold = (event: SettledEvent): void => {
+    const forKey = held.get(event.key) ?? new Map<string, SettledEvent>();
+    forKey.set(event.eventId, event);
+    held.set(event.key, forKey);
+  };
+
+  /** Settles one outcome after its id's mutate() wait. Runs in its lane. */
+  const settle = async (event: SettledEvent): Promise<void> => {
     // A cancelled outcome has no handler, so it acks whether or not the key
     // is still defined.
     if (event.kind === 'cancelled') {
@@ -253,14 +270,48 @@ export const createDelivery = ({
     const definition = lookup(event.key);
     if (!definition) {
       warn(
-        `delivery: no definition for key "${event.key}" (id ${event.id}). The outcome stays unacknowledged.`,
+        `delivery: no definition for key "${event.key}" (id ${event.id}). The outcome stays unacknowledged until define() registers the key.`,
       );
+      hold(event);
       emitState(unhandledRow(event));
       return;
     }
     if (await runHandler(event, definition)) {
       await ack(event.eventId);
     }
+  };
+
+  const takeReleased = (id: string): SettledEvent | undefined => {
+    const queue = released.get(id);
+    const next = queue?.shift();
+    if (queue && queue.length === 0) {
+      released.delete(id);
+    }
+    return next;
+  };
+
+  /**
+   * Routes the released outcomes of `id`. They were routed before anything
+   * that now waits in the lane, so they go first.
+   */
+  const drainReleased = async (id: string): Promise<void> => {
+    for (
+      let event = takeReleased(id);
+      event !== undefined;
+      event = takeReleased(id)
+    ) {
+      await waitForMutate(id);
+      await settle(event);
+    }
+  };
+
+  /** The outcome's own steps, run inside its id's lane. */
+  const route = async (event: SettledEvent): Promise<void> => {
+    await waitForMutate(event.id);
+    // define() can release an earlier outcome of this id while this one
+    // waited. That outcome goes first, so the id's order holds.
+    await drainReleased(event.id);
+    await settle(event);
   };
 
   const isWellFormed = (event: SettledEvent): boolean =>
@@ -318,5 +369,24 @@ export const createDelivery = ({
       });
   };
 
-  return { start, trackMutate };
+  const release = (key: string): void => {
+    const forKey = held.get(key);
+    if (!forKey) {
+      return;
+    }
+    held.delete(key);
+    const ids = new Set<string>();
+    forKey.forEach((event) => {
+      const queue = released.get(event.id) ?? [];
+      queue.push(event);
+      released.set(event.id, queue);
+      ids.add(event.id);
+    });
+    // When the lane is idle this task routes them. When an outcome of the id
+    // already waits in the lane, that one routes them first and this task
+    // finds nothing left.
+    ids.forEach((id) => enqueueForId(id, () => drainReleased(id)));
+  };
+
+  return { start, trackMutate, release };
 };

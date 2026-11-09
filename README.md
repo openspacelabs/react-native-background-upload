@@ -291,9 +291,14 @@ while the app was dead from being sent twice.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
-   deliver then. Call every `define()` first.
-6. **Unknown key is loud.** An outcome whose key has no definition stays
-   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`.
+   deliver then. Call every `define()` first. A bundler that loads modules
+   lazily, such as Metro with `inlineRequires`, can run a `define()` later.
+   That key then receives its held outcomes when its `define()` runs, in the
+   same session and in their original order per id.
+6. **Unknown key is loud.** An outcome whose key has no definition reaches
+   `state` listeners with `reason: 'unhandled-key'`, and the library holds it.
+   When no `define()` of the key comes in this session, it stays
+   unacknowledged and redelivers at the next launch.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in
@@ -381,10 +386,13 @@ whose `request` takes no vars, call `mutate()` with no arguments; native stores
 ### `configure(options): void`
 
 Call one time at boot, after every `define()`. Starts replay of journaled
-outcomes. A second call updates the settings and does not replay again.
+outcomes. A second call updates the settings and does not replay again. A
+`define()` that runs after `configure()` still receives the outcomes that
+reached its key before it; see rule 5 of "Reliable delivery".
 
 | Option | Notes |
 | --- | --- |
+| `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |

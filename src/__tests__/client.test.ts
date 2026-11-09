@@ -729,3 +729,213 @@ describe('with a fake native', () => {
     ]);
   });
 });
+
+describe('a definition that arrives after configure()', () => {
+  // A lazily loaded module can run its define() after configure(). These
+  // outcomes come from an earlier session, so this one replays them.
+  const NOT_LISTED = /is not in configure\(\{ definitions \}\)/;
+  const request = (_v: null) => ({ url: 'https://x' });
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  /**
+   * Queues an entry of `key` through a client that never configures, as an
+   * earlier session did. No listener exists, so settle() only journals.
+   */
+  const queuedEarlier = async (
+    fake: ReturnType<typeof createFakeNative>,
+    key: string,
+  ): Promise<string> => {
+    const earlier = createUploadClient({ native: fake });
+    const { id } = await earlier.define({ key, request }).mutate();
+    return id;
+  };
+
+  const notListedWarnings = () =>
+    warn.mock.calls.filter(([message]) => NOT_LISTED.test(String(message)));
+
+  it('delivers a held outcome to the late definition and acks it in the same session', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, {
+      kind: 'completed',
+      response: { body: '{}' },
+    });
+    const client = createUploadClient({ native: fake });
+    const state = jest.fn();
+    client.addListener('state', state);
+
+    client.configure({});
+    await flush();
+    expect(state).toHaveBeenCalledWith(
+      expect.objectContaining({ id, key: 'late', reason: 'unhandled-key' }),
+    );
+    expect(fake.ackedEventIds).toEqual([]);
+
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    const event = await acked;
+
+    expect(onSuccess).toHaveBeenCalledWith(
+      { status: 200, body: '{}', bodyTruncated: false },
+      null,
+      expect.objectContaining({ id, key: 'late', deliveries: 1 }),
+    );
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+  });
+
+  it('delivers two held outcomes of one id in journal order', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const first = fake.settle(id, {
+      kind: 'error',
+      error: { errorKind: 'http', response: { status: 500 } },
+    });
+    const second = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    client.configure({});
+    await flush();
+
+    const order: string[] = [];
+    client.define({
+      key: 'late',
+      request,
+      // The first handler is slow. The second must still wait for it.
+      onError: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        order.push('error');
+      },
+      onSuccess: () => {
+        order.push('completed');
+      },
+    });
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(order).toEqual(['error', 'completed']);
+    expect(fake.ackedEventIds).toEqual([a.eventId, b.eventId]);
+  });
+
+  it('leaves an outcome whose key is never defined unacknowledged', async () => {
+    const fake = createFakeNative({ ackTimeoutMs: 100 });
+    const id = await queuedEarlier(fake, 'gone');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const state = jest.fn();
+    client.addListener('state', state);
+
+    client.configure({});
+    client.define({ key: 'other', request });
+
+    await expect(acked).rejects.toThrow(/was not acknowledged/);
+    expect(state).toHaveBeenCalledWith(
+      expect.objectContaining({ id, key: 'gone', reason: 'unhandled-key' }),
+    );
+    expect(fake.ackedEventIds).toEqual([]);
+    expect(await fake.getUnacknowledgedEvents()).toEqual([
+      expect.objectContaining({ id, key: 'gone' }),
+    ]);
+  });
+
+  it('does not deliver twice when define() replaces a key with held outcomes', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    client.configure({});
+    await flush();
+
+    // A hot reload runs the module's define() again.
+    const replaced = jest.fn();
+    const current = jest.fn();
+    client.define({ key: 'late', request, onSuccess: replaced });
+    client.define({ key: 'late', request, onSuccess: current });
+    const event = await acked;
+    client.define({ key: 'late', request, onSuccess: current });
+    await flush();
+
+    expect(replaced).not.toHaveBeenCalled();
+    expect(current).toHaveBeenCalledTimes(1);
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+  });
+
+  it('with configure({ definitions }) listing every handle, behaves as before', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'item.send');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const onSuccess = jest.fn();
+    const send = client.define({ key: 'item.send', request, onSuccess });
+    const ping = client.define({ key: 'ping', request });
+
+    client.configure({ definitions: [send, ping], lifetimeMs: 1000 });
+    await acked;
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    // The list stays on the JS side.
+    expect(fake.calls.configure).toEqual([{ lifetimeMs: 1000 }]);
+
+    // A hot reload of a listed key replaces it without the list warning.
+    client.define({ key: 'ping', request });
+    expect(notListedWarnings()).toEqual([]);
+    const { id: pingId } = await ping.mutate();
+    await fake.settle(pingId, { kind: 'completed' });
+  });
+
+  it('rejects a definitions option that is not a list of handles', () => {
+    const client = createUploadClient({ native: createFakeNative() });
+    expect(() =>
+      client.configure({ definitions: 'all' as unknown as [] }),
+    ).toThrow(
+      'configure: definitions must be an array of the handles that define() returned',
+    );
+    expect(() =>
+      client.configure({ definitions: [null as unknown as never] }),
+    ).toThrow(/definitions must be an array/);
+  });
+
+  it('in development, warns once about a key defined later that the list left out, and still delivers to it', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const listed = client.define({ key: 'listed', request });
+    client.configure({ definitions: [listed] });
+    await flush();
+
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    client.define({ key: 'late', request, onSuccess });
+    await acked;
+
+    expect(notListedWarnings()).toEqual([
+      [
+        'define: "late" is not in configure({ definitions }). It still receives its outcomes, but list it so that its module loads before configure().',
+      ],
+    ]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn about an unlisted key without the list, or outside development', async () => {
+    const withoutList = createUploadClient({ native: createFakeNative() });
+    withoutList.configure({});
+    withoutList.define({ key: 'late', request });
+
+    const global = globalThis as { __DEV__?: boolean };
+    global.__DEV__ = false;
+    try {
+      const production = createUploadClient({ native: createFakeNative() });
+      production.configure({ definitions: [] });
+      production.define({ key: 'late', request });
+    } finally {
+      delete global.__DEV__;
+    }
+
+    expect(notListedWarnings()).toEqual([]);
+  });
+});

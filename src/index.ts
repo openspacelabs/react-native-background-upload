@@ -12,6 +12,7 @@ import {
   createRegistry,
   DEFAULT_ENQUEUE_TIMEOUT_MS,
   DEFAULT_LIFETIME_MS,
+  isDev,
   MAX_VARS_BYTES,
   type AnyDefinition,
   type Settings,
@@ -110,11 +111,32 @@ export const createUploadClient = ({
     lookup: (key) => definitions.get(key),
     emitState,
   });
+  // The keys of the last configure({ definitions }), and the unlisted keys
+  // already warned about.
+  let listedKeys: Set<string> | undefined;
+  const warnedKeys = new Set<string>();
+
+  const onDefine = (key: string): void => {
+    if (
+      listedKeys !== undefined &&
+      !listedKeys.has(key) &&
+      !warnedKeys.has(key) &&
+      isDev()
+    ) {
+      warnedKeys.add(key);
+      console.warn(
+        `define: "${key}" is not in configure({ definitions }). It still receives its outcomes, but list it so that its module loads before configure().`,
+      );
+    }
+    delivery.release(key);
+  };
+
   const { define } = createRegistry({
     native,
     definitions,
     getSettings: () => settings,
     trackMutate: delivery.trackMutate,
+    onDefine,
   });
 
   /**
@@ -123,8 +145,22 @@ export const createUploadClient = ({
    * lifetime, retry and Android notification settings to native, then starts
    * replaying journaled outcomes. A second call updates the settings and does
    * not replay again. Each call replaces the full configuration.
+   *
+   * `definitions` is optional. Each listed handle came from define(), so its
+   * key is registered already. The list only pins the keys, so that a later
+   * define() of another key warns in development.
    */
   const configure = (options: ConfigureOptions): void => {
+    const listed = options.definitions;
+    if (
+      listed !== undefined &&
+      (!Array.isArray(listed) ||
+        !listed.every((handle) => typeof handle?.key === 'string'))
+    ) {
+      throw new Error(
+        'configure: definitions must be an array of the handles that define() returned',
+      );
+    }
     const lifetimeMs = options.lifetimeMs ?? DEFAULT_LIFETIME_MS;
     if (!Number.isFinite(lifetimeMs) || lifetimeMs <= 0) {
       throw new Error(
@@ -156,6 +192,10 @@ export const createUploadClient = ({
     if (options.retry !== undefined) {
       forwarded.retry = options.retry;
     }
+    listedKeys =
+      listed === undefined
+        ? undefined
+        : new Set(listed.map((handle) => handle.key));
     native.configure(forwarded);
     delivery.start();
   };

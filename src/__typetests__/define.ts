@@ -297,3 +297,12 @@ client.define({
   // @ts-expect-error wifiOnly is a boolean
   request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
 });
+
+// configure() takes handles of any vars and response types, and the option
+// is optional.
+client.configure({});
+client.configure({
+  definitions: [addComment, noVars, interfaceVars, readonlyVars, upsert],
+});
+// @ts-expect-error a key alone is not a handle
+client.configure({ definitions: [{ key: 'bare' }] });

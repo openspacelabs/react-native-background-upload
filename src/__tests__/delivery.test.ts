@@ -417,6 +417,54 @@ describe('unknown key', () => {
   });
 });
 
+describe('release', () => {
+  it('routes a released outcome before a later outcome of its id that waited on mutate()', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, trackMutate, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'first', key: 'late', vars: { n: 1 } }));
+    await flush();
+    // The second outcome of the id waits on a same-id mutate() in its lane.
+    const enqueue = deferred<string>();
+    trackMutate('u1', enqueue.promise);
+    emit(completed({ eventId: 'second', key: 'late', vars: { n: 2 } }));
+    await flush();
+
+    const order: number[] = [];
+    definitions.late = {
+      key: 'late',
+      request: jest.fn(),
+      onSuccess: (_data: unknown, vars: { n: number }) => {
+        order.push(vars.n);
+      },
+    };
+    release('late');
+    enqueue.resolve('u1');
+    await tick();
+    await flush();
+
+    expect(order).toEqual([1, 2]);
+    expect(native.ackEvents.mock.calls).toEqual([[['first']], [['second']]]);
+  });
+
+  it('does nothing for a key with no held outcomes', async () => {
+    const onSuccess = jest.fn();
+    const { start, emit, release, native } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess },
+    });
+    start();
+    await flush();
+    emit(completed());
+    await flush();
+    release('k');
+    release('never-seen');
+    await flush();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('completed', () => {
   it('passes the RawResponse to onSuccess when there is no parser, with vars and meta', async () => {
     const onSuccess = jest.fn();
