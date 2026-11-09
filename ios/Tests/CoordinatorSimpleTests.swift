@@ -226,6 +226,23 @@ final class CoordinatorSimpleTests: XCTestCase {
 
   // MARK: - Cancel
 
+  func testFailedEntrySaveDeletesTheStagedCopyAndKeepsTheSource() throws {
+    let src = h.root.appendingPathComponent("photo.jpg")
+    writeFile(src, bytes: 20)
+    // A non-empty directory where entry.json goes: the save fails.
+    let blocker = h.store.fileURL("f", QueueStore.entryName)
+    writeFile(blocker.appendingPathComponent("x"), "x")
+    guard case .failure(let rejected) = h.enqueue(h.raw(id: "f", descriptor: [
+      "url": "https://a.test", "file": src.path])) else { return XCTFail("enqueue resolved") }
+    XCTAssertEqual(rejected.code, "E_STORAGE")
+    XCTAssertTrue(rejected.message.hasPrefix("enqueue: cannot save 'f': "), rejected.message)
+    XCTAssertEqual(FileIO.size(src), 20, "the caller keeps its file")
+    let bodies = try FileManager.default.contentsOfDirectory(atPath: h.store.dir("f").path)
+      .filter { $0.hasPrefix(BodyStaging.bodyPrefix) }
+    XCTAssertEqual(bodies, [], "the staged copy is deleted")
+    XCTAssertNil(h.row("f"))
+  }
+
   func testCancelLiveThenSettled() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let task = onlyTask()
