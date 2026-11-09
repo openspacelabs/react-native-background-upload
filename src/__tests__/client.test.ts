@@ -921,6 +921,43 @@ describe('a definition that arrives after configure()', () => {
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
+  it('drops the held outcomes of a cancelled id, so a later define() runs no handler', async () => {
+    const fake = createFakeNative({ ackTimeoutMs: 100 });
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    client.configure({});
+    await flush();
+
+    // On a settled entry, native forgets the row and its outcomes.
+    await client.cancel(id);
+    expect(await fake.getUnacknowledgedEvents()).toEqual([]);
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+
+    await expect(acked).rejects.toThrow(/was not acknowledged/);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(fake.ackedEventIds).toEqual([]);
+  });
+
+  it('a later configure() replaces the list the dev warning checks, and no list turns it off', () => {
+    const client = createUploadClient({ native: createFakeNative() });
+    const listed = client.define({ key: 'listed', request });
+    client.configure({ definitions: [listed] });
+    client.configure({
+      definitions: [listed, { key: 'added', mutate: listed.mutate }],
+    });
+    client.define({ key: 'added', request });
+    client.define({ key: 'unlisted', request });
+    expect(notListedWarnings()).toEqual([
+      [expect.stringContaining('define: "unlisted" is not in')],
+    ]);
+
+    client.configure({});
+    client.define({ key: 'after.no.list', request });
+    expect(notListedWarnings()).toHaveLength(1);
+  });
+
   it('does not warn about an unlisted key without the list, or outside development', async () => {
     const withoutList = createUploadClient({ native: createFakeNative() });
     withoutList.configure({});

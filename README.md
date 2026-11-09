@@ -294,11 +294,16 @@ while the app was dead from being sent twice.
    deliver then. Call every `define()` first. A bundler that loads modules
    lazily, such as Metro with `inlineRequires`, can run a `define()` later.
    That key then receives its held outcomes when its `define()` runs, in the
-   same session and in their original order per id.
+   same session and in their original order per id. Order holds among the
+   outcomes of one key. Across keys, the key defined first delivers first.
+   `cancel(id)` drops the held outcomes of that id.
 6. **Unknown key is loud.** An outcome whose key has no definition reaches
    `state` listeners with `reason: 'unhandled-key'`, and the library holds it.
    When no `define()` of the key comes in this session, it stays
-   unacknowledged and redelivers at the next launch.
+   unacknowledged and redelivers at the next launch. When a later `define()`
+   handles it, no new `state` row replaces the `unhandled-key` row. After the
+   ack, a `completed` or `cancelled` entry leaves `getRequests()` without a
+   `state` event, and an `error` entry stays with its `error` row.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in

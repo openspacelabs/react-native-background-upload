@@ -63,6 +63,11 @@ export type Delivery = {
    * before it had a definition are routed again, in their original order.
    */
   release: (key: string) => void;
+  /**
+   * Call after native `cancel(id)` resolves. Drops the held outcomes of `id`,
+   * so a later `define()` does not run a handler for them.
+   */
+  forget: (id: string) => void;
 };
 
 const errorMessage = (e: unknown): string =>
@@ -270,7 +275,7 @@ export const createDelivery = ({
     const definition = lookup(event.key);
     if (!definition) {
       warn(
-        `delivery: no definition for key "${event.key}" (id ${event.id}). The outcome stays unacknowledged until define() registers the key.`,
+        `delivery: no definition for key "${event.key}" (id ${event.id}). The outcome stays unacknowledged until define() registers the key, or until the next launch.`,
       );
       hold(event);
       emitState(unhandledRow(event));
@@ -290,10 +295,7 @@ export const createDelivery = ({
     return next;
   };
 
-  /**
-   * Routes the released outcomes of `id`. They were routed before anything
-   * that now waits in the lane, so they go first.
-   */
+  /** The task that release() adds to an idle lane. */
   const drainReleased = async (id: string): Promise<void> => {
     for (
       let event = takeReleased(id);
@@ -309,8 +311,18 @@ export const createDelivery = ({
   const route = async (event: SettledEvent): Promise<void> => {
     await waitForMutate(event.id);
     // define() can release an earlier outcome of this id while this one
-    // waited. That outcome goes first, so the id's order holds.
-    await drainReleased(event.id);
+    // waited. That outcome goes first, so the id's order holds. The loop is
+    // inline, not drainReleased(): the last empty check and settle()'s
+    // lookup must run in one synchronous step, with no await between them
+    // where a define() could slip in.
+    for (
+      let next = takeReleased(event.id);
+      next !== undefined;
+      next = takeReleased(event.id)
+    ) {
+      await waitForMutate(event.id);
+      await settle(next);
+    }
     await settle(event);
   };
 
@@ -388,5 +400,19 @@ export const createDelivery = ({
     ids.forEach((id) => enqueueForId(id, () => drainReleased(id)));
   };
 
-  return { start, trackMutate, release };
+  const forget = (id: string): void => {
+    released.delete(id);
+    held.forEach((forKey, key) => {
+      forKey.forEach((event, eventId) => {
+        if (event.id === id) {
+          forKey.delete(eventId);
+        }
+      });
+      if (forKey.size === 0) {
+        held.delete(key);
+      }
+    });
+  };
+
+  return { start, trackMutate, release, forget };
 };

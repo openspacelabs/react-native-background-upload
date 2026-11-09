@@ -221,7 +221,14 @@ export const createUploadClient = ({
    * it after the ack. On a settled entry: forgets it now: row, bytes, and its
    * unacknowledged outcomes.
    */
-  const cancel = (id: string): Promise<void> => native.cancel(id);
+  const cancel = async (id: string): Promise<void> => {
+    await native.cancel(id);
+    // On a settled entry native also drops the unacknowledged outcomes, so
+    // the held ones must not reach a handler later. On a live entry native
+    // keeps an earlier generation's outcomes; dropping them here only defers
+    // them to the next launch, as before late definitions existed.
+    delivery.forget(id);
+  };
 
   /**
    * Persisted natively. Applies to queued and future entries whose

@@ -4,8 +4,11 @@ A key that `define()` registers after `configure()` now receives its held
 outcomes in the same session. Before, an outcome that replayed before its
 key had a definition emitted the `unhandled-key` row and then waited for the
 next launch. This happened when a bundler loaded a module lazily, such as
-Metro with `inlineRequires`. The outcomes of one id still deliver in order.
-An outcome whose key is never defined stays unacknowledged, as before.
+Metro with `inlineRequires`. The outcomes of one id and key still deliver
+in order; across keys, the key defined first delivers first. The
+`unhandled-key` row is not followed by a new `state` row when the outcome is
+handled. `cancel(id)` drops the held outcomes of that id. An outcome whose
+key is never defined stays unacknowledged, as before.
 
 `configure()` takes an optional `definitions` list, the handles that
 `define()` returned. Listing a handle imports its module, so its `define()`
