@@ -5,6 +5,7 @@ package ai.openspace.backgroundupload
  * schedules, and every unfinished WorkManager run of the library before the
  * sweep changes them. Stale wakes show as delayed runs far in the future.
  * A queued or running entry with no run at all shows in entriesWithoutRun.
+ * v9Leftovers counts the v9 work still on disk, zeros included.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"
@@ -14,12 +15,18 @@ internal object BootSnapshot {
    * entry that was running when its process died still reads as running
    * with its old updatedAt. [runs]: null when WorkManager could not be read.
    */
-  fun of(entries: List<QueueEntry>, runs: List<PendingRun>?, now: Long): Map<String, Any?> {
+  fun of(
+    entries: List<QueueEntry>,
+    runs: List<PendingRun>?,
+    now: Long,
+    v9Leftovers: V9Leftovers,
+  ): Map<String, Any?> {
     val base = mapOf(
       "entries" to entries.size,
       "entriesByState" to entries.groupingBy { it.state.wire }.eachCount(),
       "entriesByKey" to entries.groupingBy { it.key }.eachCount(),
       "oldestUpdatedAt" to entries.minOfOrNull { it.updatedAt },
+      "v9Leftovers" to v9Leftovers.toMap(),
     )
     if (runs == null) return base + ("runsUnavailable" to true)
     val withRun = runs.mapNotNull { it.entryId }.toSet()

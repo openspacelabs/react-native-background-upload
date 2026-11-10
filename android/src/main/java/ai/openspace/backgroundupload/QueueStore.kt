@@ -126,9 +126,56 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   fun removeUnowned(id: String) {
     if (id.isEmpty()) return
     val d = entryDir(id)
-    if (d.isDirectory && !File(d, ENTRY_FILE).exists() && !d.deleteRecursively()) {
+    if (isUnowned(d) && !d.deleteRecursively()) {
       Diag.warn("could not delete the unowned files of '$id'")
     }
+  }
+
+  /** A directory that [removeUnowned] deletes: it holds no `entry.json`. */
+  private fun isUnowned(d: File) = d.isDirectory && !File(d, ENTRY_FILE).exists()
+
+  /**
+   * Counts the v9 work still on disk, for the boot snapshot. An upload is
+   * an id directory that [removeUnowned] would delete, or the v9 manifest
+   * and blob that a legacy row in [legacyIds] keeps: a same-id enqueue
+   * falls back to that blob. An empty directory is not counted. The bytes
+   * are the sizes of the files directly in the counted directories.
+   *
+   * Lists directories and reads file sizes only. It opens no file and
+   * changes nothing. It does not take the store lock, so workers do not
+   * wait; a directory that changes during the count can be counted either
+   * way. An error is a warning, and the counts found so far are returned.
+   */
+  fun countV9Leftovers(legacyIds: Collection<String>): V9Leftovers {
+    var uploads = 0
+    var bytes = 0L
+    try {
+      val dirs = dir.listFiles()
+      if (dirs == null) Diag.warn("v9 leftover count: could not list the queue directory")
+      dirs?.forEach { d ->
+        if (!isUnowned(d)) return@forEach
+        val files = d.listFiles()
+        if (files == null) {
+          // Gone since the root listing (a cancel or a forget) is not an error.
+          if (d.exists()) Diag.warn("v9 leftover count: could not list ${d.name}")
+          return@forEach
+        }
+        if (files.isEmpty()) return@forEach
+        uploads++
+        bytes += files.sumOf { if (it.isFile) it.length() else 0L }
+      }
+      // A legacy id with no entry file was counted above: each directory counts once.
+      legacyIds.filterNot { isUnowned(entryDir(it)) }.forEach { id ->
+        val v9 = listOf(File(entryDir(id), V9_MANIFEST_FILE), blobFile(id)).filter { it.isFile }
+        if (v9.isNotEmpty()) {
+          uploads++
+          bytes += v9.sumOf { it.length() }
+        }
+      }
+    } catch (error: Exception) {
+      Diag.warn("v9 leftover count stopped early; the counts are partial", error)
+    }
+    return V9Leftovers(legacyIds.size, uploads, bytes)
   }
 
   /** Every v10 entry. A directory with only a v9 manifest is not a row. */
@@ -201,6 +248,19 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
       generation = if (e.generation <= 0) 1 else e.generation,
     )
   }
+}
+
+/**
+ * v9 work still on the device, from [QueueStore.countV9Leftovers]: the
+ * legacy rows, and the v9 uploads no v10 entry owns with their size in
+ * bytes. All zero once the app has adopted or cancelled every v9 id.
+ */
+data class V9Leftovers(val legacyRows: Int, val unownedUploads: Int, val unownedBytes: Long) {
+  fun toMap(): Map<String, Any?> = mapOf(
+    "legacyRows" to legacyRows,
+    "unownedUploads" to unownedUploads,
+    "unownedBytes" to unownedBytes,
+  )
 }
 
 /**
