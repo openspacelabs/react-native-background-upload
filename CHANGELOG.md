@@ -1,5 +1,22 @@
 ## Unreleased
 
+`setWifiOnly()`, `updateHeaders()`, `pause()` and `resume()` no longer
+reject `E_STORAGE` when the settings file cannot be saved, on both
+platforms. The new value applies in memory at once, so this session uses
+it. The failed save is logged with its cause (on Android in
+`takeDiagnostics()`), and the library saves again at the next settings call
+and each time the app becomes active. Before, one failed save at startup
+kept the old value for the whole session, and an app that stopped on the
+rejection sent nothing. `configure()` also applies its retry defaults when
+the save fails; before, they were dropped. Until a save lands, a relaunch
+in the background with no JS reads the older saved value. See "Settings on
+a full disk" in the README. `updateHeaders()` with an invalid header still
+rejects `E_INVALID` and changes nothing.
+
+`updateHeaders()` now raises the header generation above every entry's
+value as well, so the generation does not go back after a relaunch that
+read an older settings file.
+
 `setWifiOnly()` with the value the queue already has no longer writes the
 settings file, on both platforms. It still resolves. Before, an app that
 calls it at every start wrote the file each time, so on a nearly full disk

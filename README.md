@@ -415,6 +415,9 @@ event (`paused`, then `queued`). No outcome is produced and the bytes are
 kept. A paused entry past `expiresAt` settles `error` with
 `errorKind: 'expired'` when it is resumed.
 
+Neither call rejects because the settings cannot be saved. See
+[Settings on a full disk](#settings-on-a-full-disk).
+
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
@@ -434,6 +437,9 @@ its own value. Both are checked before each attempt, so a toggle moves the
 queued entries that follow the setting. A call with the current value
 resolves without a write.
 
+It does not reject. The new value applies at once, also when the disk is
+full. See [Settings on a full disk](#settings-on-a-full-disk).
+
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and
 resumes the entries parked on `awaiting-auth`. The patch also replaces
@@ -441,7 +447,25 @@ same-named headers a part carries. This is how a fresh token
 reaches requests that stalled on 401. Each call bumps a header generation: a
 401 or 403 from an attempt issued under an older generation re-issues at once
 instead of parking. Parking emits one `state` event per entry. A header name
-or value the platform HTTP client cannot send rejects with `E_INVALID`.
+or value the platform HTTP client cannot send rejects with `E_INVALID` and
+changes nothing. That is the only rejection: a full disk does not reject.
+See [Settings on a full disk](#settings-on-a-full-disk).
+
+### Settings on a full disk
+`setWifiOnly()`, `updateHeaders()`, `pause()`, `resume()` and `configure()`
+change queue settings that native saves to a file. They apply the new value
+in memory first, so this session uses it at once. Then they save the file.
+If the save fails, for example on a full disk, the call still resolves. The
+library records a warning (on Android, in `takeDiagnostics()`) and tries the
+save again at the next one of these calls and each time the app becomes
+active.
+
+The cost: until a save lands, a relaunch in the background with no JS reads
+the older saved value. For `updateHeaders()`, a request can then send the
+older headers, get a 401, and wait in `awaiting-auth` for the next
+`updateHeaders()`. For `setWifiOnly()`, the earlier Wi-Fi setting applies
+during that relaunch. For `pause()` and `resume()`, the earlier pause state
+applies, so a paused entry can run or a resumed one can wait.
 
 ### `getRequests(filter?): RequestRow[]`
 Synchronous, from native's in-memory index, so it works offline. Returns
