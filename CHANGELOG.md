@@ -45,7 +45,8 @@ a warning whose sink throws.
 
 Added `holdNext('enqueue')` to `createFakeNative()`. The next enqueue stays
 pending until the returned function is called, so a test can model a native
-that is slow to answer.
+that is slow to answer. Later enqueues wait behind it, as they do on a
+device.
 
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the

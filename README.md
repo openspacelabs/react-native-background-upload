@@ -681,8 +681,10 @@ rows against the fake. The hooks need a React renderer, for example
 `data` parsed back from JSON. `failNext()` makes the next native call reject
 with a code such as `E_STORAGE`. `holdNext('enqueue')` keeps the next enqueue
 pending, as when native is slow to answer, and returns a function that
-releases it. The released call then runs as usual, or rejects with a failure
-that `failNext()` queued. `reset()` drops held calls. `seedUnacknowledged()` and `seedRows()`
+releases it. Native runs enqueue calls one at a time, so later enqueues wait
+behind a held one, as they do on a device. On release they all run in order,
+as usual, and a failure that `failNext()` queued goes to the first call that
+runs. `reset()` drops held calls and the calls behind them. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
 them.
 

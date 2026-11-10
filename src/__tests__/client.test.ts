@@ -199,6 +199,38 @@ describe('configure', () => {
     );
   });
 
+  it('leaves the earlier settings whole when a later option is invalid', async () => {
+    const client = createUploadClient();
+    const send = client.define({
+      key: 'k',
+      request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
+    });
+    client.configure({
+      lifetimeMs: 1000,
+      maxVarsBytes: 16,
+      headers: () => ({ A: '1' }),
+    });
+    expect(() =>
+      client.configure({
+        lifetimeMs: 2000,
+        enqueueTimeoutMs: 50,
+        maxVarsBytes: 64,
+        headers: () => ({ B: '2' }),
+        onWarning: 'log' as unknown as () => void,
+      }),
+    ).toThrow(/onWarning/);
+    expect(native.configure).toHaveBeenCalledTimes(1);
+    const before = Date.now();
+    await send.mutate({ s: 'a'.repeat(8) });
+    const entry = native.enqueue.mock.calls.at(-1)![0];
+    expect(entry.descriptor.headers).toEqual({ A: '1' });
+    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
+    expect(entry.descriptor.expiresAt).toBeLessThan(before + 2000);
+    await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
+      /the limit is 16/,
+    );
+  });
+
   it('applies maxVarsBytes to later mutates', async () => {
     const client = createUploadClient();
     const send = client.define({

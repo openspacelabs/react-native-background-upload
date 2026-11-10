@@ -531,6 +531,26 @@ describe('holdNext', () => {
     await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
   });
 
+  it('makes later calls wait behind a held call, as native runs enqueue one at a time', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    const first = fake.enqueue(entry({ id: 'a' }));
+    const second = fake.enqueue(entry({ id: 'b' }));
+    fake.failNext('enqueue', 'E_STORAGE');
+    const third = fake.enqueue(entry({ id: 'c' }));
+    await flush();
+    expect(await peek(second)).toBe('pending');
+    expect(await peek(third)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    release();
+    // The held call runs first, so it takes the queued failure.
+    await expect(first).rejects.toMatchObject({ code: 'E_STORAGE' });
+    await expect(second).resolves.toBe('b');
+    await expect(third).resolves.toBe('c');
+    expect(fake.entries.map((e) => e.id)).toEqual(['b', 'c']);
+    await expect(fake.enqueue(entry({ id: 'd' }))).resolves.toBe('d');
+  });
+
   it('applies a failNext failure when the held call is released', async () => {
     const fake = createFakeNative();
     const release = fake.holdNext('enqueue');
@@ -544,19 +564,22 @@ describe('holdNext', () => {
     expect(fake.entries).toEqual([]);
   });
 
-  it('uses holds in order and ignores a second release', async () => {
+  it('uses holds in order, keeps call order, and ignores a second release', async () => {
     const fake = createFakeNative();
     const releaseFirst = fake.holdNext('enqueue');
     const releaseSecond = fake.holdNext('enqueue');
     const first = fake.enqueue(entry({ id: 'a' }));
     const second = fake.enqueue(entry({ id: 'b' }));
+    // The second call is released but still waits behind the first.
     releaseSecond();
-    await expect(second).resolves.toBe('b');
+    await flush();
+    expect(await peek(second)).toBe('pending');
     expect(await peek(first)).toBe('pending');
     releaseFirst();
     releaseFirst();
     await expect(first).resolves.toBe('a');
-    expect(fake.entries.map((e) => e.id)).toEqual(['b', 'a']);
+    await expect(second).resolves.toBe('b');
+    expect(fake.entries.map((e) => e.id)).toEqual(['a', 'b']);
   });
 
   it('cancels the hold when released before the call is made', async () => {
@@ -566,16 +589,18 @@ describe('holdNext', () => {
     await expect(fake.enqueue(entry())).resolves.toBe('a');
   });
 
-  it('drops held calls and unused holds on reset()', async () => {
+  it('drops held calls, the calls behind them, and unused holds on reset()', async () => {
     const fake = createFakeNative();
     const releaseHeld = fake.holdNext('enqueue');
-    const releaseUnused = fake.holdNext('enqueue');
     const pending = fake.enqueue(entry());
+    const behind = fake.enqueue(entry({ id: 'behind' }));
+    const releaseUnused = fake.holdNext('enqueue');
     fake.reset();
     releaseHeld();
     releaseUnused();
     await flush();
     expect(await peek(pending)).toBe('pending');
+    expect(await peek(behind)).toBe('pending');
     expect(fake.entries).toEqual([]);
     await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
   });
