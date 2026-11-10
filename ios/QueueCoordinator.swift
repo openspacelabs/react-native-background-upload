@@ -132,6 +132,7 @@ final class QueueCoordinator {
     queue.async {
       var next = self.settings
       next.apply(configure: options)
+      guard next != self.settings else { return } // the same options write nothing
       try? self.saveSettings(next)
     }
   }

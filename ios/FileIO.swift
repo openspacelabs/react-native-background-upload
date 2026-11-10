@@ -15,10 +15,17 @@ enum FileIO {
   }
 
   /// Writes `data` to `url.tmp`, flushes it to disk, then renames it onto `url`.
+  /// On a failure the tmp file is deleted, so a partly written file does not
+  /// hold space that a retry needs.
   static func writeAtomically(_ data: Data, to url: URL) throws {
     let tmp = tmpURL(for: url)
-    try writeSynced(data, to: tmp)
-    try rename(tmp, onto: url)
+    do {
+      try writeSynced(data, to: tmp)
+      try rename(tmp, onto: url)
+    } catch {
+      try? FileManager.default.removeItem(at: tmp)
+      throw error
+    }
   }
 
   /// Writes and fsyncs a file in place. Callers rename it afterwards.

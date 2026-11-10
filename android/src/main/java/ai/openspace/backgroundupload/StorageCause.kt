@@ -14,6 +14,15 @@ import android.system.OsConstants
  * to JS from a TurboModule promise.
  */
 internal object StorageCause {
+  /**
+   * The errno name of one throwable of a cause chain, or null. Tests replace
+   * it: they run on android.jar stubs, where [ErrnoException.errno] reads 0
+   * and [OsConstants.errnoName] throws.
+   */
+  internal var errnoNameOf: (Throwable) -> String? = { e ->
+    (e as? ErrnoException)?.errno?.let { runCatching { OsConstants.errnoName(it) }.getOrNull() ?: "$it" }
+  }
+
   /** [withMessage] false: the rejection message already holds [error]'s message. */
   fun suffix(error: Throwable, withMessage: Boolean = true): String {
     val name = error.javaClass.name
@@ -26,9 +35,6 @@ internal object StorageCause {
   fun rejectMessage(error: Throwable): String =
     (error.message ?: error.javaClass.simpleName) + suffix(error, withMessage = false)
 
-  private fun errnoName(error: Throwable): String? {
-    val errno = generateSequence(error) { it.cause }.take(8).filterIsInstance<ErrnoException>().firstOrNull()
-      ?: return null
-    return runCatching { OsConstants.errnoName(errno.errno) }.getOrNull() ?: errno.errno.toString()
-  }
+  private fun errnoName(error: Throwable): String? =
+    generateSequence(error) { it.cause }.take(8).firstNotNullOfOrNull { errnoNameOf(it) }
 }

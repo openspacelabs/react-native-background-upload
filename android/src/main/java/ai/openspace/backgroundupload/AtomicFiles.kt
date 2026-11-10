@@ -4,6 +4,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 /**
@@ -17,12 +19,17 @@ internal object AtomicFiles {
 
   fun tmpFor(target: File) = File(target.parentFile, target.name + TMP_SUFFIX)
 
-  /** Throws IOException when the target could not be replaced. The old target is then intact. */
+  /**
+   * Throws IOException when the target could not be replaced. The old target is then intact.
+   *
+   * The directory create and the rename use java.nio, not File.mkdirs and
+   * File.renameTo, which return only a Boolean: a nio failure says why, for
+   * example "Permission denied". Not android.system.Os, which would also
+   * give the errno: it is a stub in the JVM unit tests.
+   */
   fun writeAtomically(target: File, write: (FileOutputStream) -> Unit) {
     val parent = target.parentFile ?: throw IOException("no parent directory for ${target.path}")
-    if (!parent.isDirectory && !parent.mkdirs()) {
-      throw IOException("could not create ${parent.path}")
-    }
+    if (!parent.isDirectory) Files.createDirectories(parent.toPath())
     val tmp = tmpFor(target)
     try {
       FileOutputStream(tmp).use { out ->
@@ -30,7 +37,8 @@ internal object AtomicFiles {
         out.flush()
         out.fd.sync()
       }
-      if (!tmp.renameTo(target)) throw IOException("could not rename ${tmp.path} to ${target.name}")
+      // ATOMIC_MOVE is rename(2): atomic, and it replaces the target.
+      Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
     } catch (error: Throwable) {
       tmp.delete()
       throw error

@@ -236,6 +236,15 @@ class QueueStoreTest {
   }
 
   @Test
+  fun `a failed rename says why and leaves no tmp file`() {
+    // A non-empty directory where the target goes: rename(2) refuses it.
+    val target = File(tmp.newFolder(), "entry.json").apply { mkdir(); File(this, "x").writeText("x") }
+    val e = assertThrows(IOException::class.java) { AtomicFiles.writeText(target, "new") }
+    assertTrue(e.javaClass.name, e is java.nio.file.FileSystemException)
+    assertFalse(AtomicFiles.tmpFor(target).exists())
+  }
+
+  @Test
   fun `a save into an unwritable directory throws`() {
     val notADir = tmp.newFile()
     val s = QueueStore(notADir, RequestIndex())
