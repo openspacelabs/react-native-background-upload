@@ -271,7 +271,7 @@ final class QueueCoordinator {
     queue.async {
       guard let e = self.index.entry(id) else {
         if let error = self.store.removeUnowned(id) {
-          self.diagnostics.warn("could not delete the unowned files of '\(id)'", error: error.localizedDescription)
+          self.diagnostics.warn("could not delete the unowned files of '\(id)'", error: error)
         }
         return resolve()
       }

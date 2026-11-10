@@ -399,7 +399,7 @@ export type DiagnosticData = Record<string, unknown> & {
 
 /**
  * One native diagnostic record. `error` is the exception's class and
- * message. `data` carries structured fields, such as the boot snapshot's
+ * message on Android, and the error's domain, code and message on iOS. `data` carries structured fields, such as the boot snapshot's
  * counts.
  */
 export type Diagnostic = {

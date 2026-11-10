@@ -141,10 +141,10 @@ final class QueueStore {
   /// wait; a directory that changes during the count, such as one an
   /// enqueue is staging, can be counted either way. An error goes in
   /// `warnings`, and the count goes on.
-  func countLeftovers(legacyIds: [String]) -> (Leftovers, warnings: [(message: String, error: String)]) {
+  func countLeftovers(legacyIds: [String]) -> (Leftovers, warnings: [(message: String, error: Error?)]) {
     var found = Leftovers()
     found.v9.legacyRows = legacyIds.count
-    var warnings: [(message: String, error: String)] = []
+    var warnings: [(message: String, error: Error?)] = []
     var ids: [String] = []
     let fm = FileManager.default
     let dirs: [URL]
@@ -152,7 +152,7 @@ final class QueueStore {
       dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
                                         options: [.skipsHiddenFiles])
     } catch {
-      warnings.append(("leftover count: could not list the queue directory", error.localizedDescription))
+      warnings.append(("leftover count: could not list the queue directory", error))
       dirs = []
     }
     for d in dirs where (try? d.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && Self.isUnowned(d) {
@@ -163,7 +163,7 @@ final class QueueStore {
       } catch {
         // Gone since the root listing (a cancel or a forget) is not an error.
         if FileIO.exists(d) {
-          warnings.append(("leftover count: could not list \(d.lastPathComponent)", error.localizedDescription))
+          warnings.append(("leftover count: could not list \(d.lastPathComponent)", error))
         }
         continue
       }
@@ -176,7 +176,7 @@ final class QueueStore {
         if let id = id(forDirectoryName: d.lastPathComponent) {
           ids.append(id)
         } else {
-          warnings.append(("leftover count: no id encodes to the directory \(d.lastPathComponent)", "the name is not url-safe base64 of a UTF-8 id"))
+          warnings.append(("leftover count: no id encodes to the directory \(d.lastPathComponent)", nil))
         }
       } else {
         found.orphans.dirs += 1

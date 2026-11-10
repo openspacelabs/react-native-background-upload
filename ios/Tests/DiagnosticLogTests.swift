@@ -119,6 +119,7 @@ final class DiagnosticLogTests: XCTestCase {
     writeFile(disk.root.appendingPathComponent("not+base64").appendingPathComponent(QueueStore.manifestName), "{}")
     let records = Harness(root: root).takeDiagnostics()
     XCTAssertEqual(records.compactMap { $0["level"] as? String }, ["warn", "info"])
+    XCTAssertNil(records[0]["error"], "no exception, as on Android")
     XCTAssertEqual(try snapshot(records, "v9Leftovers"), v9(unownedUploads: 2, unownedBytes: size + 2))
     XCTAssertEqual(try unownedIds(records), ["cap"])
   }
@@ -134,7 +135,8 @@ final class DiagnosticLogTests: XCTestCase {
     XCTAssertEqual(records.count, 1)
     XCTAssertEqual(records[0]["level"] as? String, "warn")
     XCTAssertEqual(records[0]["message"] as? String, "could not delete the unowned files of 'cap'")
-    XCTAssertNotNil(records[0]["error"] as? String)
+    let error = try XCTUnwrap(records[0]["error"] as? String)
+    XCTAssertTrue(error.hasPrefix("NSCocoaErrorDomain "), error)
     XCTAssertTrue(FileIO.exists(h.store.dir("cap")))
   }
 
@@ -211,7 +213,8 @@ final class DiagnosticLogTests: XCTestCase {
     defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
     let records = Harness(root: root).takeDiagnostics()
     XCTAssertEqual(records.compactMap { $0["level"] as? String }, ["warn", "info"])
-    XCTAssertNotNil(records[0]["error"] as? String)
+    let error = try XCTUnwrap(records[0]["error"] as? String)
+    XCTAssertTrue(error.hasPrefix("NSCocoaErrorDomain \(NSFileReadNoPermissionError): "), error)
     XCTAssertEqual(try snapshot(records, "v9Leftovers"), v9(unownedUploads: 1, unownedBytes: a))
   }
 
@@ -255,13 +258,14 @@ final class DiagnosticLogTests: XCTestCase {
 
   func testWarnAddsARecordInTheAndroidShape() {
     let log = DiagnosticLog(clock: { 42 })
-    log.warn("w", error: "e", data: ["k": 1])
+    log.warn("w", error: NSError(domain: "TestDomain", code: 7, userInfo: [NSLocalizedDescriptionKey: "boom"]),
+             data: ["k": 1])
     let records = take(log)
     XCTAssertEqual(records.count, 1)
     XCTAssertEqual(records[0]["at"] as? Double, 42)
     XCTAssertEqual(records[0]["level"] as? String, "warn")
     XCTAssertEqual(records[0]["message"] as? String, "w")
-    XCTAssertEqual(records[0]["error"] as? String, "e")
+    XCTAssertEqual(records[0]["error"] as? String, "TestDomain 7: boom")
     XCTAssertEqual((records[0]["data"] as? [String: Any])?["k"] as? Int, 1)
     XCTAssertTrue(take(log).isEmpty)
   }

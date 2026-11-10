@@ -468,7 +468,10 @@ The library's persisted diagnostic records, oldest first. Each call returns
 the records since the last call and clears them, so send them somewhere
 they can be seen, such as an error tracker, once per launch. A record is
 `{ at, level, message, error?, data? }`, with `level` one of `info`, `warn`
-or `error`. `error` is the exception's class and message.
+or `error`. `error` is the exception's class and message, such as
+`java.io.IOException: disk full`. iOS errors have no class name, so there it
+is the error's domain, code and message, such as
+`NSCocoaErrorDomain 257: The file couldn't be opened.`.
 
 When the module starts, both platforms add one `info` record with the
 message `boot sweep`. On Android that is once per launch plus once per JS

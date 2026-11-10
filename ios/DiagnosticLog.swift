@@ -60,10 +60,20 @@ final class DiagnosticLog {
     self.clock = clock
   }
 
-  /// `at`: epoch ms; nil means now, from the clock.
-  func warn(_ message: String, error: String? = nil, data: [String: Any]? = nil, at: Double? = nil) {
-    NSLog("[RNFileUploader] \(message)\(error.map { ": \($0)" } ?? "")")
-    add("warn", message, error: error, data: data, at: at)
+  /// `at`: epoch ms; nil means now, from the clock. `error` is written as
+  /// `describe(error)`.
+  func warn(_ message: String, error: Error? = nil, data: [String: Any]? = nil, at: Double? = nil) {
+    let described = error.map(Self.describe)
+    NSLog("[RNFileUploader] \(message)\(described.map { ": \($0)" } ?? "")")
+    add("warn", message, error: described, data: data, at: at)
+  }
+
+  /// The error's type and message, the iOS match of Android's
+  /// "<exception class>: <message>": "<NSError domain> <code>: <description>",
+  /// for example "NSCocoaErrorDomain 257: The file couldn't be opened.".
+  static func describe(_ error: Error) -> String {
+    let ns = error as NSError
+    return "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
   }
 
   func info(_ message: String, data: [String: Any]? = nil, at: Double? = nil) {
