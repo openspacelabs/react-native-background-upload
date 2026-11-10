@@ -127,9 +127,6 @@ extension QueueCoordinator {
           && entry?.attempts == attempt && !simpleLive.contains(id):
         simpleLive.insert(id)
         liveTasks[task.key] = (id, task)
-        // A crash between the TaskMap write and resume() leaves the task
-        // suspended. resume() on a running task does nothing.
-        task.resume()
       default:
         // No v10 owner (a v9 task), an older generation or attempt, a
         // duplicate, or an entry that must have no task. Drop its callback.
@@ -153,6 +150,13 @@ extension QueueCoordinator {
     // A crash between the settings save and the entry saves of a pause or
     // resume leaves rows that do not match the gates. Match them now.
     applyPauseGates()
+    // A crash between a TaskMap write and resume() leaves a task suspended.
+    // Resume every adopted task still held, after the settles and pauses
+    // above, so a task they stopped sends nothing. resume() on a running
+    // task does nothing.
+    for task in tasks where task.isLive && liveTasks[task.key] != nil {
+      task.resume()
+    }
     // A launch into the foreground: replace the adopted tasks that were
     // created in the background, and any this reconcile created before the
     // app became active.

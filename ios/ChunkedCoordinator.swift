@@ -97,9 +97,6 @@ final class ChunkedCoordinator {
       if keep {
         live[t.part] = t.task.key
         q.liveTasks[t.task.key] = (id, t.task)
-        // A crash between a slice's TaskMap write and its resumes leaves
-        // the task suspended. resume() on a running task does nothing.
-        t.task.resume()
         if let begin = t.task.beginAt.map({ $0.timeIntervalSince1970 * 1000 }), begin > q.now() {
           partBeginAt[id, default: [:]][t.part] = begin
         }
@@ -294,7 +291,8 @@ final class ChunkedCoordinator {
   ///
   /// It works one slice at a time, like refill. Each old task is cancelled
   /// in the slice that replaces it, so a part keeps its old task until its
-  /// new one exists.
+  /// new one exists, unless that slice's build fails: then the part waits
+  /// for the refill after the backoff. Only while the app is active.
   func replace(_ id: String, _ replaced: [Replaced]) {
     var queued = replacing[id] ?? []
     let keys = Set(queued.map(\.key))
@@ -307,6 +305,13 @@ final class ChunkedCoordinator {
   /// Replaces the first slice of `replacing[id]` that is still stale, then
   /// queues a block for the rest (and for any part with no task).
   private func replaceSlice(_ id: String) {
+    // A task made now would be a background task too: keep the old ones
+    // and their place in the system's queue. Continue the refill plan.
+    guard q.activity.isActive else {
+      replacing[id] = nil
+      refill(id)
+      return
+    }
     guard let e = runnable(id) else {
       replacing[id] = nil
       return
@@ -318,7 +323,12 @@ final class ChunkedCoordinator {
     let slice = ChunkedEngine.slice(stale.map(\.part), budget: sliceBytes) { e.parts[$0].size }
     let now = Array(stale.prefix(slice.count))
     replacing[id] = stale.count > now.count ? Array(stale.dropFirst(now.count)) : nil
-    guard !now.isEmpty else { return }
+    // None left to replace (each got a new task meanwhile): the block still
+    // owes the refill plan its next slice.
+    guard !now.isEmpty else {
+      refill(id)
+      return
+    }
     // A new task keeps what is left of the old one's backoff.
     let requests: [(index: Int, delayMs: Int?)] = now.map { (index: $0.part, delayMs: remainingMs(id, $0.part)) }
     q.cancelTasks(keys: now.map(\.key), purpose: .superseded)

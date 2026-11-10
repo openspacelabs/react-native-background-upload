@@ -670,6 +670,42 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(h.transport.created.count, 8)
   }
 
+  func testAReplaceSliceWithNothingLeftToReplaceStillContinuesTheBuild() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.runHeldSlice() // parts 2 and 3; the block for 4 and 5 waits
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3])
+    activate() // replaces 0 and 1 now; 2 and 3 wait for the queued block
+    // Before that block runs, 2 and 3 fail and their retries hold the slots.
+    h.complete(try XCTUnwrap(partTask(2)), status: 503)
+    h.complete(try XCTUnwrap(partTask(3)), status: 503)
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "parts 4 and 5 get their tasks")
+  }
+
+  func testReplaceStopsWhenTheAppResignsActive() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    let old = h.transport.live
+    h.holdSlices = true
+    activate()
+    XCTAssertEqual(parts(old.filter(\.cancelled)), [0, 1])
+    h.resignActive()
+    h.runHeldSlices()
+    XCTAssertEqual(parts(old.filter(\.isLive)), [2, 3, 4, 5], "the old tasks keep their place")
+    XCTAssertEqual(h.transport.created.count, 8, "no background task made in their place")
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
+  }
+
+  func testAnAdoptedTaskWhoseEntrySettlesAtLaunchIsNotResumed() throws {
+    let (fresh, survivors) = try crashAfterTheFirstSlice()
+    fresh.clock = h.clock + 15 * 24 * 3_600_000
+    fresh.boot()
+    XCTAssertEqual(fresh.entry("cap")?.state, .error, "expired")
+    XCTAssertTrue(survivors.allSatisfy(\.cancelled))
+    XCTAssertFalse(survivors.contains(where: \.resumed), "a stopped task sends nothing")
+  }
+
   func testAnExpiredEntryDueForReplacementOnActivationSettlesExpired() throws {
     try enqueueSixPartsInThreeSlices()
     h.drainAll()

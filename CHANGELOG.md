@@ -11,7 +11,9 @@ still get their tasks right after `mutate()`, one slice after the other. A
 background wake keeps its completion handler until the last slice is built,
 or until less than 5 s of background time is left. Replacing the part tasks
 created in the background, when the app becomes active, is sliced the same
-way, and each part keeps its old task until its new one exists.
+way, and each part keeps its old task until its new one exists, unless
+that slice's build fails. Replacing stops when the app leaves the
+foreground again.
 
 iOS now resumes every task it adopts at launch. A crash between writing a
 task's task map entry and resuming it left a suspended task that held its
