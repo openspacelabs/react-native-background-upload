@@ -197,13 +197,14 @@ final class ChunkedCoordinator {
     let blobExists = e.bodyPath.map { FileIO.exists(q.store.fileURL(id, $0)) } ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: q.policy(e),
-      fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt, hits: e.transientHits ?? []))
+      fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt, hits: e.transientHits(part: part)))
     switch verdict {
     case .accepted:
       break // handled above
     case .transient(let rule):
       var excused = e
-      if let rule { excused.recordTransientHit(rule) }
+      // Each part counts on its own, so each gets the rule's full maxRetries.
+      if let rule { excused.recordTransientHit(rule, part: part) }
       retryPart(excused, part)
     case .auth:
       if let g = meta?.headerGeneration, g < q.settings.headerGeneration {

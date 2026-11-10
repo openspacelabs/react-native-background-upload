@@ -182,12 +182,12 @@ extension QueueCoordinator {
     let fileExists = store.bodyURL(e).map(FileIO.exists) ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: policy(e),
-      fileExists: fileExists, now: now(), expiresAt: e.expiresAt, hits: e.transientHits ?? []))
+      fileExists: fileExists, now: now(), expiresAt: e.expiresAt, hits: e.transientHits(part: nil)))
     switch verdict {
     case .accepted:
       settle(id, .completed(response(c)))
     case .transient(let rule):
-      if let rule { e.recordTransientHit(rule) }
+      if let rule { e.recordTransientHit(rule, part: nil) }
       scheduleRetry(e)
     case .auth:
       if let g = meta?.headerGeneration, g < settings.headerGeneration {

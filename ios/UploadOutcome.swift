@@ -24,11 +24,23 @@ enum UploadOutcome {
     let status: Int
     var bodyIncludes: String?
     var maxRetries: Int?
+
+    /// The key of this rule's count. Format, the same on Android: the status
+    /// in decimal; with bodyIncludes, then "|" and the bodyIncludes text
+    /// unchanged. So `{404}` is "404" and `{400, "Bad Request"}` is
+    /// "400|Bad Request". A status holds only digits, so the first "|" ends
+    /// it, and two rules share a key only when status and bodyIncludes are
+    /// both equal. No escaping is needed. maxRetries is not part of it: a
+    /// changed cap applies to the count so far. The list position is not part
+    /// of it: a reordered list keeps each count. The shared vector
+    /// test-vectors/transient-rule-identity.json pins the format on both
+    /// platforms. Computed, so Codable does not persist it.
+    var identity: String { bodyIncludes.map { "\(status)|\($0)" } ?? "\(status)" }
   }
 
-  /// The index of the first rule that matches, or nil.
-  static func matchesTransient(_ code: Int, body: String?, rules: [TransientRule]) -> Int? {
-    rules.firstIndex { rule in
+  /// The first rule that matches, or nil.
+  static func matchesTransient(_ code: Int, body: String?, rules: [TransientRule]) -> TransientRule? {
+    rules.first { rule in
       rule.status == code
         && (rule.bodyIncludes == nil || body?.contains(rule.bodyIncludes!) == true)
     }

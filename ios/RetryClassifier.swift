@@ -5,8 +5,8 @@ import Foundation
 enum RetryClassifier {
   enum Class: Equatable {
     case accepted
-    /// `rule` names the `transient` rule that excused the response; nil for the standard table or `exempt`.
-    case transient(rule: Int?)
+    /// `rule` is the `transient` rule that excused the response; nil for the standard table or `exempt`.
+    case transient(rule: UploadOutcome.TransientRule?)
     case auth
     case terminalHttp
     /// The payload is gone. A retry can never succeed.
@@ -23,8 +23,9 @@ enum RetryClassifier {
     var fileExists: Bool
     var now: Double
     var expiresAt: Double
-    /// The entry's count per `transient` rule so far.
-    var hits: [Int] = []
+    /// The count so far per rule identity (`TransientRule.identity`): the
+    /// entry's for a simple request, the part's for a chunked one.
+    var hits: [String: Int] = [:]
   }
 
   /// A cancellation (NSURLErrorCancelled) never reaches here: the caller
@@ -54,10 +55,9 @@ enum RetryClassifier {
     case 408, 429, 500...599: return .transient(rule: nil)
     case 400...499:
       // A matched rule decides, even past its cap: exempt does not rescue it.
-      if let index = UploadOutcome.matchesTransient(code, body: i.body, rules: i.policy.transient) {
-        let used = index < i.hits.count ? i.hits[index] : 0
-        if let cap = i.policy.transient[index].maxRetries, used >= cap { return .terminalHttp }
-        return .transient(rule: index)
+      if let rule = UploadOutcome.matchesTransient(code, body: i.body, rules: i.policy.transient) {
+        if let cap = rule.maxRetries, i.hits[rule.identity, default: 0] >= cap { return .terminalHttp }
+        return .transient(rule: rule)
       }
       return i.policy.exempt.contains(code) ? .transient(rule: nil) : .terminalHttp
     // 1xx and 3xx the session did not follow. The answer will not change.

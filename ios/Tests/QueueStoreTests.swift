@@ -35,19 +35,48 @@ final class QueueStoreTests: XCTestCase {
   func testTransientHitsRoundTripAndDecodeAsNilWhenAbsent() throws {
     var e = entry("hits")
     e.retry = RetryOverride(transient: [.init(status: 400, bodyIncludes: "Bad Request", maxRetries: 24)])
-    e.transientHits = [0, 2]
+    e.transientHitsByRule = ["404": 2, "400|Bad Request": 1]
     try store.save(e)
     XCTAssertEqual(QueueStore(root: root).load("hits"), e)
-    // An entry.json written by 11.0.2 has no transientHits key.
+    // An entry.json written by 11.1.0 has no transientHitsByRule key.
     var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(e)) as? [String: Any])
-    json["transientHits"] = nil
+    json["transientHitsByRule"] = nil
     var retry = try XCTUnwrap(json["retry"] as? [String: Any])
     retry["transient"] = nil
     json["retry"] = retry
     let older = try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: json))
-    XCTAssertNil(older.transientHits)
-    XCTAssertNil(older.retry?.transient, "an 11.0.2 retry override has no transient key")
+    XCTAssertNil(older.transientHitsByRule)
+    XCTAssertNil(older.retry?.transient, "an 11.1.0 retry override has no transient key")
     XCTAssertEqual(RetryPolicy.resolve([nil, older.retry]).transient, [], "and resolves to no rules")
+  }
+
+  func testAPositionalTransientHitsArrayFromAPreReleaseBuildLoadsAsNoHits() throws {
+    try store.save(entry("old"))
+    let url = store.fileURL("old", QueueStore.entryName)
+    var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    json["transientHits"] = [40, 2]
+    try JSONSerialization.data(withJSONObject: json).write(to: url)
+    let loaded = try XCTUnwrap(QueueStore(root: root).load("old"), "the entry still loads")
+    XCTAssertNil(loaded.transientHitsByRule)
+    XCTAssertEqual(loaded.state, .queued)
+  }
+
+  func testPartCountsRoundTripAndAPartWithoutTheKeyDecodes() throws {
+    var e = entry("parts")
+    e.bodyKind = .parts
+    e.parts = [
+      .init(url: "https://s3.test/1", headers: [:], start: 0, end: 10, accepted: false, rejections: 3,
+            transientHitsByRule: ["400": 3]),
+      .init(url: "https://s3.test/2", headers: [:], start: 10, end: 20, accepted: true, rejections: 0),
+    ]
+    try store.save(e)
+    XCTAssertEqual(QueueStore(root: root).load("parts")?.parts.map(\.transientHitsByRule), [["400": 3], nil])
+    var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(e)) as? [String: Any])
+    var parts = try XCTUnwrap(json["parts"] as? [[String: Any]])
+    parts[0]["transientHitsByRule"] = nil
+    json["parts"] = parts
+    let older = try JSONDecoder().decode(QueueEntry.self, from: JSONSerialization.data(withJSONObject: json))
+    XCTAssertEqual(older.parts.map(\.transientHitsByRule), [nil, nil])
   }
 
   func testAnOlderSettingsFileDecodesWithNoTransientRules() throws {
