@@ -41,6 +41,8 @@ jest.mock('react-native-fs', () => ({
   exists: jest.fn(() => Promise.resolve(false)),
   readFile: jest.fn(() => Promise.resolve('{}')),
   writeFile: jest.fn(() => Promise.resolve()),
+  stat: jest.fn(() => Promise.resolve({size: 2048 * 1024 * 1024})),
+  copyFile: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('@notifee/react-native', () => ({
   __esModule: true,
@@ -111,4 +113,42 @@ it('rejects a GET with a body before native sees it', async () => {
   const before = mockNative.enqueue.mock.calls.length;
   await press(tree, 'GET with a body');
   expect(mockNative.enqueue.mock.calls.length).toBe(before);
+});
+
+it('runs the enqueue latency measurement 7 times on /slow', async () => {
+  const fs = require('react-native-fs') as {
+    exists: jest.Mock<(path: string) => Promise<boolean>>;
+    copyFile: jest.Mock;
+  };
+  // The 2 GiB source is already made.
+  fs.exists.mockImplementation(path =>
+    Promise.resolve(path.endsWith('/latency-src.bin')),
+  );
+  const before = mockNative.enqueue.mock.calls.length;
+  try {
+    await press(tree, 'Enqueue latency x7: 2 GiB, 20 MiB parts, on /slow');
+    for (let i = 0; i < 100 && mockNative.cancel.mock.calls.length < 14; i++) {
+      await act(async () => {
+        await new Promise(r => setTimeout(r, 0));
+      });
+    }
+  } finally {
+    fs.exists.mockImplementation(() => Promise.resolve(false));
+  }
+  const entries = mockNative.enqueue.mock.calls
+    .slice(before)
+    .map(c => c[0] as unknown as {key: string; descriptor: any});
+  expect(entries.map(e => e.key)).toEqual(
+    Array(7).fill(['harness.chunked20', 'harness.json']).flat(),
+  );
+  const parts = entries[0].descriptor.parts as Array<{
+    url: string;
+    headers: Record<string, string>;
+  }>;
+  expect(parts).toHaveLength(103);
+  expect(parts[0].url).toMatch(/\/slow\/chunk\/[\w-]+\/1$/);
+  expect(parts[0].headers['Content-Range']).toBe('0-20971519/2147483648');
+  expect(entries[1].descriptor.url).toMatch(/\/slow\/json\//);
+  expect(fs.copyFile).toHaveBeenCalledTimes(7);
+  expect(mockNative.cancel).toHaveBeenCalledTimes(14);
 });

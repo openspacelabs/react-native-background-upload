@@ -99,7 +99,8 @@ writes the bytes at their offset into `example/server/received/`. It prints
   PUT" (the log says whether the source was moved), "DELETE" (bodiless),
   "GET (no vars)" (bodiless, `mutate()` with no arguments), "3 JSON at once",
   "Cap test" (resets the server counters, then 3 chunked and 3 JSON uploads on
-  `slow`), "Missing file", and "GET with a body".
+  `slow`), "Enqueue latency x7" (see iOS step 19), "Missing file", and "GET
+  with a body".
 - **Queue.** `pause()`, `resume()`, `cancel('nope')`, and a `setWifiOnly`
   switch. Native keeps the Wi-Fi setting and has no getter, so the switch
   shows the last value this app set. Below are the rows of `getRequests()`,
@@ -304,6 +305,23 @@ step says otherwise.
 
 18. **Dispatch latency.** Same as Android step 15. iOS creates a background
     session task per attempt, so this is the number to watch.
+19. **Enqueue latency.** This is what Diana does after a capture: the file
+    `mutate()`, then at once the metadata `mutate()`. Use an older device,
+    such as an iPhone 11: the slow case came from one. Each run needs about
+    4 GiB free (the 2 GiB source copy and its part files), plus 2 GiB for the
+    source that the app keeps. Do not pause the queue: a paused entry builds
+    no parts. Press "Enqueue latency x7". The first press makes the 2 GiB
+    source, which takes minutes. Then each of the 7 runs copies the source,
+    calls `mutate()` on it with 103 parts of 20 MiB, and at once calls
+    `mutate()` on a small JSON request. Both go to `slow`, so no part
+    finishes during a run. Then the app cancels both. Each run logs
+    `copyMs`, `fileMs` and `nextMs`. `nextMs` is how long the second
+    `mutate()` waits. The last line gives the median and the maximum of
+    `nextMs`. Pass: median under 500 ms and maximum under 2 s. To compare,
+    run it on the same device with a build of 11.1.0. To see where the time
+    goes, record the app in Instruments with the os_signpost or Points of
+    Interest instrument: each `enqueue`, `issue` and `part slice` is an
+    interval.
 
 ## Tests
 
