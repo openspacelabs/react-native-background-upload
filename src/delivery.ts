@@ -64,8 +64,8 @@ export type Delivery = {
    */
   release: (key: string) => void;
   /**
-   * Call after native `cancel(id)` resolves. Drops the held outcomes of `id`,
-   * so a later `define()` does not run a handler for them.
+   * Call before and after native `cancel(id)`. Drops the held outcomes of
+   * `id`, so a later `define()` does not run a handler for them.
    */
   forget: (id: string) => void;
 };

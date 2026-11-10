@@ -940,6 +940,57 @@ describe('a definition that arrives after configure()', () => {
     expect(fake.ackedEventIds).toEqual([]);
   });
 
+  it('drops the held outcomes of an id at the start of cancel(), so a define() while native cancels runs no handler', async () => {
+    const fake = createFakeNative({ ackTimeoutMs: 100 });
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    // Native's answer to cancel() waits until the test lets it go.
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const nativeCancel = fake.cancel;
+    jest.spyOn(fake, 'cancel').mockImplementation(async (cancelId) => {
+      await answered;
+      return nativeCancel(cancelId);
+    });
+    const client = createUploadClient({ native: fake });
+    client.configure({});
+    await flush();
+
+    const cancelling = client.cancel(id);
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    await flush();
+    answer();
+    await cancelling;
+
+    await expect(acked).rejects.toThrow(/was not acknowledged/);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(fake.ackedEventIds).toEqual([]);
+  });
+
+  it('sends no second state row when a late definition handles a held outcome', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const state = jest.fn();
+    client.addListener('state', state);
+    client.configure({});
+    await flush();
+
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    await acked;
+    await flush();
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(state.mock.calls).toEqual([
+      [expect.objectContaining({ id, key: 'late', reason: 'unhandled-key' })],
+    ]);
+  });
+
   it('a later configure() replaces the list the dev warning checks, and no list turns it off', () => {
     const client = createUploadClient({ native: createFakeNative() });
     const listed = client.define({ key: 'listed', request });

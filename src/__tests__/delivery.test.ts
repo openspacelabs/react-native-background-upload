@@ -572,6 +572,37 @@ describe('release', () => {
     expect(native.ackEvents).not.toHaveBeenCalled();
   });
 
+  it('delivers the held outcomes of one id under two keys in define() order', async () => {
+    // A same-id mutate() from another definition gives one id outcomes
+    // under two keys. Order holds per key; the key defined first goes first.
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'older', key: 'a' }));
+    emit(completed({ eventId: 'newer', key: 'b' }));
+    await flush();
+
+    const order: string[] = [];
+    const define = (key: string): void => {
+      definitions[key] = {
+        key,
+        request: jest.fn(),
+        onSuccess: () => {
+          order.push(key);
+        },
+      };
+      release(key);
+    };
+    define('b');
+    await flush();
+    define('a');
+    await flush();
+
+    expect(order).toEqual(['b', 'a']);
+    expect(native.ackEvents.mock.calls).toEqual([[['newer']], [['older']]]);
+  });
+
   it('does nothing for a key with no held outcomes', async () => {
     const onSuccess = jest.fn();
     const { start, emit, release, native } = setup({

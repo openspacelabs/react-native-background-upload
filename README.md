@@ -307,7 +307,9 @@ while the app was dead from being sent twice.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in
-   order. There is no ordering guarantee between different ids.
+   order. One exception: when one id has held outcomes under two keys, the
+   key defined first delivers first (rule 5). There is no ordering guarantee
+   between different ids.
 9. **`attempt` events are live-only.** They are never journaled or replayed.
 
 Retry classes:

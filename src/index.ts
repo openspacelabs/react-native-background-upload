@@ -222,11 +222,17 @@ export const createUploadClient = ({
    * unacknowledged outcomes.
    */
   const cancel = async (id: string): Promise<void> => {
-    await native.cancel(id);
     // On a settled entry native also drops the unacknowledged outcomes, so
     // the held ones must not reach a handler later. On a live entry native
     // keeps an earlier generation's outcomes; dropping them here only defers
     // them to the next launch, as before late definitions existed.
+    // Forget before the await, so a define() of the key that runs while
+    // native cancels does not run a handler for this id. When native cancel
+    // rejects, the dropped outcomes were never acknowledged, so native
+    // redelivers them at the next launch.
+    delivery.forget(id);
+    await native.cancel(id);
+    // Forget again: an outcome of the id can be held during the await.
     delivery.forget(id);
   };
 
