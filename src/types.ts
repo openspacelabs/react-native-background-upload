@@ -432,15 +432,19 @@ export type UploadClient = {
    */
   useRequestsWithProgress: (filter?: RequestsFilter) => readonly RequestRow[];
   /**
-   * Calls `listener` with `getCachedRequests()` each time a row appears,
-   * changes state, or goes. Keeps the cache up to date while subscribed.
+   * Calls `listener` with `getCachedRequests()` each time those rows change:
+   * a row appears, changes state, or goes. There is no call at registration;
+   * read `getCachedRequests()` after this returns. Keeps the cache up to date
+   * while subscribed.
    */
   addRequestsListener: (listener: (rows: readonly RequestRow[]) => void) => {
     remove: () => void;
   };
   /**
    * The rows the hooks see, for code outside React. With no listener and no
-   * mounted hook, it reads native first.
+   * mounted hook, it reads native and returns a new array each call. A result
+   * filtered by `key` or `id` is a new array each call, so it must not be a
+   * `useSyncExternalStore` snapshot.
    */
   getCachedRequests: (filter?: RequestsFilter) => readonly RequestRow[];
   takeDiagnostics: () => Promise<Diagnostic[]>;

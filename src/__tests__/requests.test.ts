@@ -10,7 +10,13 @@ jest.mock('react-native', () => {
 });
 
 import { createUploadClient } from '../index';
-import { createRequestCache, createSelector } from '../requests';
+import {
+  createRequestCache,
+  createSelector,
+  jsonEqual,
+  rowEqual,
+  sharedSelector,
+} from '../requests';
 import { createFakeNative, type FakeNative } from '../testing';
 import type { RequestRow } from '../types';
 
@@ -63,13 +69,16 @@ describe('first subscribe', () => {
     expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a', 'b']);
   });
 
-  it('does not read native again at subscribe right after a render read', () => {
-    const { native, client, getRequests } = setup();
-    native.seedRows([row()]);
-    // A render reads before its effect subscribes, in the same task.
-    client.getCachedRequests();
+  it('checks native at subscribe, so a row emitted after a render read is there', () => {
+    const { native, client } = setup();
+    native.seedRows([row({ id: 'a' })]);
+    // A render reads before its effect subscribes.
+    expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a']);
+    // Native queues a row and emits it while nothing listens: the event is lost.
+    native.seedRows([row({ id: 'b' })]);
+    native.emit.state(row({ id: 'b' }));
     listen(client);
-    expect(getRequests).toHaveBeenCalledTimes(1);
+    expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a', 'b']);
   });
 });
 
@@ -106,12 +115,32 @@ describe('state events', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('drop the unhandled-key reason from the row', () => {
+  it('take an unhandled-key row from native, not from the outcome', () => {
     const { native, client } = setup();
-    native.seedRows([row()]);
+    // A same-id mutate() reopened the entry after the outcome was journaled.
+    native.seedRows([row({ state: 'queued', updatedAt: 5 })]);
     listen(client);
-    native.emit.state({ ...row({ state: 'completed' }), reason: 'unhandled-key' });
-    expect(client.getCachedRequests()[0]).toEqual(row({ state: 'completed' }));
+    native.emit.state({
+      ...row({ state: 'completed', updatedAt: 3 }),
+      reason: 'unhandled-key',
+    });
+    expect(client.getCachedRequests()).toEqual([
+      row({ state: 'queued', updatedAt: 5 }),
+    ]);
+  });
+
+  it('show the native row of an unhandled-key outcome, without the reason', () => {
+    const { native, client } = setup();
+    native.seedRows([row({ state: 'running' })]);
+    listen(client);
+    native.seedRows([row({ state: 'completed', updatedAt: 2 })]);
+    native.emit.state({
+      ...row({ state: 'completed', updatedAt: 2 }),
+      reason: 'unhandled-key',
+    });
+    expect(client.getCachedRequests()).toEqual([
+      row({ state: 'completed', updatedAt: 2 }),
+    ]);
   });
 });
 
@@ -311,13 +340,25 @@ describe('the ack of an outcome whose row moved on', () => {
     expect(cache.rows()).toEqual([]);
   });
 
-  it('does nothing for an error outcome', () => {
+  it('does nothing for an error outcome on an error row', () => {
     const { cache, readNative } = stub([row({ id: 'a', state: 'error' })]);
     cache.subscribe(() => {});
     readNative.mockClear();
     cache.acked({ id: 'a', kind: 'error' });
     expect(readNative).not.toHaveBeenCalled();
     expect(cache.rows()).toHaveLength(1);
+  });
+
+  it('asks native for an error outcome on a row still shown live', () => {
+    // iOS can settle a live row during the ack with no event.
+    const nativeRows = [row({ id: 'a', state: 'running' })];
+    const { cache, readNative } = stub(nativeRows);
+    cache.subscribe(() => {});
+    nativeRows[0] = row({ id: 'a', state: 'error', updatedAt: 2 });
+    readNative.mockClear();
+    cache.acked({ id: 'a', kind: 'error' });
+    expect(readNative).toHaveBeenCalledTimes(1);
+    expect(cache.rows()).toEqual([row({ id: 'a', state: 'error', updatedAt: 2 })]);
   });
 });
 
@@ -337,7 +378,8 @@ describe('unsubscribe and subscribe again', () => {
     expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a', 'b']);
     // Row 'a' did not change, so it keeps its identity.
     expect(client.getCachedRequests()[0]).toBe(kept[0]);
-    expect(second.calls).toHaveLength(1);
+    // No call while the listener registers; it reads the rows itself.
+    expect(second.calls).toHaveLength(0);
   });
 
   it('keeps the same array when native has not changed', async () => {
@@ -364,13 +406,13 @@ describe('unsubscribe and subscribe again', () => {
     expect(native.listenerCount('state')).toBe(before);
   });
 
-  it('reads native on every getCachedRequests() while nobody listens', async () => {
-    const { native, client } = setup();
+  it('reads native on every getCachedRequests() while nobody listens', () => {
+    const { native, client, getRequests } = setup();
     native.seedRows([row({ id: 'a' })]);
     expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a']);
-    await flush();
     native.seedRows([row({ id: 'b' })]);
     expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a', 'b']);
+    expect(getRequests).toHaveBeenCalledTimes(2);
   });
 
   it('warns and keeps the rows when the native read throws', async () => {
@@ -467,5 +509,136 @@ describe('createSelector', () => {
     expect(first.map((r) => r.id)).toEqual(['a']);
     rows = [rows[0]!];
     expect(select()).toBe(first);
+  });
+});
+
+describe('addRequestsListener', () => {
+  it('is not called while it registers, even when the check finds a change', async () => {
+    const { native, client } = setup();
+    native.seedRows([row({ id: 'a' })]);
+    const first = listen(client);
+    first.subscription.remove();
+    native.seedRows([row({ id: 'b' })]);
+    const listener = jest.fn();
+    client.addRequestsListener(listener);
+    expect(listener).not.toHaveBeenCalled();
+    expect(client.getCachedRequests().map((r) => r.id)).toEqual(['a', 'b']);
+  });
+
+  it('is not called when only a hidden cancelled row changes', () => {
+    const { native, client } = setup();
+    native.seedRows([row({ id: 'a' }), row({ id: 'c', state: 'cancelled' })]);
+    const { calls } = listen(client);
+    native.emit.state(row({ id: 'c', state: 'cancelled', updatedAt: 9 }));
+    expect(calls).toHaveLength(0);
+    native.emit.state(row({ id: 'a', state: 'running' }));
+    expect(calls).toHaveLength(1);
+  });
+
+  it('may call the client while the cache drops a row after an ack', async () => {
+    const { native, client, ping, warnings } = setup();
+    const { id: first } = await ping.mutate({ n: 1 });
+    const { id: second } = await ping.mutate({ n: 2 });
+    await native.settle(second, { kind: 'error', error: { errorKind: 'http' } });
+    const seen: string[][] = [];
+    const cancels: Array<Promise<void>> = [];
+    client.addRequestsListener((rows) => {
+      seen.push(rows.map((r) => r.id));
+      // Reads native and starts a cancel from inside the notification.
+      client.getRequests();
+      if (cancels.length === 0 && !rows.some((r) => r.id === first)) {
+        cancels.push(client.cancel(second));
+      }
+    });
+    await native.settle(first, { kind: 'completed' });
+    await Promise.all(cancels);
+    expect(cancels).toHaveLength(1);
+    expect(client.getCachedRequests()).toEqual([]);
+    expect(native.getRequests()).toEqual([]);
+    // The completed state event, the drop after the ack, then the cancel.
+    expect(seen.slice(-2)).toEqual([[second], []]);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe('selector work', () => {
+  /** An array that counts reads of its elements. */
+  const counted = (rows: RequestRow[]) => {
+    const reads = { count: 0 };
+    const proxy = new Proxy(rows, {
+      get: (target, prop, receiver) => {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) {
+          reads.count++;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    return { proxy, reads };
+  };
+
+  it('looks an id up in one index per rows array, without walking the rows each time', () => {
+    const many = Array.from({ length: 100 }, (_, i) => row({ id: `r${i}` }));
+    const { proxy, reads } = counted(many);
+    const selectors = Array.from({ length: 50 }, (_, i) =>
+      createSelector(() => proxy, { id: `r${i}` }),
+    );
+    const results = selectors.map((select) => select());
+    // One index build reads each row once; 50 selectors share it.
+    expect(reads.count).toBe(100);
+    expect(results[7]).toEqual([many[7]]);
+    expect(selectors[7]!()).toBe(results[7]);
+  });
+
+  it('keeps an id result when a new array holds the same row object', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' })];
+    let current = rows;
+    const select = createSelector(() => current, { id: 'a' });
+    const first = select();
+    current = [rows[0]!, row({ id: 'b', state: 'running' })];
+    expect(select()).toBe(first);
+    current = [row({ id: 'a', state: 'cancelled' }), current[1]!];
+    expect(select()).toEqual([]);
+  });
+
+  it('shares one selector per source and filter without an id', () => {
+    const rows = [row({ id: 'a', key: 'k1' }), row({ id: 'b', key: 'k2' })];
+    const source = () => rows;
+    expect(sharedSelector(source, {})).toBe(sharedSelector(source, {}));
+    expect(sharedSelector(source, { key: 'k1' })).toBe(
+      sharedSelector(source, { key: 'k1' }),
+    );
+    expect(sharedSelector(source, { key: 'k1' })).not.toBe(
+      sharedSelector(source, {}),
+    );
+    expect(sharedSelector(source, { includeCancelled: true })).not.toBe(
+      sharedSelector(source, {}),
+    );
+    expect(sharedSelector(source, { key: 'k1' })().map((r) => r.id)).toEqual([
+      'a',
+    ]);
+  });
+});
+
+describe('jsonEqual', () => {
+  it('compares JSON values deeply, with undefined fields as absent', () => {
+    expect(jsonEqual({ a: [1, { b: null }] }, { a: [1, { b: null }] })).toBe(
+      true,
+    );
+    expect(jsonEqual({ a: 1, b: undefined }, { a: 1 })).toBe(true);
+    expect(jsonEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+    expect(jsonEqual({ a: 1, c: 2 }, { a: 1, b: 2 })).toBe(false);
+    expect(jsonEqual([1, 2], [1, 2, 3])).toBe(false);
+    expect(jsonEqual([], {})).toBe(false);
+    expect(jsonEqual(null, {})).toBe(false);
+    expect(jsonEqual('1', 1)).toBe(false);
+  });
+
+  it('finds a changed vars field when every scalar field is the same', () => {
+    expect(
+      rowEqual(row({ vars: { n: 1 } }), row({ vars: { n: 2 } })),
+    ).toBe(false);
+    expect(rowEqual(row({ vars: { n: 1 } }), row({ vars: { n: 1 } }))).toBe(
+      true,
+    );
   });
 });

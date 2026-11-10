@@ -343,13 +343,28 @@ export const createUploadClient = ({
   const addRequestsListener = (
     listener: (rows: readonly RequestRow[]) => void,
   ): { remove: () => void } => {
+    // No call while it registers: the caller reads getCachedRequests() after
+    // this returns. After that, a call only when the rows it gets changed,
+    // not when only a hidden cancelled row did.
+    let registering = true;
+    let last: readonly RequestRow[] | undefined;
     const remove = requests.subscribe(() => {
+      if (registering) {
+        return;
+      }
+      const rows = visibleRows();
+      if (rows === last) {
+        return;
+      }
+      last = rows;
       try {
-        listener(visibleRows());
+        listener(rows);
       } catch (e) {
         warn('addRequestsListener: a listener threw', e);
       }
     });
+    registering = false;
+    last = visibleRows();
     return { remove };
   };
 

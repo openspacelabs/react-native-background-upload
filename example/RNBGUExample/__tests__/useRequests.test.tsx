@@ -80,7 +80,7 @@ const mount = (element: React.ReactElement): ReactTestRenderer => {
   return tree;
 };
 
-it('reads native once for two mounted hooks', () => {
+it('reads native at the first render and at the first subscribe, not per hook', () => {
   native.seedRows([row()]);
   const getRequests = jest.spyOn(native, 'getRequests');
   const one = newSeen();
@@ -91,9 +91,44 @@ it('reads native once for two mounted hooks', () => {
       <Rows seen={two} progress />
     </>,
   );
-  expect(getRequests).toHaveBeenCalledTimes(1);
+  // One read for the render, one check when the first hook subscribes.
+  expect(getRequests).toHaveBeenCalledTimes(2);
   expect(last(one)).toEqual([row()]);
   expect(last(two)).toEqual([row()]);
+  // The check found nothing new, so no hook rendered again.
+  expect(one.renders).toBe(1);
+});
+
+it('works under StrictMode, which subscribes twice', () => {
+  native.seedRows([row()]);
+  const seen = newSeen();
+  const tree = mount(
+    <React.StrictMode>
+      <Rows seen={seen} progress />
+    </React.StrictMode>,
+  );
+  expect(native.listenerCount('state')).toBe(1);
+  expect(native.listenerCount('progress')).toBe(1);
+  act(() => native.emit.progress({id: 'a', bytesSent: 7, totalBytes: 100}));
+  expect(last(seen)[0]!.bytesSent).toBe(7);
+  act(() => native.emit.state(row({state: 'running', updatedAt: 2})));
+  expect(last(seen)[0]!.state).toBe('running');
+  act(() => tree.unmount());
+  expect(native.listenerCount('state')).toBe(0);
+  expect(native.listenerCount('progress')).toBe(0);
+});
+
+it('follows a filter whose value changes', () => {
+  native.seedRows([row({id: 'a'}), row({id: 'b', key: 'other'})]);
+  const seen = newSeen();
+  const tree = mount(<Rows seen={seen} filter={{id: 'a'}} />);
+  expect(last(seen).map(r => r.id)).toEqual(['a']);
+  act(() => tree.update(<Rows seen={seen} filter={{id: 'b'}} />));
+  expect(last(seen).map(r => r.id)).toEqual(['b']);
+  act(() => tree.update(<Rows seen={seen} filter={{key: 'k'}} />));
+  expect(last(seen).map(r => r.id)).toEqual(['a']);
+  act(() => native.emit.state(row({id: 'b', key: 'other', state: 'running'})));
+  expect(last(seen).map(r => r.id)).toEqual(['a']);
 });
 
 it('re-renders on a state event, and only the progress hook on progress', () => {

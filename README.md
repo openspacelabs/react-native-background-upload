@@ -472,9 +472,16 @@ each `state` event updates the row it carries. Every component shares that
 copy, so the app does not keep its own.
 
 ```tsx
+// Take the hooks out of the client and the definition at module level. The
+// hooks lint rule checks `X.useY()` only when `X` starts with a capital
+// letter, so `uploads.useRequests()` inside a condition is not flagged.
+// `useRequests()` called as a plain name is checked.
+const { useRequests } = uploads;
+const { useRequests: useCaptureRows } = captureUpload;
+
 const CaptureBadge = ({ captureId }: { captureId: string }) => {
   // Typed vars: the rows of this definition only.
-  const rows = captureUpload.useRequests();
+  const rows = useCaptureRows();
   const pending = rows.filter(
     (row) => row.vars.captureId === captureId && row.state !== 'completed',
   );
@@ -485,13 +492,18 @@ const CaptureBadge = ({ captureId }: { captureId: string }) => {
 - `filter` is `{ key?, id?, includeCancelled? }`. `key` and `id` match as in
   `getRequests()`. Cancelled rows are left out unless `includeCancelled` is
   `true`. A cancelled row has no work left, and native forgets it at its ack.
+- Completed rows are included. A completed row stays until its outcome is
+  acknowledged. When its handler rejects or its key has no definition, the
+  outcome is not acknowledged, so the row stays for the whole session. Do not
+  treat a completed row as work still to do.
 - `useRequests()` re-renders when a row appears, changes state, or goes. A
   row's bytes are those of its last `state` event.
 - `useRequestsWithProgress()` also re-renders on each `progress` event of a
   row it returns, with that event's bytes. Use it only where bytes are shown.
 - The result is the same array while the rows it holds are the same, even
-  when the filter is a new object each render. The array and its rows are
-  shared, so do not change them.
+  when the filter is a new object each render. A component filtered by `id`
+  re-renders only when that row changes. The array and its rows are shared,
+  so do not change them.
 - `definition.useRequests(filter?)` and `definition.useRequestsWithProgress(filter?)`
   return the rows of that definition's key, with `vars` typed as its vars.
   The type is not checked at run time: `vars` is what native stored, so a
@@ -503,23 +515,30 @@ itself when its own call made native forget it: when the ack of a
 `completed` or `cancelled` outcome resolves, and when `cancel(id)` resolves
 on a settled entry. An `error` row stays until `cancel()` or a same-id
 `mutate()`, as in native. A same-id `mutate()` emits a `state` event, so it
-needs nothing extra.
+needs nothing extra. iOS can settle a live row during an ack with no event;
+after any ack whose row the copy does not show in the outcome's state, the
+library reads that row from native.
 
-Limits. While no hook or listener is mounted, the copy is not updated. The
-first one to mount checks it against native, so it can show the old rows
-for one render. When the native read fails, the library keeps the rows it
-has and sends a warning to `onWarning`. Any change that native makes with no
-event and that this library's JS did not start is missed until the next
-check. A review of the native enqueue, pause, resume, header, cancel and
-ack paths found no such change.
+Limits. While no hook or listener is mounted, the copy is not updated. Each
+time the first hook or listener subscribes, the library checks the copy
+against native, so a mount can show old rows for one render. When the
+native read fails, the library keeps the rows it has and sends a warning to
+`onWarning`. Any other change that native makes with no event is missed
+until the next check.
 
 ### `addRequestsListener(listener)` and `getCachedRequests(filter?)`
 The same rows outside React, for code such as a store or a logger.
-`addRequestsListener` calls `listener` with `getCachedRequests()` each time a
-row appears, changes state, or goes, and returns `{ remove }`. It keeps the
-copy up to date as a mounted hook does. `getCachedRequests(filter?)` returns
-the rows the hooks see. While nothing listens, it reads native first. Without
-`key` or `id` it returns the same array while nothing changed.
+`addRequestsListener` returns `{ remove }` and calls `listener` with
+`getCachedRequests()` each time those rows change. There is no call when it
+registers, so read `getCachedRequests()` after it returns. It keeps the copy
+up to date as a mounted hook does.
+
+`getCachedRequests(filter?)` returns the rows the hooks see. While nothing
+listens, it reads native on each call and returns a new array. While a hook
+or listener is mounted and the filter has no `key` or `id`, it returns the
+same array until a row changes. A result filtered by `key` or `id` is a new
+array on each call, so do not use it as a `useSyncExternalStore` snapshot;
+use the hooks.
 
 ### `takeDiagnostics(): Promise<Diagnostic[]>`
 The library's persisted diagnostic records, oldest first. Each call returns

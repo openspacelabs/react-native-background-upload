@@ -9,7 +9,8 @@ by each `state` event. It also removes a row when native forgets it with no
 event: after the ack of a `completed` or `cancelled` outcome, and after
 `cancel()` on a settled entry. The filter takes `includeCancelled`; cancelled
 rows are left out by default. `addRequestsListener()` and
-`getCachedRequests()` give the same rows outside React. An app that keeps its
+`getCachedRequests()` give the same rows outside React. Completed rows are
+included until their outcome is acknowledged. An app that keeps its
 own copy of `getRequests()` for display, and wraps `cancel()` to update it,
 can remove that code. Delivery, acks and cancel are unchanged. `define()`
 now returns the two hooks with `key` and `mutate`.

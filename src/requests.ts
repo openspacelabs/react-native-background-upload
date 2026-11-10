@@ -12,7 +12,6 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import type {
   AddListener,
-  Json,
   ProgressEvent,
   RequestRow,
   RequestsFilter,
@@ -29,7 +28,11 @@ const LIVE_STATES: readonly RequestState[] = [
   'paused',
 ];
 
-/** Deep equality for JSON values, as `vars` and rows hold them. */
+/**
+ * Deep equality for JSON values, as `vars` and rows hold them. A field set to
+ * `undefined` counts as absent. It allocates nothing, because it runs on
+ * every state event and on every row of a native read.
+ */
 export const jsonEqual = (a: unknown, b: unknown): boolean => {
   if (a === b) {
     return true;
@@ -42,38 +45,110 @@ export const jsonEqual = (a: unknown, b: unknown): boolean => {
   ) {
     return false;
   }
-  if (Array.isArray(a) !== Array.isArray(b)) {
+  const isArray = Array.isArray(a);
+  if (isArray !== Array.isArray(b)) {
     return false;
   }
-  if (Array.isArray(a)) {
-    const other = b as unknown[];
-    return (
-      a.length === other.length && a.every((v, i) => jsonEqual(v, other[i]))
-    );
+  if (isArray) {
+    const left = a as unknown[];
+    const right = b as unknown[];
+    if (left.length !== right.length) {
+      return false;
+    }
+    for (let i = 0; i < left.length; i++) {
+      if (!jsonEqual(left[i], right[i])) {
+        return false;
+      }
+    }
+    return true;
   }
-  const left = a as Record<string, Json | undefined>;
-  const right = b as Record<string, Json | undefined>;
-  const leftKeys = Object.keys(left).filter((k) => left[k] !== undefined);
-  const rightKeys = Object.keys(right).filter((k) => right[k] !== undefined);
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every((k) => jsonEqual(left[k], right[k]))
-  );
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  // Count the defined fields of each side; equal counts plus every left
+  // field equal means the same set of fields.
+  let fields = 0;
+  for (const k in left) {
+    if (left[k] === undefined) {
+      continue;
+    }
+    fields++;
+    if (!jsonEqual(left[k], right[k])) {
+      return false;
+    }
+  }
+  for (const k in right) {
+    if (right[k] !== undefined) {
+      fields--;
+    }
+  }
+  return fields === 0;
 };
 
-const sameItems = <T>(a: readonly T[], b: readonly T[]): boolean =>
-  a.length === b.length && a.every((item, i) => item === b[i]);
+/**
+ * Row equality. The scalar fields that change on most transitions are
+ * compared first, so a changed row is found without walking its `vars`.
+ * `vars` is always compared: a same-id mutate() can replace it.
+ */
+export const rowEqual = (a: RequestRow, b: RequestRow): boolean =>
+  a === b ||
+  (a.id === b.id &&
+    a.state === b.state &&
+    a.updatedAt === b.updatedAt &&
+    a.attempts === b.attempts &&
+    a.bytesSent === b.bytesSent &&
+    a.totalBytes === b.totalBytes &&
+    a.nextAttemptAt === b.nextAttemptAt &&
+    a.key === b.key &&
+    jsonEqual(a, b));
+
+const sameItems = <T>(a: readonly T[], b: readonly T[]): boolean => {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+};
 
 export const matches = (row: RequestRow, filter: RequestsFilter): boolean =>
   (filter.includeCancelled === true || row.state !== 'cancelled') &&
   (filter.key === undefined || row.key === filter.key) &&
   (filter.id === undefined || row.id === filter.id);
 
+// One id index per rows array. The cache makes a new array for each change,
+// so every id-filtered selector of that change shares one build.
+const indexes = new WeakMap<
+  readonly RequestRow[],
+  ReadonlyMap<string, RequestRow>
+>();
+
+/** The rows of `rows` by id, built once per array. */
+export const indexById = (
+  rows: readonly RequestRow[],
+): ReadonlyMap<string, RequestRow> => {
+  let index = indexes.get(rows);
+  if (!index) {
+    const built = new Map<string, RequestRow>();
+    for (const row of rows) {
+      built.set(row.id, row);
+    }
+    indexes.set(rows, built);
+    index = built;
+  }
+  return index;
+};
+
+const EMPTY: readonly RequestRow[] = [];
+
 /**
  * A read of `source()` narrowed by `filter`. It returns the same array while
  * the rows it keeps are the same objects, so a row it leaves out can change
  * without a new result. `useSyncExternalStore` then re-renders only when the
- * filtered rows change.
+ * filtered rows change. With an `id`, it looks the row up in the shared
+ * index and does not walk the rows.
  */
 export const createSelector = (
   source: () => readonly RequestRow[],
@@ -81,6 +156,24 @@ export const createSelector = (
 ): (() => readonly RequestRow[]) => {
   let lastSource: readonly RequestRow[] | undefined;
   let lastResult: readonly RequestRow[] | undefined;
+  if (filter.id !== undefined) {
+    const { id } = filter;
+    let lastRow: RequestRow | undefined;
+    return () => {
+      const rows = source();
+      if (rows === lastSource && lastResult) {
+        return lastResult;
+      }
+      lastSource = rows;
+      const row = indexById(rows).get(id);
+      const kept = row && matches(row, filter) ? row : undefined;
+      if (!lastResult || kept !== lastRow) {
+        lastRow = kept;
+        lastResult = kept ? [kept] : EMPTY;
+      }
+      return lastResult;
+    };
+  }
   return () => {
     const rows = source();
     if (rows === lastSource && lastResult) {
@@ -93,6 +186,36 @@ export const createSelector = (
     }
     return lastResult;
   };
+};
+
+// One selector per source and filter without an id, shared by every hook
+// that asks for it, so all unfiltered or same-key hooks filter the rows once
+// per change. The number of entries is the number of distinct keys used.
+const shared = new WeakMap<
+  () => readonly RequestRow[],
+  Map<string, () => readonly RequestRow[]>
+>();
+
+/** `createSelector()` for a filter without an id, shared per source. */
+export const sharedSelector = (
+  source: () => readonly RequestRow[],
+  filter: Omit<RequestsFilter, 'id'>,
+): (() => readonly RequestRow[]) => {
+  let bySource = shared.get(source);
+  if (!bySource) {
+    bySource = new Map();
+    shared.set(source, bySource);
+  }
+  const includeCancelled = filter.includeCancelled === true;
+  const name = `${includeCancelled ? 1 : 0}:${filter.key ?? ''}:${
+    filter.key === undefined ? 0 : 1
+  }`;
+  let selector = bySource.get(name);
+  if (!selector) {
+    selector = createSelector(source, { key: filter.key, includeCancelled });
+    bySource.set(name, selector);
+  }
+  return selector;
 };
 
 type RequestCacheDeps = {
@@ -140,11 +263,9 @@ export const createRequestCache = ({
   >();
   const rowListeners = new Set<Listener>();
   const progressListeners = new Set<Listener>();
-  let subscriptions: Array<{ remove: () => void }> = [];
-  // True from a native read until the next microtask. Native events arrive
-  // as new tasks, so none can be missed between a read and a subscribe in
-  // the same task, and the subscribe does not need to read again.
-  let fresh = false;
+  let stateSubscription: { remove: () => void } | undefined;
+  // Native progress is listened to only while a progress view is mounted.
+  let progressSubscription: { remove: () => void } | undefined;
 
   const notify = (listeners: Set<Listener>): void => {
     listeners.forEach((listener) => listener());
@@ -162,6 +283,15 @@ export const createRequestCache = ({
     }
     rows = next;
     withProgress = undefined;
+    // Progress of a row that left is not needed any more.
+    if (progress.size > 0) {
+      const index = indexById(next);
+      progress.forEach((_event, id) => {
+        if (!index.has(id)) {
+          forgetProgress(id);
+        }
+      });
+    }
     notify(rowListeners);
     notify(progressListeners);
   };
@@ -169,12 +299,7 @@ export const createRequestCache = ({
   /** Native's rows, or undefined when the read throws. */
   const readSafely = (): RequestRow[] | undefined => {
     try {
-      const current = readNative();
-      fresh = true;
-      void Promise.resolve().then(() => {
-        fresh = false;
-      });
-      return current;
+      return readNative();
     } catch (e) {
       warn(
         'requests: getRequests failed, so the cached rows were not checked against native',
@@ -192,10 +317,10 @@ export const createRequestCache = ({
     cachedRows: readonly RequestRow[],
     current: RequestRow[],
   ): readonly RequestRow[] => {
-    const cached = new Map(cachedRows.map((row) => [row.id, row]));
+    const cached = indexById(cachedRows);
     const next = current.map((row) => {
       const old = cached.get(row.id);
-      return old && jsonEqual(old, row) ? old : row;
+      return old && rowEqual(old, row) ? old : row;
     });
     return sameItems(next, cachedRows) ? cachedRows : next;
   };
@@ -222,27 +347,23 @@ export const createRequestCache = ({
 
   const remove = (id: string): void => {
     forgetProgress(id);
-    if (rows?.some((row) => row.id === id)) {
+    if (rows && indexById(rows).has(id)) {
       commit(rows.filter((row) => row.id !== id));
     }
   };
 
-  // A state event carries the full row, so it replaces the cached one. Its
-  // bytes are the row's own, so the progress seen before it is out of date.
-  const onState = (event: StateEvent): void => {
-    // The cached row is a plain row; the unhandled-key reason is the event's.
-    const row: StateEvent = { ...event };
-    delete row.reason;
+  /** Puts `row` in the cache, in place of the row with its id. */
+  const upsert = (row: RequestRow): void => {
     const hadProgress = forgetProgress(row.id);
     if (!rows) {
       return;
     }
-    const index = rows.findIndex((cached) => cached.id === row.id);
-    if (index < 0) {
+    const cached = indexById(rows).get(row.id);
+    if (!cached) {
       commit([...rows, row]);
       return;
     }
-    if (jsonEqual(rows[index], row)) {
+    if (rowEqual(cached, row)) {
       // The row is the same, but the progress view showed newer bytes.
       if (hadProgress) {
         withProgress = undefined;
@@ -250,11 +371,39 @@ export const createRequestCache = ({
       }
       return;
     }
-    commit(rows.map((cached, i) => (i === index ? row : cached)));
+    commit(rows.map((other) => (other === cached ? row : other)));
+  };
+
+  /** Asks native for one row: replaces it, or drops it when native has none. */
+  const refreshId = (id: string): void => {
+    const current = readSafely();
+    if (!current) {
+      return;
+    }
+    const row = current.find((candidate) => candidate.id === id);
+    if (row) {
+      upsert(row);
+    } else {
+      remove(id);
+    }
+  };
+
+  // A state event carries the full row, so it replaces the cached one. Its
+  // bytes are the row's own, so the progress seen before it is out of date.
+  const onState = (event: StateEvent): void => {
+    if (event.reason === 'unhandled-key') {
+      // JS builds this row from the journaled outcome, not from the entry.
+      // A same-id mutate() may have reopened the entry since, so ask native.
+      if (rows) {
+        refreshId(event.id);
+      }
+      return;
+    }
+    upsert(event);
   };
 
   const onProgress = (event: ProgressEvent): void => {
-    if (!rows?.some((row) => row.id === event.id)) {
+    if (!rows || !indexById(rows).has(event.id)) {
       return;
     }
     progress.set(event.id, event);
@@ -266,23 +415,27 @@ export const createRequestCache = ({
     rowListeners.size + progressListeners.size > 0;
 
   const start = (): void => {
-    subscriptions = [
-      addListener('state', onState),
-      addListener('progress', onProgress),
-    ];
-    // Rows kept from an earlier listener can have missed events.
-    if (!fresh || !rows) {
-      refresh();
-    }
+    stateSubscription = addListener('state', onState);
+    // Always check: an event emitted between an earlier read (a render) and
+    // this subscribe went to no listener. reconcile() keeps the same array
+    // when nothing changed, so this adds no render.
+    refresh();
   };
 
   // The rows stay, so a component that replaces the last listener in one
   // commit does not render twice. The next start() checks them against native.
   const stop = (): void => {
-    subscriptions.forEach((subscription) => subscription.remove());
-    subscriptions = [];
-    // Whatever changes from here on is checked at the next start().
-    fresh = false;
+    stateSubscription?.remove();
+    stateSubscription = undefined;
+  };
+
+  const startProgress = (): void => {
+    progressSubscription = addListener('progress', onProgress);
+  };
+
+  const stopProgress = (): void => {
+    progressSubscription?.remove();
+    progressSubscription = undefined;
     progress.clear();
     overlaid.clear();
     withProgress = undefined;
@@ -292,15 +445,23 @@ export const createRequestCache = ({
     (listeners: Set<Listener>) =>
     (listener: Listener): (() => void) => {
       const first = !listening();
+      const firstProgress =
+        listeners === progressListeners && listeners.size === 0;
       // A wrapper, so the same function subscribed twice is two entries.
       const entry = () => listener();
       listeners.add(entry);
+      if (firstProgress) {
+        startProgress();
+      }
       if (first) {
         start();
       }
       return () => {
         if (!listeners.delete(entry)) {
           return;
+        }
+        if (listeners === progressListeners && listeners.size === 0) {
+          stopProgress();
         }
         if (!listening()) {
           stop();
@@ -313,6 +474,10 @@ export const createRequestCache = ({
       return withProgress;
     }
     const base = ensureRows();
+    if (progress.size === 0) {
+      withProgress = base;
+      return base;
+    }
     const next = base.map((row) => {
       const event = progress.get(row.id);
       if (!event) {
@@ -335,37 +500,37 @@ export const createRequestCache = ({
   };
 
   const acked = ({ id, kind }: { id: string; kind: string }): void => {
-    // Native forgets a row at the ack of its completed or cancelled outcome.
-    // An error row stays until cancel() or a same-id mutate().
-    if (kind !== 'completed' && kind !== 'cancelled') {
-      return;
-    }
-    const row = rows?.find((cached) => cached.id === id);
+    const row = rows ? indexById(rows).get(id) : undefined;
     if (!row) {
       return;
     }
+    if (kind === 'error') {
+      // Native keeps an error row. iOS can move a live row to its outcome
+      // during the ack with no event, so a row not shown as an error is
+      // checked.
+      if (row.state !== 'error') {
+        refreshId(id);
+      }
+      return;
+    }
+    if (kind !== 'completed' && kind !== 'cancelled') {
+      return;
+    }
+    // Native forgets a row at the ack of its completed or cancelled outcome.
     if (row.state === kind) {
       remove(id);
       return;
     }
     // The row moved on, for example a cancelled entry that a same-id
-    // mutate() reopened, whose old ack does not forget it. Ask native.
-    const current = readSafely();
-    if (!current) {
-      return;
-    }
-    const native = current.find((candidate) => candidate.id === id);
-    if (!native) {
-      remove(id);
-    } else if (!jsonEqual(native, row)) {
-      onState(native);
-    }
+    // mutate() reopened, whose old ack does not forget it; or a live row that
+    // native settled and forgot during the ack. Ask native.
+    refreshId(id);
   };
 
   const cancelled = (id: string): void => {
     // A settled entry is forgotten at once, with no event. A live one
     // settles 'cancelled' with an event, and its ack forgets it.
-    const row = rows?.find((cached) => cached.id === id);
+    const row = rows ? indexById(rows).get(id) : undefined;
     if (row && !LIVE_STATES.includes(row.state)) {
       remove(id);
     }
@@ -377,8 +542,15 @@ export const createRequestCache = ({
     subscribe: subscriber(rowListeners),
     subscribeWithProgress: subscriber(progressListeners),
     read: () => {
-      if (!listening()) {
-        refresh();
+      if (listening()) {
+        return rows ?? [];
+      }
+      // Nothing listens, so nothing holds these rows: take native's as they
+      // are. The next start() reconciles them.
+      const current = readSafely();
+      if (current) {
+        rows = current;
+        withProgress = undefined;
       }
       return rows ?? [];
     },
@@ -401,7 +573,10 @@ export const useRequestRows = (
   const id = filter?.id;
   const includeCancelled = filter?.includeCancelled === true;
   const getSnapshot = useMemo(
-    () => createSelector(source, { key, id, includeCancelled }),
+    () =>
+      id === undefined
+        ? sharedSelector(source, { key, includeCancelled })
+        : createSelector(source, { key, id, includeCancelled }),
     [source, key, id, includeCancelled],
   );
   return useSyncExternalStore(subscribe, getSnapshot);
