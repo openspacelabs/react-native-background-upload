@@ -250,6 +250,33 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertNotNil(partTask(3), "built and sent after the backoff")
   }
 
+  func testFailedEntrySaveKeepsTheMovedCaptureForASameIdRetry() throws {
+    let src = h.root.appendingPathComponent("capture.mp4")
+    writeFile(src, bytes: 50)
+    // A non-empty directory where entry.json goes: the move works but the
+    // save fails, as on a full disk.
+    let blocker = h.store.fileURL("cap", QueueStore.entryName)
+    writeFile(blocker.appendingPathComponent("x"), "x")
+    guard case .failure(let rejected) = h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, source: src))
+    else { return XCTFail("enqueue resolved") }
+    XCTAssertEqual(rejected.code, "E_STORAGE")
+    XCTAssertTrue(rejected.message.hasPrefix("enqueue: cannot save 'cap': "), rejected.message)
+    XCTAssertFalse(FileIO.exists(src), "moved into the library")
+    let blobs = try FileManager.default.contentsOfDirectory(atPath: h.store.dir("cap").path)
+      .filter { $0.hasPrefix(BodyStaging.blobPrefix) }
+    XCTAssertEqual(blobs.count, 1, "the moved capture is the only copy: it stays")
+    XCTAssertEqual(FileIO.size(h.store.fileURL("cap", blobs.first ?? "-")), 50)
+    XCTAssertNil(h.row("cap"))
+    XCTAssertTrue(h.transport.live.isEmpty)
+
+    // The disk has room again. The caller's file is gone: the retry adopts the blob.
+    try FileManager.default.removeItem(at: blocker)
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5, source: src)).get()
+    XCTAssertEqual(h.store.load("cap")?.bodyPath, blobs.first)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(h.transport.live.count, 5, "a task for every part")
+  }
+
   func testPart401ParksTheWholeEntryAndHeadersResumeIt() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 50, parts: 5)).get()
     h.complete(try XCTUnwrap(partTask(0)))

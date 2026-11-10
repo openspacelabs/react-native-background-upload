@@ -9,6 +9,12 @@ Past the cap the response settles `error` with `errorKind: 'http'`. A rule for
 first. The defaults are unchanged. `configure()` now validates `retry` the way
 `mutate()` does, before it changes any setting.
 
+iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
+entry, for example on a full disk. The library had already moved the
+caller's file into its queue, so this deleted the only copy. The file now
+stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
+uses it, as Android already did.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
