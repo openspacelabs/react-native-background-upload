@@ -268,7 +268,7 @@ describe('takeDiagnostics', () => {
         unownedBytes: 4096,
         unownedIds: ['cap-1', 'cap-2'],
       },
-      orphans: { dirs: 1 },
+      orphans: { dirs: 1, removedBytes: 2048 },
     });
     fake.seedBootSnapshot();
     const records = await fake.takeDiagnostics();
@@ -285,7 +285,7 @@ describe('takeDiagnostics', () => {
           unownedBytes: 4096,
           unownedIds: ['cap-1', 'cap-2'],
         },
-        orphans: { dirs: 1, bytes: 0 },
+        orphans: { dirs: 1, bytes: 0, removedDirs: 0, removedBytes: 2048 },
       },
       {
         v9Leftovers: {
@@ -295,7 +295,7 @@ describe('takeDiagnostics', () => {
           unownedBytes: 0,
           unownedIds: [],
         },
-        orphans: { dirs: 0, bytes: 0 },
+        orphans: { dirs: 0, bytes: 0, removedDirs: 0, removedBytes: 0 },
       },
     ]);
   });

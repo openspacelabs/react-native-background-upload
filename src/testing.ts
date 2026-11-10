@@ -620,7 +620,13 @@ export const createFakeNative = (
             unownedIds: [],
             ...counts.v9Leftovers,
           },
-          orphans: { dirs: 0, bytes: 0, ...counts.orphans },
+          orphans: {
+            dirs: 0,
+            bytes: 0,
+            removedDirs: 0,
+            removedBytes: 0,
+            ...counts.orphans,
+          },
         },
       });
     },

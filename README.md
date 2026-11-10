@@ -491,17 +491,50 @@ not overlap: `legacyRows + unownedUploads` is the number of v9 ids left.
 - `unownedIds`: the upload ids of those directories, sorted, at most 100.
   `unownedUploads` stays exact when there are more.
 
-Its `data.orphans` (`{ dirs, bytes }`) counts the other directories with no
-entry file. These are the library's own leftovers, such as the file of an
-enqueue whose save failed. They are not v9 work. On Android a directory with
-only a `blob` and no manifest counts here, because a v10 chunked upload also
-uses that name.
+Its `data.orphans` (`{ dirs, bytes, removedDirs, removedBytes }`) is about
+the other directories with no entry file. These are the library's own
+leftovers, from a crash between staging a body and saving its entry, or from
+an enqueue whose entry save failed. They are not v9 work. On Android a
+directory with only a `blob` and no manifest counts here, because a v10
+chunked upload also uses that name.
 
-The count lists directories and reads file sizes. It opens no file and
-changes nothing. It runs after the start has scheduled queued work. When a
-directory cannot be read, a `warn` record comes before the snapshot, and the
-counts leave that directory out. On a clean install every count is 0. Zeros
-are reported, not left out.
+At each start the library deletes some of these directories by itself, so
+the app has nothing to do. It deletes a directory only when all of these
+are true:
+
+- It has no entry file.
+- It is not v9: no v9 manifest, and on iOS no file named exactly `blob`.
+- Every file in it is a request body the library copied or wrote, or the
+  temporary file of such a write. The caller still has the source of each
+  of these. On Android the names are `body-<n>.json`, `body-<n>.multipart`,
+  `file-<n>`, each with or without `.tmp`, and `entry.json.tmp`. On iOS they
+  are `body-<uuid>`, `body-<uuid>.tmp` and `entry.json.tmp`.
+- The newest file in it, and the directory itself, changed more than 24
+  hours before the start.
+
+It never deletes a directory that holds anything else, such as a
+subdirectory or a file it does not know. It never deletes a chunked file
+(Android `blob` or `blob-<n>`, iOS `blob-<uuid>`). The library moved that
+file in from the caller, so it can be the only copy of the bytes. A
+`mutate()` with the same id still uses it, as after an enqueue that rejected
+`E_STORAGE`. `cancel(id)` deletes it.
+
+`dirs` and `bytes` count what is left after this cleanup. `removedDirs` and
+`removedBytes` count what it deleted. When a delete fails, a `warn` record
+comes before the snapshot, the directory stays, and the cleanup goes on with
+the next one.
+
+The count lists directories and reads file sizes. It opens no file. It runs
+after the start has scheduled queued work, and so does the cleanup, which
+looks only at the directories the count found. On Android both run on the
+module's queue thread, after the boot sweep. On iOS the count runs on a
+background queue, then the cleanup runs as one block on the queue that also
+runs every enqueue. That block runs before or after the relaunch reconcile,
+never during it. On both platforms no enqueue can be in progress while the
+cleanup runs, and it checks for the entry file again just before each
+delete. When a directory cannot be read, a `warn` record comes before the
+snapshot, and the counts leave that directory out. On a clean install every
+count is 0. Zeros are reported, not left out.
 
 Android keeps the newest 50 records. They are the module's warnings and
 errors, including those from background runs that had no JS, and the boot
@@ -518,8 +551,8 @@ those are due more than 24 hours out, the highest run attempt count, and how
 many queued or running entries had no run at all.
 
 On iOS the boot record has only `v9Leftovers` and `orphans`. The other iOS
-records are the warnings of the count, and a warning when `cancel(id)`
-cannot delete an unowned directory. iOS keeps its records in memory, the
+records are the warnings of the count and of the orphan cleanup, and a
+warning when `cancel(id)` cannot delete an unowned directory. iOS keeps its records in memory, the
 newest 50, so a record that no `takeDiagnostics()` took is gone when the
 process ends. The next launch counts again.
 
@@ -574,7 +607,8 @@ What happens to work a v9 build left behind:
   uploads with no row and their bytes. The library never deletes them by
   itself, because only the app knows which v9 ids it will still send. When
   every device reports zeros, the v9 paths can go. `data.orphans` is not v9
-  work and does not count toward this. A v9 upload with no row is known to
+  work and does not count toward this. The start-up cleanup of orphans never
+  deletes v9 files. A v9 upload with no row is known to
   the app only by its id, so the record lists them in
   `v9Leftovers.unownedIds`. Compare these ids with the transfers the app
   still means to send, and `cancel(id)` the rest. Otherwise the count never
