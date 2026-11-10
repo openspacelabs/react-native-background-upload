@@ -699,18 +699,68 @@ class QueueControllerTest {
     }
   }
 
-  @Test
-  fun `a failed settings write rejects with the cause in the message`() {
+  /** Runs [block] while the settings file cannot be written. Entry directories that already exist stay writable. */
+  private fun withSettingsUnwritable(block: () -> Unit) {
     root.setWritable(false)
-    val e = try {
-      assertThrows(java.io.IOException::class.java) { controller.setWifiOnly(true) }
+    try {
+      block()
     } finally {
       root.setWritable(true)
     }
-    // UploaderModule.onQueue rejects E_STORAGE with this message.
-    val message = StorageCause.rejectMessage(e)
-    assertTrue(message, message.startsWith(e.message!!))
-    assertTrue(message, message.endsWith(" (cause: java.io.FileNotFoundException)"))
+  }
+
+  private fun savedSettings() = QueueSettingsStore(File(root, "settings.json")).load()
+
+  @Test
+  fun `setWifiOnly does not throw when the settings can not be written, and this session uses the value`() {
+    withSettingsUnwritable { controller.setWifiOnly(true) }
+    assertTrue(settings.load().wifiOnly)
+    assertFalse("the saved copy is behind", savedSettings().wifiOnly)
+  }
+
+  @Test
+  fun `updateHeaders patches and requeues when the settings can not be written`() {
+    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    withSettingsUnwritable { controller.updateHeaders(mapOf("Authorization" to "Bearer new")) }
+    assertEquals(1, settings.load().headerGeneration)
+    val p = store.load("p")!!
+    assertEquals(EntryState.QUEUED, p.state)
+    assertEquals("Bearer new", p.descriptor!!.headers["Authorization"])
+    assertEquals(1, p.headerGeneration)
+    assertEquals(listOf("p"), scheduler.scheduled)
+    assertEquals(0, savedSettings().headerGeneration)
+  }
+
+  @Test
+  fun `pause and resume move rows when the settings can not be written`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    withSettingsUnwritable { controller.pause() }
+    assertEquals(EntryState.PAUSED, store.load("q")!!.state)
+    assertTrue(settings.load().paused)
+    withSettingsUnwritable { controller.resume() }
+    assertEquals(EntryState.QUEUED, store.load("q")!!.state)
+    assertFalse(settings.load().paused)
+  }
+
+  @Test
+  fun `the next settings call saves a value that is behind`() {
+    withSettingsUnwritable { controller.setWifiOnly(true) }
+    controller.setWifiOnly(true) // the same value
+    assertTrue(savedSettings().wifiOnly)
+  }
+
+  @Test
+  fun `the header generation does not go back after a relaunch that read an older settings file`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    withSettingsUnwritable { controller.updateHeaders(mapOf("Authorization" to "t1")) }
+    assertEquals(1, store.load("q")!!.headerGeneration)
+    // A new process reads settings.json, which still holds 0.
+    val relaunched = QueueSettingsStore(File(root, "settings.json"))
+    val c = QueueController(store, journal, relaunched, events, scheduler, { it in running }, { now })
+    c.updateHeaders(mapOf("Authorization" to "t2"))
+    // A worker that sent t1 under generation 1 and gets a 401 must see newer headers.
+    assertEquals(2, relaunched.load().headerGeneration)
+    assertEquals(2, store.load("q")!!.headerGeneration)
   }
 
   @Test

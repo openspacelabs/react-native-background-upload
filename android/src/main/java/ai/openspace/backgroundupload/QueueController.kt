@@ -307,6 +307,11 @@ class QueueController(
     generation = e.generation,
   )
 
+  /**
+   * The settings calls (this one, [pause], [resume], [configureRetry],
+   * [updateHeaders]) never throw for a failed settings write. See
+   * [QueueSettingsStore.update].
+   */
   fun setWifiOnly(enabled: Boolean) {
     settings.update { it.copy(wifiOnly = enabled) }
   }
@@ -323,7 +328,11 @@ class QueueController(
    * entry and re-issues, or parks first and is requeued here.
    */
   fun updateHeaders(patch: Map<String, String>) {
-    val s = settings.update { it.copy(headerGeneration = it.headerGeneration + 1) }
+    // Above every entry's value too. After a failed settings write and a
+    // relaunch, the file can hold an older generation than the entries, and
+    // a 401 under the newest one must still see newer headers.
+    val entriesMax = store.all().maxOfOrNull { it.headerGeneration } ?: 0
+    val s = settings.update { it.copy(headerGeneration = maxOf(it.headerGeneration, entriesMax) + 1) }
     val now = clock()
     val unparkedIds = mutableSetOf<String>()
     val changed = transformAll { e ->

@@ -68,6 +68,14 @@ class QueueSettingsStore(private val file: File) {
 
   private var cached: QueueSettings? = null
 
+  /**
+   * True while the file holds an older value than the cache, because a
+   * write failed. The next [update] and [saveIfBehind] try again.
+   */
+  @get:Synchronized
+  var isBehind = false
+    private set
+
   @Synchronized
   fun load(): QueueSettings {
     cached?.let { return it }
@@ -78,18 +86,50 @@ class QueueSettingsStore(private val file: File) {
   }
 
   /**
-   * Throws IOException when the write fails. The cache then keeps the old
-   * value. A [transform] that changes nothing writes nothing, so a call such
-   * as setWifiOnly() at every app start does not fail on a full disk.
+   * Applies [transform] to the cache at once, then writes the file. A failed
+   * write does not throw: this process uses the new value, a warning is
+   * recorded, and the file stays behind until a later write lands. Until
+   * then, a new process (a background relaunch with no JS) reads the older
+   * value.
+   *
+   * A [transform] that changes nothing writes nothing, unless the file is
+   * behind. So a call such as setWifiOnly() at every app start does not
+   * write on a full disk.
    */
   @Synchronized
   fun update(transform: (QueueSettings) -> QueueSettings): QueueSettings {
     val current = load()
     val next = transform(current)
-    if (next == current) return current
-    AtomicFiles.writeText(file, gson.toJson(next))
+    if (next == current) {
+      saveIfBehind()
+      return current
+    }
     cached = next
+    write(next)
     return next
+  }
+
+  /** Writes the cache when an earlier write failed. The module calls it when the app comes to the foreground. */
+  @Synchronized
+  fun saveIfBehind() {
+    if (isBehind) write(load())
+  }
+
+  private fun write(s: QueueSettings) {
+    try {
+      AtomicFiles.writeText(file, gson.toJson(s))
+      isBehind = false
+    } catch (e: Exception) {
+      // Only the first failure in a row is persisted, so retries on a full
+      // disk do not crowd the diagnostic log.
+      Diag.warn(
+        "could not save the queue settings; this session uses the new value, and the next settings " +
+          "call or app foreground tries again" + StorageCause.suffix(e),
+        e,
+        persist = !isBehind,
+      )
+      isBehind = true
+    }
   }
 
   // Gson does not run constructors, so absent fields read as null or 0.
