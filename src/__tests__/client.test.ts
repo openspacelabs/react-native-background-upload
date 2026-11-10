@@ -636,6 +636,72 @@ describe('end to end', () => {
     expect(order).toEqual([`caller ${id}`, `handler ${id}`]);
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
   });
+
+  it('waits past enqueueTimeoutMs for a slow native, warns once, and still runs the handler after the caller', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const client = createUploadClient();
+      const order: string[] = [];
+      const create = client.define({
+        key: 'item.create',
+        request: ({ n }: { n: number }) => ({
+          url: `https://x/${n}`,
+          data: { n },
+        }),
+        onSuccess: (_data, _vars, meta) => {
+          order.push(`handler ${meta.id}`);
+        },
+      });
+      client.configure({ enqueueTimeoutMs: 30 });
+      await flush();
+      let resolveEnqueue!: (id: string) => void;
+      native.enqueue.mockImplementationOnce(
+        (entry: { id: string }) =>
+          new Promise<string>((resolve) => {
+            resolveEnqueue = () => resolve(entry.id);
+          }),
+      );
+      const pending = create.mutate({ n: 1 }).then(
+        ({ id }) => {
+          order.push(`caller ${id}`);
+          return id;
+        },
+        (e: Error) => {
+          order.push(`rejected ${e.message}`);
+        },
+      );
+      await flush();
+      const { id } = native.enqueue.mock.calls.at(-1)![0];
+      // Native stored the entry and settled it, but its enqueue answer is
+      // late, as when the iOS queue is busy with another chunked file.
+      fire('settled', {
+        eventId: 'e1',
+        id,
+        key: 'item.create',
+        vars: { n: 1 },
+        at: 10,
+        attempts: 1,
+        kind: 'completed',
+        response: { status: 200, bodyTruncated: false },
+        state: 'completed',
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      expect(order).toEqual([]);
+      expect(native.ackEvents).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toMatch(
+        `native enqueue for "item.create" (id ${id}) has not answered after 30 ms`,
+      );
+      resolveEnqueue(id);
+      await pending;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(order).toEqual([`caller ${id}`, `handler ${id}`]);
+      expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('with a fake native', () => {
