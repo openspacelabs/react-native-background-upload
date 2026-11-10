@@ -394,10 +394,20 @@ class QueueController(
    *    landed but the forget did not. Forget it.
    * 5. Schedule every queued entry, and the expiry wake of every parked one.
    *
+   * 6. Delete the orphan directories that hold only copied bodies and are
+   *    older than [QueueStore.ORPHAN_MIN_AGE_MS] ([QueueStore.removeOrphans]).
+   *
    * Then it writes the boot snapshot, on every start. The leftover count
-   * in it runs after step 5, so it never delays queued work. It costs one
-   * directory listing and a few file checks per id directory, less than the
-   * entry reads above.
+   * and step 6 run after step 5, so they never delay queued work. The
+   * count costs one directory listing and a few file checks per id
+   * directory, less than the entry reads above. Step 6 looks only at the
+   * orphans the count listed: one more listing of each, and the deletes.
+   *
+   * Step 6 can not delete the directory of an enqueue in progress: the
+   * sweep and every enqueue run on the same single-thread executor
+   * ([UploaderModule.queueExecutor]), so no enqueue is between staging and
+   * its entry save while step 6 runs. Step 6 also checks for `entry.json`
+   * under the store lock, which every entry save takes.
    */
   fun sweep() {
     val now = clock()
@@ -462,9 +472,13 @@ class QueueController(
     // Every start, even an idle one: a v9 leftover count of zero is a value
     // the app reports. It replaces a snapshot JS has not taken yet, so
     // launches with no takeDiagnostics() do not push out real warnings.
+    // The orphan cleanup runs here, after the work above is scheduled, on
+    // this executor, so no enqueue is staging meanwhile.
+    val counted = store.countLeftovers(legacyIds)
+    val removed = store.removeOrphans(counted.orphanDirs, now)
     Diag.info(
       BootSnapshot.MESSAGE,
-      BootSnapshot.of(found, runs, now, store.countLeftovers(legacyIds)),
+      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed)),
       replaceUntaken = true,
     )
     changed.forEach { events.state(it.toRow()) }
