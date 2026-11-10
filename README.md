@@ -394,7 +394,7 @@ outcomes. A second call updates the settings and does not replay again.
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
 | `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and it waits behind earlier enqueues, so a large file takes longer. |
-| `onWarning` | `(message, detail?) => void`. Receives every library warning instead of `console.warn`: a slow enqueue, a slow or rejected handler, a failed ack, and the rest. `detail` is the error or event, when there is one. Warnings raised before `configure()` go to `console.warn`. If the sink throws, the warning and the throw go to `console.warn`. |
+| `onWarning` | `(message, detail?) => void`. Receives every warning that the library's JavaScript raises, instead of `console.warn`: a slow enqueue, a slow or rejected handler, a failed ack, and the rest. Native warnings do not come here; read them with `takeDiagnostics()`. `detail` is the error or event, when there is one. Warnings raised before `configure()` go to `console.warn`. If the sink throws, the warning and the throw go to `console.warn`. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(scope?): Promise<void>` and `resume(scope?): Promise<void>`

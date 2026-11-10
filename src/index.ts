@@ -105,9 +105,10 @@ export const createUploadClient = ({
   // registered twice is removed one subscription at a time.
   const stateListeners = new Set<{ listener: (event: StateEvent) => void }>();
 
-  // Every library warning goes through here. The registry and delivery
-  // capture this function when the client is built, before configure(), so
-  // it reads the sink at each call: a sink set later is used from then on.
+  // Every warning the JS layer raises goes through here. The registry and
+  // delivery capture this function when the client is built, before
+  // configure(), so it reads the sink at each call: a sink set later is used
+  // from then on. Native warnings go to takeDiagnostics() instead.
   const warn = (message: string, detail?: unknown): void => {
     const sink = settings.onWarning;
     if (sink) {

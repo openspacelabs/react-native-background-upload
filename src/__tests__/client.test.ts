@@ -747,7 +747,7 @@ describe('onWarning', () => {
   });
   afterEach(() => consoleWarn.mockRestore());
 
-  it('receives every library warning, with its detail, instead of console.warn', async () => {
+  it('receives every JS warning, with its detail, instead of console.warn', async () => {
     const onWarning = jest.fn();
     const { fake, client, failing } = setupClient(onWarning);
     await flush();

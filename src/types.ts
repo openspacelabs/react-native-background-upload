@@ -373,9 +373,11 @@ export type ConfigureOptions = {
    */
   enqueueTimeoutMs?: number;
   /**
-   * Receives every library warning instead of `console.warn`: a slow native
-   * enqueue, a slow or rejected handler, a failed ack, and the rest.
-   * `detail` is the error or event the warning is about, when there is one.
+   * Receives every warning that the library's JavaScript raises, instead of
+   * `console.warn`: a slow native enqueue, a slow or rejected handler, a
+   * failed ack, and the rest. Native warnings do not come here; read them
+   * with `takeDiagnostics()`. `detail` is the error or event the warning is
+   * about, when there is one.
    * Warnings raised before `configure()` go to `console.warn`. If the sink
    * throws, the warning and the throw go to `console.warn`.
    */

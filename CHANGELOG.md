@@ -37,11 +37,12 @@ fires. If native never answers, which is a native bug, `mutate()` stays
 pending and the warning is the only signal. Do not await `mutate()` where a
 wait blocks other work.
 
-Added `configure({ onWarning })`. When set, every library warning goes to it
-instead of `console.warn`, with the error or event as a second argument. An
-app can send the slow-enqueue warning, and the others, to its error tracker.
-Warnings raised before `configure()` still go to `console.warn`, and so does
-a warning whose sink throws.
+Added `configure({ onWarning })`. When set, every warning that the library's
+JavaScript raises goes to it instead of `console.warn`, with the error or
+event as a second argument. An app can send the slow-enqueue warning, and
+the others, to its error tracker. Warnings raised before `configure()` still
+go to `console.warn`, and so does a warning whose sink throws. Native
+warnings do not go to `onWarning`; read them with `takeDiagnostics()`.
 
 Added `holdNext('enqueue')` to `createFakeNative()`. The next enqueue stays
 pending until the returned function is called, so a test can model a native
