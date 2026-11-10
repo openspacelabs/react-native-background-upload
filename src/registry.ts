@@ -16,8 +16,8 @@ export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
  * How long mutate() waits for native enqueue() before it warns. mutate()
  * keeps waiting after the warning and settles only with native's answer.
  * Enqueue includes the time to stage a copy of a `file` body and of form
- * `path` parts, and on iOS it waits behind earlier enqueues, so a large file
- * takes longer.
+ * `path` parts, and it waits behind earlier enqueues, so a large file takes
+ * longer.
  */
 export const DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000;
 /**
@@ -59,6 +59,7 @@ export type Settings = {
   maxVarsBytes: number;
   headers?: () => Record<string, string>;
   retry?: Partial<RetryPolicy>;
+  onWarning?: (message: string, detail?: unknown) => void;
 };
 
 /**

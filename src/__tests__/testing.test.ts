@@ -508,3 +508,75 @@ describe('reset', () => {
     }
   });
 });
+
+describe('holdNext', () => {
+  const peek = (promise: Promise<unknown>): Promise<unknown> =>
+    Promise.race([promise, Promise.resolve('pending')]);
+
+  it('holds the next enqueue until released, then stores, emits and resolves', async () => {
+    const fake = createFakeNative();
+    const states = jest.fn();
+    fake.onState(states);
+    const release = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    await flush();
+    expect(await peek(pending)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    expect(states).not.toHaveBeenCalled();
+    release();
+    await expect(pending).resolves.toBe('a');
+    expect(fake.entries).toHaveLength(1);
+    expect(states).toHaveBeenCalledTimes(1);
+    // Only the next call is held.
+    await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
+  });
+
+  it('applies a failNext failure when the held call is released', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    fake.failNext('enqueue', 'E_STORAGE', 'disk full');
+    release();
+    await expect(pending).rejects.toMatchObject({
+      code: 'E_STORAGE',
+      message: 'disk full',
+    });
+    expect(fake.entries).toEqual([]);
+  });
+
+  it('uses holds in order and ignores a second release', async () => {
+    const fake = createFakeNative();
+    const releaseFirst = fake.holdNext('enqueue');
+    const releaseSecond = fake.holdNext('enqueue');
+    const first = fake.enqueue(entry({ id: 'a' }));
+    const second = fake.enqueue(entry({ id: 'b' }));
+    releaseSecond();
+    await expect(second).resolves.toBe('b');
+    expect(await peek(first)).toBe('pending');
+    releaseFirst();
+    releaseFirst();
+    await expect(first).resolves.toBe('a');
+    expect(fake.entries.map((e) => e.id)).toEqual(['b', 'a']);
+  });
+
+  it('cancels the hold when released before the call is made', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    release();
+    await expect(fake.enqueue(entry())).resolves.toBe('a');
+  });
+
+  it('drops held calls and unused holds on reset()', async () => {
+    const fake = createFakeNative();
+    const releaseHeld = fake.holdNext('enqueue');
+    const releaseUnused = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    fake.reset();
+    releaseHeld();
+    releaseUnused();
+    await flush();
+    expect(await peek(pending)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
+  });
+});

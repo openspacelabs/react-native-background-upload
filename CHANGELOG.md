@@ -1,19 +1,30 @@
 ## Unreleased
 
-`mutate()` no longer rejects when native is slow to answer. Before, it
+Behavior change: `mutate()` no longer rejects when native is slow to answer. Before, it
 rejected after `enqueueTimeoutMs` (default 10 s) even though native could
 still store the entry and upload it. On iOS a large chunked file can hold
 the native queue while its part tasks are built, so the next `mutate()`
 timed out, the app recorded a failure, and the request uploaded anyway.
 Now `mutate()` warns one time at `enqueueTimeoutMs` and keeps waiting. It
-resolves when native stored the entry and rejects only with native's own
-error (`E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`, `E_STORAGE`). An app that
+resolves when native stored the entry. After it reaches native, it rejects
+only with native's own error (`E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`,
+`E_STORAGE`). An app that
 treated the timeout rejection as a failure no longer gets it. The outcomes
 of that id wait for the answer too, so a handler still never runs before
 the caller has the id. `enqueueTimeoutMs` stays and sets when the warning
 fires. If native never answers, which is a native bug, `mutate()` stays
 pending and the warning is the only signal. Do not await `mutate()` where a
 wait blocks other work.
+
+Added `configure({ onWarning })`. When set, every library warning goes to it
+instead of `console.warn`, with the error or event as a second argument. An
+app can send the slow-enqueue warning, and the others, to its error tracker.
+Warnings raised before `configure()` still go to `console.warn`, and so does
+a warning whose sink throws.
+
+Added `holdNext('enqueue')` to `createFakeNative()`. The next enqueue stays
+pending until the returned function is called, so a test can model a native
+that is slow to answer.
 
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the

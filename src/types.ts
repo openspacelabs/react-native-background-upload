@@ -335,10 +335,18 @@ export type ConfigureOptions = {
    * warns one time. `mutate()` keeps waiting after the warning: it resolves
    * when native stored the entry and rejects only with native's own error.
    * Enqueue includes the time to stage a copy of a `file` body and of form
-   * `path` parts, and on iOS it waits behind earlier enqueues, so a large
-   * file takes longer.
+   * `path` parts, and it waits behind earlier enqueues, so a large file
+   * takes longer.
    */
   enqueueTimeoutMs?: number;
+  /**
+   * Receives every library warning instead of `console.warn`: a slow native
+   * enqueue, a slow or rejected handler, a failed ack, and the rest.
+   * `detail` is the error or event the warning is about, when there is one.
+   * Warnings raised before `configure()` go to `console.warn`. If the sink
+   * throws, the warning and the throw go to `console.warn`.
+   */
+  onWarning?: (message: string, detail?: unknown) => void;
   android?: Partial<AndroidNotificationConfig>;
 };
 

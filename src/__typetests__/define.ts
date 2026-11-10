@@ -297,3 +297,16 @@ client.define({
   // @ts-expect-error wifiOnly is a boolean
   request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
 });
+
+// onWarning takes a message and an optional detail.
+client.configure({
+  onWarning: (_message, _detail) => {
+    assertEqual<typeof _message, string>(true);
+    assertEqual<typeof _detail, unknown>(true);
+  },
+});
+client.configure({ onWarning: (_message: string) => undefined });
+// @ts-expect-error onWarning is a function
+client.configure({ onWarning: 'console' });
+// @ts-expect-error the message is a string
+client.configure({ onWarning: (_message: number) => undefined });

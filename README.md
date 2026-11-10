@@ -393,7 +393,8 @@ outcomes. A second call updates the settings and does not replay again.
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
-| `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and on iOS it waits behind earlier enqueues, so a large file takes longer. |
+| `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and it waits behind earlier enqueues, so a large file takes longer. |
+| `onWarning` | `(message, detail?) => void`. Receives every library warning instead of `console.warn`: a slow enqueue, a slow or rejected handler, a failed ack, and the rest. `detail` is the error or event, when there is one. Warnings raised before `configure()` go to `console.warn`. If the sink throws, the warning and the throw go to `console.warn`. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(scope?): Promise<void>` and `resume(scope?): Promise<void>`
@@ -595,7 +596,10 @@ re-emit) or the header merge of `updateHeaders()`; script those with
 
 `native.entries` holds every enqueue as `mutate()` sent it, with `vars` and
 `data` parsed back from JSON. `failNext()` makes the next native call reject
-with a code such as `E_STORAGE`. `seedUnacknowledged()` and `seedRows()`
+with a code such as `E_STORAGE`. `holdNext('enqueue')` keeps the next enqueue
+pending, as when native is slow to answer, and returns a function that
+releases it. The released call then runs as usual, or rejects with a failure
+that `failNext()` queued. `reset()` drops held calls. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
 them.
 

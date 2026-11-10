@@ -93,6 +93,26 @@ export const createUploadClient = ({
   // registered twice is removed one subscription at a time.
   const stateListeners = new Set<{ listener: (event: StateEvent) => void }>();
 
+  // Every library warning goes through here. The registry and delivery
+  // capture this function when the client is built, before configure(), so
+  // it reads the sink at each call: a sink set later is used from then on.
+  const warn = (message: string, detail?: unknown): void => {
+    const sink = settings.onWarning;
+    if (sink) {
+      try {
+        sink(message, detail);
+        return;
+      } catch (e) {
+        console.warn('configure: onWarning threw', e);
+      }
+    }
+    if (detail === undefined) {
+      console.warn(message);
+    } else {
+      console.warn(message, detail);
+    }
+  };
+
   // A listener that throws must not stop the others or fail the delivery
   // that produced the row.
   const emitState = (event: StateEvent): void => {
@@ -100,7 +120,7 @@ export const createUploadClient = ({
       try {
         listener(event);
       } catch (e) {
-        console.warn('addListener: a state listener threw', e);
+        warn('addListener: a state listener threw', e);
       }
     });
   };
@@ -109,17 +129,20 @@ export const createUploadClient = ({
     native,
     lookup: (key) => definitions.get(key),
     emitState,
+    warn,
   });
   const { define } = createRegistry({
     native,
     definitions,
     getSettings: () => settings,
     trackMutate: delivery.trackMutate,
+    warn,
   });
 
   /**
    * One-time setup. Call it at boot, after every define() call. Stores the
-   * lifetime, the vars cap, the headers provider and the retry defaults, forwards the
+   * lifetime, the vars cap, the headers provider, the warning sink and the
+   * retry defaults, forwards the
    * lifetime, retry and Android notification settings to native, then starts
    * replaying journaled outcomes. A second call updates the settings and does
    * not replay again. Each call replaces the full configuration.
@@ -147,8 +170,17 @@ export const createUploadClient = ({
       );
     }
     settings.maxVarsBytes = maxVarsBytes;
+    if (
+      options.onWarning !== undefined &&
+      typeof options.onWarning !== 'function'
+    ) {
+      throw new Error(
+        `configure: onWarning must be a function when given, got ${typeof options.onWarning}`,
+      );
+    }
     settings.headers = options.headers;
     settings.retry = options.retry;
+    settings.onWarning = options.onWarning;
     const forwarded: Record<string, unknown> = {
       lifetimeMs,
       ...options.android,
