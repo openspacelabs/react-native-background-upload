@@ -55,6 +55,14 @@ relaunched with no JS running, so queued completions get journaled. `RNFileUploa
 is the TurboModule and is deliberately not reachable from plain Objective-C, because its
 generated header is Objective-C++ only. So the handler lives on `RNBackgroundUpload`.
 
+The library calls the handler when its work for the wake is done: after the
+relaunch reconcile, its grace waits, and every queued slice of chunked part
+tasks (see "Every part is queued at once"). A part slice can take long on an
+older device, so the library stops waiting for slices when less than 5 s of
+background time is left, and calls the handler then. The parts not built yet
+get their tasks at the next wake or launch. Every chunked upload already has
+the tasks of its first slice, so a next wake comes.
+
 # Usage
 
 The library owns a durable queue of HTTP requests: JSON bodies, multipart
@@ -242,7 +250,9 @@ Interest), with the entry id and the part count.
 the app is in the foreground. It starts a task created in the background at
 its own discretion, for example when the device charges. Tasks are often
 created in the background: a retry scheduled while the app is there, a
-`mutate()` from a background wake, and the tasks a relaunch rebuilds. So the library records whether the app was active when it created
+`mutate()` from a background wake, the tasks a relaunch rebuilds, and the
+part tasks of a chunked upload whose slice runs after the app leaves the
+foreground. So the library records whether the app was active when it created
 each task. Two seconds after the app becomes active, it replaces every task
 created while the app was not active, unless the task has sent a byte of its
 body or has a response. The delay lets the system report what the task did

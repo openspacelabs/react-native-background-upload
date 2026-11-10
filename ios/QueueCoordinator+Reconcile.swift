@@ -50,12 +50,21 @@ extension QueueCoordinator {
     }
   }
 
-  private var isIdle: Bool { graces.isEmpty && chunked.queuedSlices.isEmpty }
+  /// No grace wait is open, and no part slice is queued or the background
+  /// wake is short on time. A grace wait is never cut short.
+  private var isIdle: Bool {
+    graces.isEmpty && (chunked.queuedSlices.isEmpty || wakeIsShort)
+  }
+
+  private var wakeIsShort: Bool {
+    guard !activity.isActive, let remaining = wakeTimeRemaining?() else { return false }
+    return remaining < Self.wakeReserveSeconds
+  }
 
   /// Runs the held blocks when nothing holds them any more. Called when a
-  /// grace wait ends and after each part slice.
+  /// grace wait ends and before and after each part slice.
   func releaseIfIdle() {
-    guard isIdle, !afterGrace.isEmpty else { return }
+    guard !afterGrace.isEmpty, isIdle else { return }
     let blocks = afterGrace
     afterGrace = []
     blocks.forEach { $0() }
@@ -118,6 +127,9 @@ extension QueueCoordinator {
           && entry?.attempts == attempt && !simpleLive.contains(id):
         simpleLive.insert(id)
         liveTasks[task.key] = (id, task)
+        // A crash between the TaskMap write and resume() leaves the task
+        // suspended. resume() on a running task does nothing.
+        task.resume()
       default:
         // No v10 owner (a v9 task), an older generation or attempt, a
         // duplicate, or an entry that must have no task. Drop its callback.

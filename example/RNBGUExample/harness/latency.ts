@@ -31,13 +31,23 @@ const source = async (): Promise<number> => {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** Waits until native forgets `ids` (cancel, then the automatic ack). */
+/**
+ * Waits until native forgets `ids` (cancel, then the automatic ack). Logs a
+ * warning when they are still there after 60 s.
+ */
 const waitGone = async (ids: string[]) => {
   const until = Date.now() + 60_000;
-  while (
-    Upload.getRequests().some(r => ids.includes(r.id)) &&
-    Date.now() < until
-  ) {
+  const left = () => Upload.getRequests().filter(r => ids.includes(r.id));
+  while (left().length > 0) {
+    if (Date.now() >= until) {
+      log(
+        'warn',
+        `latency: still in the queue after 60 s: ${left()
+          .map(r => `${r.id} ${r.state}`)
+          .join(', ')}`,
+      );
+      return;
+    }
     await sleep(200);
   }
 };
@@ -47,14 +57,16 @@ export type LatencyResult = {nextMs: number[]; median: number; max: number};
 /**
  * LATENCY_RUNS runs. Each: copy the source, mutate() it as a chunked upload
  * in 20 MiB parts, then at once mutate() a small JSON request. Both go to
- * the server's `slow` mode, so no part finishes during the run. The queue is
- * not paused: a paused entry builds no parts. Then both are cancelled, so
- * the next run has the disk space.
+ * the server's `slow` mode, so no part finishes during the run. The run
+ * calls resume() first: a paused entry builds no parts. Then both are
+ * cancelled, so the next run has the disk space.
  */
 export const measureEnqueueLatency = async (
   host: string,
 ): Promise<LatencyResult> => {
   const size = await source();
+  // A paused entry builds no parts.
+  await Upload.resume();
   const nextMs: number[] = [];
   for (let i = 1; i <= LATENCY_RUNS; i++) {
     const run = `${Date.now().toString(36)}-${i}`;

@@ -309,8 +309,8 @@ step says otherwise.
     `mutate()`, then at once the metadata `mutate()`. Use an older device,
     such as an iPhone 11: the slow case came from one. Each run needs about
     4 GiB free (the 2 GiB source copy and its part files), plus 2 GiB for the
-    source that the app keeps. Do not pause the queue: a paused entry builds
-    no parts. Press "Enqueue latency x7". The first press makes the 2 GiB
+    source that the app keeps. A paused entry builds no parts, so the run
+    calls `resume()` first. Press "Enqueue latency x7". The first press makes the 2 GiB
     source, which takes minutes. Then each of the 7 runs copies the source,
     calls `mutate()` on it with 103 parts of 20 MiB, and at once calls
     `mutate()` on a small JSON request. Both go to `slow`, so no part
@@ -318,7 +318,9 @@ step says otherwise.
     `copyMs`, `fileMs` and `nextMs`. `nextMs` is how long the second
     `mutate()` waits. The last line gives the median and the maximum of
     `nextMs`. Pass: median under 500 ms and maximum under 2 s. To compare,
-    run it on the same device with a build of 11.1.0. To see where the time
+    run it on the same device twice: "before" is a build of commit 56c51c9
+    (this button on top of 11.1.0's native code), "after" is a build of the
+    commit that adds the part slices or later. To see where the time
     goes, record the app in Instruments with the os_signpost or Points of
     Interest instrument: each `enqueue`, `issue` and `part slice` is an
     interval.

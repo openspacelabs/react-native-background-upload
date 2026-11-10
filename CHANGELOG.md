@@ -8,7 +8,18 @@ could pass the 10 s enqueue timeout. The parts are now built in slices of
 about 32 MiB, and other calls run between two slices. Each slice writes the
 task map once; before, every part task wrote the whole task map. The parts
 still get their tasks right after `mutate()`, one slice after the other. A
-background wake keeps its completion handler until the last slice is built.
+background wake keeps its completion handler until the last slice is built,
+or until less than 5 s of background time is left. Replacing the part tasks
+created in the background, when the app becomes active, is sliced the same
+way, and each part keeps its old task until its new one exists.
+
+iOS now resumes every task it adopts at launch. A crash between writing a
+task's task map entry and resuming it left a suspended task that held its
+part, or its request, and never sent.
+
+On iOS, a running chunked upload past its `expiresAt` now settles `expired`
+when the app becomes active and its background-created part tasks are due
+for replacement. Before, it got new part tasks.
 
 iOS adds `os_signpost` intervals for each enqueue, issue and part slice, so
 Instruments can show how long each one holds the queue.

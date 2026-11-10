@@ -10,6 +10,7 @@ enum Signpost {
   private static let poster = OSSignposter(subsystem: subsystem, category: .pointsOfInterest)
 
   /// Runs `body` inside the interval `name`. `detail` says what it works on.
+  /// It is logged as public, so entry ids must stay free of user content.
   static func interval<T>(_ name: StaticString, _ detail: String, _ body: () throws -> T) rethrows -> T {
     let state = poster.beginInterval(name, id: poster.makeSignpostID(), "\(detail, privacy: .public)")
     defer { poster.endInterval(name, state) }

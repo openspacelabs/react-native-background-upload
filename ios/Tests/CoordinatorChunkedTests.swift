@@ -571,8 +571,115 @@ final class CoordinatorChunkedTests: XCTestCase {
     fresh.drainAll()
     XCTAssertEqual(parts(fresh.transport.created), [2, 3, 4, 5], "the parts with no task get one")
     XCTAssertTrue(survivors.allSatisfy { !$0.cancelled }, "the live tasks are adopted")
+    XCTAssertTrue(survivors.allSatisfy(\.resumed), "a task left suspended by the crash runs")
     let attempts = (survivors + fresh.transport.created).compactMap { fresh.map.meta(forKey: $0.key)?.attempt }
     XCTAssertEqual(Set(attempts).count, 6, "no ordinal repeats")
+  }
+
+  func testACrashBeforeTheTaskMapWriteIsRepairedFromTheDescriptions() throws {
+    let (fresh, survivors) = try crashAfterTheFirstSlice()
+    // The process died after creating slice 1's tasks, before its TaskMap
+    // write: the daemon holds them, the map does not name them.
+    let map = TaskMap(fileURL: fresh.map.fileURL)
+    survivors.forEach { map.removeKey($0.key) }
+    fresh.relaunch(daemonTasks: survivors)
+    fresh.boot()
+    fresh.drainAll()
+    XCTAssertTrue(survivors.allSatisfy { !$0.cancelled && $0.resumed }, "adopted by description and resumed")
+    XCTAssertEqual(parts(fresh.transport.created), [2, 3, 4, 5], "parts 0 and 1 get no second task")
+  }
+
+  func testAWakeShortOnTimeReleasesTheHandlerBeforeTheLastSlice() throws {
+    let (fresh, _) = try crashAfterTheFirstSlice()
+    fresh.holdSlices = true
+    var remaining: TimeInterval = 30
+    fresh.coordinator.wakeTimeRemaining = { remaining }
+    var partsAtRelease: [Int]?
+    fresh.coordinator.reconcileAll { partsAtRelease = self.parts(fresh.transport.created) }
+    fresh.drain()
+    fresh.drain()
+    XCTAssertNil(partsAtRelease, "30 s left: the handler waits for the slices")
+    XCTAssertEqual(parts(fresh.transport.created), [2, 3])
+    remaining = 3
+    fresh.runHeldSlice()
+    XCTAssertEqual(partsAtRelease, [2, 3], "released as the next slice starts")
+    XCTAssertEqual(parts(fresh.transport.created), [2, 3, 4, 5], "the slice still builds")
+  }
+
+  func testAnActiveAppIgnoresTheWakeTime() throws {
+    h.holdSlices = true
+    h.coordinator.wakeTimeRemaining = { 0 }
+    h.becomeActive()
+    try enqueueSixPartsInThreeSlices()
+    var idle = false
+    h.coordinator.whenIdle { idle = true }
+    h.drain()
+    XCTAssertFalse(idle)
+    h.runHeldSlices()
+    XCTAssertTrue(idle)
+  }
+
+  func testALaterSliceClearsTheWaitOfEarlierDelayedParts() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.complete(try XCTUnwrap(partTask(0)), status: 503)
+    h.complete(try XCTUnwrap(partTask(1)), status: 503)
+    XCTAssertNotNil(h.row("cap")?["nextAttemptAt"], "every part in flight waits")
+    h.runHeldSlice()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3])
+    XCTAssertNil(h.row("cap")?["nextAttemptAt"], "parts 2 and 3 send now")
+  }
+
+  /// The app becomes active, and the replace delay passes.
+  private func activate() {
+    h.becomeActive()
+    h.advance(Double(QueueCoordinator.replaceDelayMs))
+  }
+
+  private func isForeground(_ task: FakeTask) -> Bool { h.map.meta(forKey: task.key)?.foreground == true }
+
+  func testActivationReplacesBackgroundPartTasksOneSliceAtATime() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    let old = h.transport.live
+    XCTAssertEqual(parts(old), [0, 1, 2, 3, 4, 5])
+    XCTAssertFalse(old.contains(where: isForeground))
+    h.holdSlices = true
+    activate()
+    XCTAssertEqual(parts(old.filter(\.cancelled)), [0, 1])
+    XCTAssertEqual(parts(old.filter(\.isLive)), [2, 3, 4, 5], "a part keeps its old task until its slice")
+    XCTAssertEqual(h.heldSlices.count, 1)
+    h.runHeldSlice()
+    XCTAssertEqual(parts(old.filter(\.isLive)), [4, 5])
+    h.runHeldSlices()
+    XCTAssertTrue(old.allSatisfy(\.cancelled))
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "one task per part")
+    XCTAssertTrue(h.transport.live.allSatisfy(isForeground))
+    XCTAssertEqual(h.transport.created.count, 12)
+  }
+
+  func testActivationWhileBuildSlicesAreQueued() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    let old = h.transport.live
+    activate()
+    XCTAssertTrue(old.allSatisfy(\.cancelled), "slice 1's background tasks are replaced")
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "one task per part")
+    XCTAssertTrue(h.transport.live.allSatisfy(isForeground), "the later slices run while active")
+    XCTAssertEqual(h.transport.created.count, 8)
+  }
+
+  func testAnExpiredEntryDueForReplacementOnActivationSettlesExpired() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    let old = h.transport.live
+    h.clock += 15 * 24 * 3_600_000
+    activate()
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+    XCTAssertTrue(old.allSatisfy(\.cancelled))
+    XCTAssertEqual(h.transport.created.count, 6, "no new part task")
   }
 
   func testTheBackgroundCompletionHandlerWaitsForQueuedSlices() throws {

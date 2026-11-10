@@ -53,6 +53,9 @@ final class ChunkedCoordinator {
   private(set) var queuedSlices: Set<String> = []
   /// A test hook: where a slice block goes. nil puts it on the queue.
   var dispatchSlice: ((@escaping () -> Void) -> Void)?
+  /// id -> background-created part tasks still to replace, in part order.
+  /// replace() takes one slice of them per block.
+  private var replacing: [String: [Replaced]] = [:]
 
   init(_ coordinator: QueueCoordinator) {
     q = coordinator
@@ -74,6 +77,7 @@ final class ChunkedCoordinator {
 
   /// Forgets the part tasks. The caller cancels them.
   func stop(_ id: String) {
+    replacing[id] = nil
     inFlight[id] = nil
     partSent[id] = nil
     partBeginAt[id] = nil
@@ -93,6 +97,9 @@ final class ChunkedCoordinator {
       if keep {
         live[t.part] = t.task.key
         q.liveTasks[t.task.key] = (id, t.task)
+        // A crash between a slice's TaskMap write and its resumes leaves
+        // the task suspended. resume() on a running task does nothing.
+        t.task.resume()
         if let begin = t.task.beginAt.map({ $0.timeIntervalSince1970 * 1000 }), begin > q.now() {
           partBeginAt[id, default: [:]][t.part] = begin
         }
@@ -284,24 +291,76 @@ final class ChunkedCoordinator {
   /// superseded, so their callbacks produce no outcome. If one landed before
   /// the cancel took effect, partCompleted accepts the part and stops its
   /// new task.
+  ///
+  /// It works one slice at a time, like refill. Each old task is cancelled
+  /// in the slice that replaces it, so a part keeps its old task until its
+  /// new one exists.
   func replace(_ id: String, _ replaced: [Replaced]) {
-    guard let e = q.index.entry(id), e.isChunked, e.state == .running,
-          !q.settings.isPaused(e.key) else { return }
-    let stale = replaced.filter {
+    var queued = replacing[id] ?? []
+    let keys = Set(queued.map(\.key))
+    queued += replaced.filter { !keys.contains($0.key) }
+    replacing[id] = queued.sorted { $0.part < $1.part }
+    replaceSlice(id)
+    updateWait(id)
+  }
+
+  /// Replaces the first slice of `replacing[id]` that is still stale, then
+  /// queues a block for the rest (and for any part with no task).
+  private func replaceSlice(_ id: String) {
+    guard let e = runnable(id) else {
+      replacing[id] = nil
+      return
+    }
+    let stale = (replacing[id] ?? []).filter {
       $0.incarnation == e.incarnation && e.parts.indices.contains($0.part) && !e.parts[$0.part].accepted
         && inFlight[id]?[$0.part] == $0.key
     }
-    guard !stale.isEmpty else { return }
-    q.cancelTasks(keys: stale.map(\.key), purpose: .superseded)
-    for r in stale {
+    let slice = ChunkedEngine.slice(stale.map(\.part), budget: sliceBytes) { e.parts[$0].size }
+    let now = Array(stale.prefix(slice.count))
+    replacing[id] = stale.count > now.count ? Array(stale.dropFirst(now.count)) : nil
+    guard !now.isEmpty else { return }
+    // A new task keeps what is left of the old one's backoff.
+    let requests: [(index: Int, delayMs: Int?)] = now.map { (index: $0.part, delayMs: remainingMs(id, $0.part)) }
+    q.cancelTasks(keys: now.map(\.key), purpose: .superseded)
+    for r in now {
       inFlight[id]?[r.part] = nil
       partSent[id]?[r.part] = nil
     }
-    // The parts have no task now: refill gives them one, a slice at a time.
-    // partBeginAt still holds the begin date of each one, so the new task
-    // keeps what is left of its backoff.
-    refill(id)
-    updateWait(id)
+    let built = Signpost.interval("part replace slice", "\(id) parts \(now.count) of \(stale.count)") {
+      enqueueParts(id, requests)
+    }
+    // On false the entry settled, or a refill after a backoff follows and
+    // gives the parts of this slice their tasks. The old tasks of the rest
+    // keep running; the next activation replaces them.
+    guard built else {
+      replacing[id] = nil
+      return
+    }
+    refillNextSlice(id)
+  }
+
+  /// The entry when its parts may get tasks now. Otherwise nil, and an
+  /// entry that is done, expired or has a short blob is settled.
+  private func runnable(_ id: String) -> QueueEntry? {
+    guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
+          !q.settings.isPaused(e.key) else { return nil }
+    if e.allAccepted {
+      q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
+      return nil
+    }
+    if q.now() >= e.expiresAt {
+      q.settle(id, .expired)
+      return nil
+    }
+    // A blob shorter than a part can never finish: report it now.
+    let blobSize = e.bodyPath.flatMap { FileIO.size(q.store.fileURL(id, $0)) } ?? 0
+    if let short = e.parts.indices.first(where: { e.parts[$0].end > blobSize }) {
+      q.settle(id, .fileError(
+        "source blob is \(blobSize) bytes; part \(short) needs "
+          + "[\(e.parts[short].start), \(e.parts[short].end))", partIndex: short))
+      return nil
+    }
+    return e
   }
 
   /// Gives every pending part with no task one, a slice at a time. Called at
@@ -314,24 +373,7 @@ final class ChunkedCoordinator {
   /// flight" again. So a part never gets a second task, and a cancel, pause,
   /// replace, settle or expiry between two slices stops the build.
   func refill(_ id: String) {
-    guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
-          !q.settings.isPaused(e.key) else { return }
-    if e.allAccepted {
-      q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
-      return
-    }
-    if q.now() >= e.expiresAt {
-      q.settle(id, .expired)
-      return
-    }
-    // A blob shorter than a part can never finish: report it now.
-    let blobSize = e.bodyPath.flatMap { FileIO.size(q.store.fileURL(id, $0)) } ?? 0
-    if let short = e.parts.indices.first(where: { e.parts[$0].end > blobSize }) {
-      q.settle(id, .fileError(
-        "source blob is \(blobSize) bytes; part \(short) needs "
-          + "[\(e.parts[short].start), \(e.parts[short].end))", partIndex: short))
-      return
-    }
+    guard let e = runnable(id) else { return }
     let flight = Set((inFlight[id] ?? [:]).keys)
     let indexes = ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight)
     guard !indexes.isEmpty else { return }
@@ -344,14 +386,27 @@ final class ChunkedCoordinator {
     if built && slice.count < indexes.count { refillNextSlice(id) }
   }
 
-  /// Queues one block that refills `id`, unless one is queued already. The
-  /// blocks of other calls already queued run first.
+  /// Queues one block for `id`, unless one is queued already. The block
+  /// replaces the next slice of background-created tasks when any are
+  /// left, else it refills. The blocks of other calls already queued run
+  /// first.
   private func refillNextSlice(_ id: String) {
     guard queuedSlices.insert(id).inserted else { return }
     let block = { [weak self] in
       guard let self else { return }
+      // Before the id leaves queuedSlices, this releases only when a
+      // background wake is short on time: then the completion handler goes
+      // back to the system now. Every entry has at least its first slice's
+      // tasks, so a later wake comes.
+      self.q.releaseIfIdle()
       self.queuedSlices.remove(id)
-      self.refill(id)
+      if self.replacing[id] != nil {
+        self.replaceSlice(id)
+      } else {
+        self.refill(id)
+      }
+      // A later slice may start parts while every earlier one waits.
+      self.updateWait(id)
       self.q.releaseIfIdle()
     }
     if let dispatchSlice { dispatchSlice(block) } else { q.queue.async(execute: block) }

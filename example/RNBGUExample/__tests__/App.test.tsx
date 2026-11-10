@@ -125,6 +125,7 @@ it('runs the enqueue latency measurement 7 times on /slow', async () => {
     Promise.resolve(path.endsWith('/latency-src.bin')),
   );
   const before = mockNative.enqueue.mock.calls.length;
+  const resumes = mockNative.resume.mock.calls.length;
   try {
     await press(tree, 'Enqueue latency x7: 2 GiB, 20 MiB parts, on /slow');
     for (let i = 0; i < 100 && mockNative.cancel.mock.calls.length < 14; i++) {
@@ -151,4 +152,5 @@ it('runs the enqueue latency measurement 7 times on /slow', async () => {
   expect(entries[1].descriptor.url).toMatch(/\/slow\/json\//);
   expect(fs.copyFile).toHaveBeenCalledTimes(7);
   expect(mockNative.cancel).toHaveBeenCalledTimes(14);
+  expect(mockNative.resume.mock.calls.length).toBe(resumes + 1);
 });

@@ -70,6 +70,13 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     coordinator = QueueCoordinator(
       store: .shared, journal: .shared, taskMap: .shared, transport: transport, sink: sink)
     super.init()
+    // UIApplication is main-thread only. The coordinator queue may wait on
+    // main here: main never waits on the coordinator queue.
+    coordinator.wakeTimeRemaining = {
+      Thread.isMainThread
+        ? UIApplication.shared.backgroundTimeRemaining
+        : DispatchQueue.main.sync { UIApplication.shared.backgroundTimeRemaining }
+    }
     transport.createSessions(delegate: self)
     observeAppState()
     // Claim the completion-handler deferral BEFORE the reconcile is queued.
