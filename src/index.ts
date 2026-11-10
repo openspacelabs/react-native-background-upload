@@ -154,7 +154,6 @@ export const createUploadClient = ({
         `configure: lifetimeMs must be a positive number, got ${options.lifetimeMs}`,
       );
     }
-    settings.lifetimeMs = lifetimeMs;
     const enqueueTimeoutMs =
       options.enqueueTimeoutMs ?? DEFAULT_ENQUEUE_TIMEOUT_MS;
     if (!Number.isFinite(enqueueTimeoutMs) || enqueueTimeoutMs <= 0) {
@@ -162,14 +161,12 @@ export const createUploadClient = ({
         `configure: enqueueTimeoutMs must be a positive number, got ${options.enqueueTimeoutMs}`,
       );
     }
-    settings.enqueueTimeoutMs = enqueueTimeoutMs;
     const maxVarsBytes = options.maxVarsBytes ?? MAX_VARS_BYTES;
     if (!Number.isFinite(maxVarsBytes) || maxVarsBytes <= 0) {
       throw new Error(
         `configure: maxVarsBytes must be a positive number, got ${options.maxVarsBytes}`,
       );
     }
-    settings.maxVarsBytes = maxVarsBytes;
     if (
       options.onWarning !== undefined &&
       typeof options.onWarning !== 'function'
@@ -178,6 +175,11 @@ export const createUploadClient = ({
         `configure: onWarning must be a function when given, got ${typeof options.onWarning}`,
       );
     }
+    // Every option is checked before any is stored, so a bad option leaves
+    // the earlier configuration whole.
+    settings.lifetimeMs = lifetimeMs;
+    settings.enqueueTimeoutMs = enqueueTimeoutMs;
+    settings.maxVarsBytes = maxVarsBytes;
     settings.headers = options.headers;
     settings.retry = options.retry;
     settings.onWarning = options.onWarning;
