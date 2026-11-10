@@ -180,13 +180,15 @@ extension QueueCoordinator {
     }
   }
 
-  /// A failed save deletes the body staged for it, unless that body is an
-  /// adopted file the store already owned.
+  /// A failed save deletes the body staged for it only when that body is a
+  /// copy. A chunked body is the caller's file, moved in, or a blob the store
+  /// already owned: the only copy of the bytes. It stays, and a same-id retry
+  /// adopts it, as after a crash between the move and the save.
   private func saveOrDiscard(_ e: QueueEntry, staged: StagedBody) throws {
     do {
       try store.save(e)
     } catch {
-      if !staged.adopted { try? FileManager.default.removeItem(at: store.fileURL(e.id, staged.relativePath)) }
+      if staged.kind != .parts { try? FileManager.default.removeItem(at: store.fileURL(e.id, staged.relativePath)) }
       throw EnqueueError.storage("enqueue: cannot save '\(e.id)': \(error.localizedDescription)")
     }
   }
