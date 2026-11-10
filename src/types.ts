@@ -200,6 +200,31 @@ export type RequestRow = {
 };
 
 /**
+ * Which cached rows `useRequests()`, `useRequestsWithProgress()` and
+ * `getCachedRequests()` return. `key` and `id` match as in `getRequests()`.
+ * Cancelled rows are left out unless `includeCancelled` is true: such a row
+ * has no work left, and native forgets it at its ack.
+ */
+export type RequestsFilter = {
+  key?: string;
+  id?: string;
+  includeCancelled?: boolean;
+};
+
+/** A definition's rows: the filter has no `key`, because it is the definition's. */
+export type DefinedRequestsFilter = Omit<RequestsFilter, 'key'>;
+
+/**
+ * A row of one definition, with `vars` typed as that definition's vars. The
+ * type is a promise the library cannot check: `vars` is what native stored
+ * from `JSON.stringify`, so a `Date` reads back as a string, and an entry
+ * enqueued under an older vars type keeps its old shape.
+ */
+export type DefinedRequestRow<V extends Vars> = Omit<RequestRow, 'vars'> & {
+  vars: V;
+};
+
+/**
  * A `state` event. `reason: 'unhandled-key'` reports an outcome whose key has
  * no definition. The row carries the entry's real state, and the library keeps
  * the entry unacknowledged.
@@ -286,6 +311,14 @@ export type Defined<V extends Vars, T> = {
   mutate: [V] extends [null]
     ? (vars?: null, options?: { id?: string }) => Promise<{ id: string }>
     : (vars: V, options?: { id?: string }) => Promise<{ id: string }>;
+  /** The client's `useRequests()` for this definition's key, with typed vars. */
+  useRequests: (
+    filter?: DefinedRequestsFilter,
+  ) => readonly DefinedRequestRow<V>[];
+  /** The client's `useRequestsWithProgress()` for this definition's key. */
+  useRequestsWithProgress: (
+    filter?: DefinedRequestsFilter,
+  ) => readonly DefinedRequestRow<V>[];
 };
 
 /**
@@ -386,6 +419,30 @@ export type UploadClient = {
   setWifiOnly: (enabled: boolean) => Promise<void>;
   updateHeaders: (patch: Record<string, string>) => Promise<void>;
   getRequests: (filter?: { key?: string; id?: string }) => RequestRow[];
+  /**
+   * React hook. The cached rows: read from native when the first listener
+   * arrives, then patched by events. Re-renders when a row appears, changes
+   * state, or goes, not on progress. The same array returns while nothing it
+   * holds changed.
+   */
+  useRequests: (filter?: RequestsFilter) => readonly RequestRow[];
+  /**
+   * React hook. `useRequests()` with the bytes of each progress event, so it
+   * also re-renders on progress. Use it only where bytes are shown.
+   */
+  useRequestsWithProgress: (filter?: RequestsFilter) => readonly RequestRow[];
+  /**
+   * Calls `listener` with `getCachedRequests()` each time a row appears,
+   * changes state, or goes. Keeps the cache up to date while subscribed.
+   */
+  addRequestsListener: (listener: (rows: readonly RequestRow[]) => void) => {
+    remove: () => void;
+  };
+  /**
+   * The rows the hooks see, for code outside React. With no listener and no
+   * mounted hook, it reads native first.
+   */
+  getCachedRequests: (filter?: RequestsFilter) => readonly RequestRow[];
   takeDiagnostics: () => Promise<Diagnostic[]>;
   addListener: AddListener;
   chunkPlan: (

@@ -142,7 +142,8 @@ export type FakeNative = Spec & {
   /**
    * Journals the outcome of entry `id`, moves its row to the outcome state,
    * and emits it on onSettled when a listener exists. Resolves with the event
-   * after delivery acks it. Rejects after `ackTimeoutMs` when no ack comes:
+   * after delivery acks it and the client has handled the ack, so the row
+   * hooks no longer show a forgotten row. Rejects after `ackTimeoutMs` when no ack comes:
    * the handler rejected, the key has no definition, or configure() was not
    * called. To test those cases, create the fake with a short
    * `ackTimeoutMs` and expect settle() to reject.
@@ -152,7 +153,11 @@ export type FakeNative = Spec & {
     outcome: FakeOutcome,
     overrides?: SettledOverrides,
   ) => Promise<SettledEvent>;
-  /** Adds or replaces rows, for example legacy rows that native imported. */
+  /**
+   * Adds or replaces rows, for example legacy rows that native imported. It
+   * emits no event, so a mounted row hook sees the rows only after it mounts
+   * again.
+   */
   seedRows: (rows: RequestRow[]) => void;
   /**
    * Adds outcomes to the journal. getUnacknowledgedEvents() returns them, so
@@ -557,8 +562,8 @@ export const createFakeNative = (
         }),
       ),
 
-    ackEvents: (ids) =>
-      run('ackEvents', () => {
+    ackEvents: (ids) => {
+      const acked = run('ackEvents', () => {
         ids.forEach((eventId) => {
           ackedEventIds.push(eventId);
           const index = journal.findIndex((e) => e.eventId === eventId);
@@ -578,15 +583,25 @@ export const createFakeNative = (
             rows.delete(event.id);
           }
         });
-        // Waiters resolve after the journal and rows are up to date.
-        ids.forEach((eventId) => {
-          const waiter = ackWaiters.get(eventId);
-          if (waiter) {
-            ackWaiters.delete(eventId);
-            waiter();
-          }
-        });
-      }),
+      });
+      // Waiters resolve after the journal and rows are up to date, and one
+      // promise turn after the caller's own continuation on this promise.
+      // So when settle() resolves, the client has handled the ack too, for
+      // example dropped the row from its row cache.
+      void acked
+        .then(() => undefined)
+        .then(() => {
+          ids.forEach((eventId) => {
+            const waiter = ackWaiters.get(eventId);
+            if (waiter) {
+              ackWaiters.delete(eventId);
+              waiter();
+            }
+          });
+        })
+        .catch(() => undefined);
+      return acked;
+    },
 
     takeDiagnostics: () =>
       run('takeDiagnostics', () =>

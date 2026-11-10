@@ -1,6 +1,5 @@
 import type { Spec } from './NativeRNFileUploader';
 import type {
-  Define,
   Defined,
   Definition,
   FormPart,
@@ -112,8 +111,19 @@ type RegistryDeps = {
   now?: () => number;
 };
 
+/**
+ * What the registry's define() builds: the key and mutate(). The client adds
+ * the row hooks to make a full `Defined`.
+ */
+export type RegistryDefined<V extends Vars, T> = Pick<
+  Defined<V, T>,
+  'key' | 'mutate'
+>;
+
 export type Registry = {
-  define: Define;
+  define: <V extends Vars, T>(
+    definition: Definition<V, T>,
+  ) => RegistryDefined<V, T>;
 };
 
 declare const __DEV__: boolean | undefined;
@@ -513,10 +523,11 @@ export const createRegistry = ({
   now = Date.now,
 }: RegistryDeps): Registry => {
   // The overloads on Define keep the with-parser and without-parser shapes
-  // apart for callers. One implementation serves both.
-  const define = (<V extends Vars, T>(
+  // apart for callers. The client applies them; one implementation serves
+  // both.
+  const define = <V extends Vars, T>(
     definition: Definition<V, T>,
-  ): Defined<V, T> => {
+  ): RegistryDefined<V, T> => {
     const { key } = definition;
     if (typeof key !== 'string' || key.length === 0) {
       throw new Error('define: key must be a non-empty string');
@@ -587,8 +598,8 @@ export const createRegistry = ({
       return { id: entry.id };
     };
 
-    return { key, mutate } as Defined<V, T>;
-  }) as Define;
+    return { key, mutate } as RegistryDefined<V, T>;
+  };
 
   return { define };
 };
