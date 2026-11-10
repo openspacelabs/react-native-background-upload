@@ -70,17 +70,20 @@ class WorkerOpsTest {
   }
 
   @Test
-  fun `recordTransientHit counts each part on its own`() {
+  fun `recordTransientHit counts each part on its own, found by range start`() {
     store.save(entry(descriptor = desc(url = null, parts = listOf(part(0, 10), part(10, 20))), body = StagedBody(StagedBody.CHUNKED, "blob", null, 20)))
     val g = store.load("e1")!!.generation
     val rule = UploadOutcome.TransientRule(400, maxRetries = 1)
-    assertTrue(ops.recordTransientHit("e1", g, 0, rule))
-    assertFalse(ops.recordTransientHit("e1", g, 0, rule))
-    assertTrue(ops.recordTransientHit("e1", g, 1, rule)) // part 1 has its own count
-    assertTrue(ops.recordTransientHit("e1", g, 5, rule)) // no such part: allowed, nothing written
+    assertTrue(ops.recordTransientHit("e1", g, 0L, rule))
+    assertFalse(ops.recordTransientHit("e1", g, 0L, rule))
+    assertTrue(ops.recordTransientHit("e1", g, 50L, rule)) // no part starts there: allowed, nothing written
+    // A live re-mutate reordered the parts while the attempt was in flight: the hit still lands on its range.
     val e = store.load("e1")!!
-    assertEquals(listOf(mapOf("400" to 1), mapOf("400" to 1)), e.descriptor!!.parts!!.map { it.transientHitsByRule })
-    assertNull(e.transientHitsByRule)
+    store.save(e.copy(descriptor = e.descriptor!!.copy(parts = e.descriptor!!.parts!!.reversed())))
+    assertTrue(ops.recordTransientHit("e1", g, 10L, rule)) // the part at 10 has its own count
+    val parts = store.load("e1")!!.descriptor!!.parts!!
+    assertEquals(listOf(10L to mapOf("400" to 1), 0L to mapOf("400" to 1)), parts.map { it.start to it.transientHitsByRule })
+    assertNull(store.load("e1")!!.transientHitsByRule)
   }
 
   @Test
@@ -88,10 +91,10 @@ class WorkerOpsTest {
     store.save(entry(descriptor = desc(url = null, parts = listOf(part(0, 10))), body = StagedBody(StagedBody.CHUNKED, "blob", null, 10)))
     store.save(entry(id = "e2"))
     val rule = UploadOutcome.TransientRule(400, maxRetries = 3)
-    for ((id, partIndex) in listOf("e1" to 0, "e2" to null)) {
+    for ((id, partStart) in listOf("e1" to 0L, "e2" to null)) {
       val allowed = java.util.concurrent.atomic.AtomicInteger()
       val threads = List(16) {
-        Thread { if (ops.recordTransientHit(id, 1, partIndex, rule)) allowed.incrementAndGet() }
+        Thread { if (ops.recordTransientHit(id, 1, partStart, rule)) allowed.incrementAndGet() }
       }
       threads.forEach { it.start() }
       threads.forEach { it.join() }

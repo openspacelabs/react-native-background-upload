@@ -288,7 +288,7 @@ internal class EntryRun(
     val rule = (verdict as? RetryClassifier.Verdict.Transient)?.rule
     if (rule != null) {
       // The snapshot above can be stale; the store decides the cap exactly.
-      if (!ops.recordTransientHit(entryId, generation, partIndex, rule)) {
+      if (!ops.recordTransientHit(entryId, generation, part?.start, rule)) {
         verdict = RetryClassifier.Verdict.Terminal("http", "HTTP ${response.code}")
       }
     }
