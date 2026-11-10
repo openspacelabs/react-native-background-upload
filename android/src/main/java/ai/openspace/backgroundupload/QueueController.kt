@@ -139,7 +139,11 @@ class QueueController(
     } catch (e: QueueException) {
       throw e
     } catch (e: IOException) {
-      throw QueueException(QueueException.E_STORAGE, "could not stage the body: ${e.message}")
+      throw QueueException(
+        QueueException.E_STORAGE,
+        "could not stage the body: ${e.message}" + StorageCause.suffix(e, withMessage = false),
+        e,
+      )
     }
 
   /** Saves a newly staged entry. On failure the new body file is removed; the old entry stays as it was. */
@@ -148,7 +152,11 @@ class QueueController(
       store.save(next)
     } catch (e: IOException) {
       if (next.body?.kind != StagedBody.CHUNKED) store.bodyFile(next)?.delete()
-      throw QueueException(QueueException.E_STORAGE, "could not save the entry: ${e.message}")
+      throw QueueException(
+        QueueException.E_STORAGE,
+        "could not save the entry: ${e.message}" + StorageCause.suffix(e, withMessage = false),
+        e,
+      )
     }
     store.pruneUnreferenced(next)
     return Enqueued(next, null)
@@ -158,7 +166,11 @@ class QueueController(
     try {
       store.save(next)
     } catch (e: IOException) {
-      throw QueueException(QueueException.E_STORAGE, "could not save the entry: ${e.message}")
+      throw QueueException(
+        QueueException.E_STORAGE,
+        "could not save the entry: ${e.message}" + StorageCause.suffix(e, withMessage = false),
+        e,
+      )
     }
   }
 
@@ -242,7 +254,11 @@ class QueueController(
         journaled = try {
           journal.append(record) { store.referencedEventIds() + record.eventId }
         } catch (error: IOException) {
-          throw QueueException(QueueException.E_STORAGE, "could not journal the cancel: ${error.message}")
+          throw QueueException(
+            QueueException.E_STORAGE,
+            "could not journal the cancel: ${error.message}" + StorageCause.suffix(error, withMessage = false),
+            error,
+          )
         }
         stop = true
         // The journaled record is the cancel. A failed save does not undo

@@ -668,6 +668,68 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `setWifiOnly with the same value writes once`() {
+    val file = File(root, "settings.json")
+    controller.setWifiOnly(true)
+    assertTrue(file.exists())
+    file.delete() // a second write would create it again
+    controller.setWifiOnly(true)
+    assertFalse("the same value writes nothing", file.exists())
+    assertTrue(settings.load().wifiOnly)
+  }
+
+  @Test
+  fun `setWifiOnly with a changed value still writes`() {
+    val file = File(root, "settings.json")
+    controller.setWifiOnly(true)
+    controller.setWifiOnly(false)
+    assertFalse(QueueSettingsStore(file).load().wifiOnly)
+    controller.setWifiOnly(true)
+    assertTrue(QueueSettingsStore(file).load().wifiOnly)
+  }
+
+  @Test
+  fun `setWifiOnly with the same value does not fail when the settings can not be written`() {
+    controller.setWifiOnly(true)
+    root.setWritable(false)
+    try {
+      controller.setWifiOnly(true)
+    } finally {
+      root.setWritable(true)
+    }
+  }
+
+  @Test
+  fun `a failed settings write rejects with the cause in the message`() {
+    root.setWritable(false)
+    val e = try {
+      assertThrows(java.io.IOException::class.java) { controller.setWifiOnly(true) }
+    } finally {
+      root.setWritable(true)
+    }
+    // UploaderModule.onQueue rejects E_STORAGE with this message.
+    val message = StorageCause.rejectMessage(e)
+    assertTrue(message, message.startsWith(e.message!!))
+    assertTrue(message, message.endsWith(" (cause: java.io.FileNotFoundException)"))
+  }
+
+  @Test
+  fun `a failed journal write on cancel carries the cause`() {
+    controller.enqueue(parsed())
+    val dir = tmp.root.resolve("journal")
+    dir.setWritable(false)
+    val e = try {
+      assertThrows(QueueException::class.java) { controller.cancel("e1") }
+    } finally {
+      dir.setWritable(true)
+    }
+    assertEquals(QueueException.E_STORAGE, e.code)
+    assertTrue(e.cause is java.io.IOException)
+    assertTrue(e.message, e.message!!.startsWith("could not journal the cancel: ${e.cause!!.message} (cause: "))
+    assertTrue(e.message, e.message!!.endsWith("(cause: ${e.cause!!.javaClass.name})"))
+  }
+
+  @Test
   fun `updateHeaders cancels the expiry wake of the entries it unparks`() {
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
     controller.updateHeaders(mapOf("Authorization" to "Bearer new"))

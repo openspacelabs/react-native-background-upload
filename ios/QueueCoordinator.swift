@@ -132,7 +132,7 @@ final class QueueCoordinator {
     queue.async {
       var next = self.settings
       next.apply(configure: options)
-      _ = self.saveSettings(next)
+      try? self.saveSettings(next)
     }
   }
 
@@ -146,7 +146,7 @@ final class QueueCoordinator {
         reject(e.code, e.message)
         return
       } catch {
-        reject("E_STORAGE", error.localizedDescription)
+        reject("E_STORAGE", error.localizedDescription + FileIO.cause(error, description: false))
         return
       }
       resolve(result.id)
@@ -192,9 +192,13 @@ final class QueueCoordinator {
       }
       var next = self.settings
       change(&next, keys)
-      guard next == self.settings || self.saveSettings(next) else {
-        reject("E_STORAGE", "\(method): cannot save the queue settings")
-        return
+      if next != self.settings {
+        do {
+          try self.saveSettings(next)
+        } catch {
+          reject("E_STORAGE", "\(method): cannot save the queue settings" + FileIO.cause(error))
+          return
+        }
       }
       self.applyPauseGates()
       resolve()
@@ -243,14 +247,18 @@ final class QueueCoordinator {
     queue.async {
       guard let e = self.index.entry(id) else { return resolve() }
       if e.isLive && !e.legacy {
-        guard self.settle(id, .cancelled(reason: "user"), requireJournal: true) else {
-          return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed")
+        do {
+          try self.settle(id, .cancelled(reason: "user"), requireJournal: true)
+        } catch {
+          return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed"
+                          + FileIO.cause(error))
         }
       } else {
         do {
           try self.forgetWithEvents(id)
         } catch {
-          return reject("E_STORAGE", "cancel: cannot delete '\(id)': \(error.localizedDescription)")
+          return reject("E_STORAGE", "cancel: cannot delete '\(id)': \(error.localizedDescription)"
+                          + FileIO.cause(error, description: false))
         }
       }
       resolve()
@@ -261,17 +269,21 @@ final class QueueCoordinator {
   /// the session it picks. Such a queued entry whose retry waits in the
   /// daemon moves to the new session; a running task finishes where it
   /// started (session config is fixed). An entry that pins wifiOnly stays.
+  /// The value it already has writes nothing and resolves, so a call at
+  /// every app start does not fail on a full disk.
   func setWifiOnly(_ enabled: Bool, resolve: @escaping () -> Void,
                    reject: @escaping (String, String) -> Void) {
     queue.async {
+      guard self.settings.wifiOnly != enabled else { return resolve() }
       var next = self.settings
-      let changed = next.wifiOnly != enabled
       next.wifiOnly = enabled
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "setWifiOnly: cannot save the queue settings")
+      do {
+        try self.saveSettings(next)
+      } catch {
+        reject("E_STORAGE", "setWifiOnly: cannot save the queue settings" + FileIO.cause(error))
         return
       }
-      if changed && self.ready {
+      if self.ready {
         for e in self.index.entries() where e.state == .queued && !e.isChunked && !e.legacy
           && e.wifiOnly == nil {
           let remaining = e.nextAttemptAt.map { Int($0 - self.now()) }
@@ -299,8 +311,10 @@ final class QueueCoordinator {
       }
       var next = self.settings
       next.headerGeneration += 1
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "updateHeaders: cannot save the queue settings")
+      do {
+        try self.saveSettings(next)
+      } catch {
+        reject("E_STORAGE", "updateHeaders: cannot save the queue settings" + FileIO.cause(error))
         return
       }
       for e in self.index.entries() where !e.legacy {
@@ -560,14 +574,13 @@ final class QueueCoordinator {
   }
 
   // Assigns only when the write landed.
-  func saveSettings(_ next: QueueSettings) -> Bool {
+  func saveSettings(_ next: QueueSettings) throws {
     do {
       try store.saveSettings(next)
       settings = next
-      return true
     } catch {
       NSLog("[RNFileUploader] cannot save settings: \(error.localizedDescription)")
-      return false
+      throw error
     }
   }
 }

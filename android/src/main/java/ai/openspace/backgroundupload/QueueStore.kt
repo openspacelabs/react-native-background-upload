@@ -210,8 +210,8 @@ data class LegacyManifest(
   }
 }
 
-/** A rejection that reaches JS as `promise.reject(code, message)`. */
-class QueueException(val code: String, message: String) : IOException(message) {
+/** A rejection that reaches JS as `promise.reject(code, message)`. [cause] is the underlying error, if any. */
+class QueueException(val code: String, message: String, cause: Throwable? = null) : IOException(message, cause) {
   companion object {
     const val E_RUNNING = "E_RUNNING"
     const val E_FILE_MISSING = "E_FILE_MISSING"

@@ -1,5 +1,17 @@
 ## Unreleased
 
+`setWifiOnly()` with the value the queue already has no longer writes the
+settings file, on both platforms. It still resolves. Before, an app that calls
+it at every start wrote the file each time, so on a nearly full disk the
+call rejected `E_STORAGE` for no reason. On Android, `pause()`, `resume()` and the retry
+defaults of `configure()` also skip a write that changes nothing.
+
+Each `E_STORAGE` rejection now ends with the underlying error, after the
+same message text as before: ` (cause: …)`. On iOS it holds the error domain
+and code, the POSIX code when there is one, and the description when the
+message does not already hold it. On Android it holds the exception class
+and the errno name when the cause chain has one. The code stays `E_STORAGE`.
+
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the
 caller's file into its queue, so this deleted the only copy. The file now
