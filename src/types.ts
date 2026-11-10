@@ -365,12 +365,16 @@ export type PauseScope = { keys?: string[] };
  * - `unownedUploads`: v9 upload directories with no row. `cancel(id)`
  *   deletes them.
  * - `unownedBytes`: the size of their files, best effort.
+ * - `unownedIds`: the upload ids of those directories, sorted, at most 100.
+ *   `unownedUploads` stays exact when there are more. Compare them with the
+ *   transfers the app still means to send, and `cancel(id)` the rest.
  */
 export type V9Leftovers = {
   legacyRows: number;
   legacyBytes: number;
   unownedUploads: number;
   unownedBytes: number;
+  unownedIds: string[];
 };
 
 /**

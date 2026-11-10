@@ -3,17 +3,20 @@ import Foundation
 /// v9 work still on the device, from `QueueStore.countLeftovers`. The
 /// counts are disjoint: legacyRows + unownedUploads is the number of v9 ids.
 /// - legacyRows: legacy rows; legacyBytes: the v9 manifest and blob they keep.
-/// - unownedUploads: v9 directories with no row; unownedBytes: their files.
+/// - unownedUploads: v9 directories with no row; unownedBytes: their files;
+///   unownedIds: their ids, sorted, at most `QueueStore.maxUnownedIds`, so
+///   the app can cancel the ones it will not send again.
 /// All zero once the app has adopted or cancelled every v9 id.
 struct V9Leftovers: Equatable {
   var legacyRows = 0
   var legacyBytes: Int64 = 0
   var unownedUploads = 0
   var unownedBytes: Int64 = 0
+  var unownedIds: [String] = []
 
   var dictionary: [String: Any] {
     ["legacyRows": legacyRows, "legacyBytes": legacyBytes,
-     "unownedUploads": unownedUploads, "unownedBytes": unownedBytes]
+     "unownedUploads": unownedUploads, "unownedBytes": unownedBytes, "unownedIds": unownedIds]
   }
 }
 

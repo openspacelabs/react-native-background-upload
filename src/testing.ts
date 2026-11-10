@@ -161,7 +161,7 @@ export type FakeNative = Spec & {
   seedDiagnostics: (records: Diagnostic[]) => void;
   /**
    * Adds a boot snapshot record, as native writes when the module starts,
-   * with these counts. A count left out is 0.
+   * with these counts. A count left out is 0, and `unownedIds` is [].
    */
   seedBootSnapshot: (counts?: {
     v9Leftovers?: Partial<V9Leftovers>;
@@ -617,6 +617,7 @@ export const createFakeNative = (
             legacyBytes: 0,
             unownedUploads: 0,
             unownedBytes: 0,
+            unownedIds: [],
             ...counts.v9Leftovers,
           },
           orphans: { dirs: 0, bytes: 0, ...counts.orphans },

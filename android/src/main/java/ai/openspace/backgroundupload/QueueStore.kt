@@ -26,6 +26,8 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   companion object {
     const val ENTRY_FILE = "entry.json"
     const val V9_MANIFEST_FILE = "manifest.json"
+    /** The most unowned v9 ids one count lists. The count itself stays exact. */
+    const val MAX_UNOWNED_IDS = 100
     /** The v9 manifest and the tmp file of its atomic write. v10 writes neither. */
     val V9_MANIFEST_FILES = setOf(V9_MANIFEST_FILE, "manifest.tmp")
     const val BLOB_FILE = "blob"
@@ -60,6 +62,12 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   // name is an encoding of the id. The id is read back from the file.
   fun entryDir(id: String) =
     File(dir, Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray()))
+
+  /** The id whose [entryDir] is named [name], or null when no id encodes to it. */
+  fun idOf(name: String): String? {
+    val id = runCatching { String(Base64.getUrlDecoder().decode(name), Charsets.UTF_8) }.getOrNull()
+    return id?.takeIf { entryDir(it).name == name }
+  }
 
   fun blobFile(id: String) = File(entryDir(id), BLOB_FILE)
 
@@ -143,7 +151,10 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   /**
    * Counts what no v10 entry owns, for the boot snapshot. Only directories
    * that [removeUnowned] would delete (no `entry.json`, not empty) count:
-   * - v9: the directory holds a v9 manifest ([V9_MANIFEST_FILES]);
+   * - v9: the directory holds a v9 manifest ([V9_MANIFEST_FILES]). Its id,
+   *   decoded from the directory name, goes in unownedIds, sorted, at most
+   *   [MAX_UNOWNED_IDS]. A name that decodes to no id is a warning; the
+   *   directory still counts;
    * - orphan: any other, such as a body a failed enqueue left. A bare
    *   `blob` is an orphan: a first-generation v10 chunked body keeps that
    *   name, so it does not show v9.
@@ -160,6 +171,7 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     var legacyBytes = 0L
     var v9Dirs = 0
     var v9Bytes = 0L
+    val v9Ids = mutableListOf<String>()
     var orphanDirs = 0
     var orphanBytes = 0L
     try {
@@ -179,6 +191,8 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
         if (files.any { it.name in V9_MANIFEST_FILES }) {
           v9Dirs++
           v9Bytes += size
+          val id = idOf(d.name)
+          if (id == null) Diag.warn("leftover count: no id encodes to the directory ${d.name}") else v9Ids += id
         } else {
           orphanDirs++
           orphanBytes += size
@@ -195,7 +209,7 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
       Diag.warn("leftover count stopped early; the counts are partial", error)
     }
     return Leftovers(
-      V9Leftovers(legacyIds.size, legacyBytes, v9Dirs, v9Bytes),
+      V9Leftovers(legacyIds.size, legacyBytes, v9Dirs, v9Bytes, v9Ids.sorted().take(MAX_UNOWNED_IDS)),
       Orphans(orphanDirs, orphanBytes),
     )
   }
@@ -276,7 +290,9 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
  * v9 work still on the device, from [QueueStore.countLeftovers]. The
  * counts are disjoint: legacyRows + unownedUploads is the number of v9 ids.
  * - legacyRows: legacy rows; legacyBytes: the v9 manifest and blob they keep.
- * - unownedUploads: v9 directories with no row; unownedBytes: their files.
+ * - unownedUploads: v9 directories with no row; unownedBytes: their files;
+ *   unownedIds: their ids, sorted, at most [QueueStore.MAX_UNOWNED_IDS], so
+ *   the app can cancel the ones it will not send again.
  * All zero once the app has adopted or cancelled every v9 id.
  */
 data class V9Leftovers(
@@ -284,12 +300,14 @@ data class V9Leftovers(
   val legacyBytes: Long,
   val unownedUploads: Int,
   val unownedBytes: Long,
+  val unownedIds: List<String> = emptyList(),
 ) {
   fun toMap(): Map<String, Any?> = mapOf(
     "legacyRows" to legacyRows,
     "legacyBytes" to legacyBytes,
     "unownedUploads" to unownedUploads,
     "unownedBytes" to unownedBytes,
+    "unownedIds" to unownedIds,
   )
 }
 

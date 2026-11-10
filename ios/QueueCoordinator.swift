@@ -270,7 +270,9 @@ final class QueueCoordinator {
   func cancel(_ id: String, resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
     queue.async {
       guard let e = self.index.entry(id) else {
-        self.store.removeUnowned(id)
+        if let error = self.store.removeUnowned(id) {
+          self.diagnostics.warn("could not delete the unowned files of '\(id)'", error: error.localizedDescription)
+        }
         return resolve()
       }
       if e.isLive && !e.legacy {

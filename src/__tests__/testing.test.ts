@@ -263,7 +263,11 @@ describe('takeDiagnostics', () => {
   it('seeds a boot snapshot whose counts default to zero', async () => {
     const fake = createFakeNative();
     fake.seedBootSnapshot({
-      v9Leftovers: { unownedUploads: 2, unownedBytes: 4096 },
+      v9Leftovers: {
+        unownedUploads: 2,
+        unownedBytes: 4096,
+        unownedIds: ['cap-1', 'cap-2'],
+      },
       orphans: { dirs: 1 },
     });
     fake.seedBootSnapshot();
@@ -279,6 +283,7 @@ describe('takeDiagnostics', () => {
           legacyBytes: 0,
           unownedUploads: 2,
           unownedBytes: 4096,
+          unownedIds: ['cap-1', 'cap-2'],
         },
         orphans: { dirs: 1, bytes: 0 },
       },
@@ -288,6 +293,7 @@ describe('takeDiagnostics', () => {
           legacyBytes: 0,
           unownedUploads: 0,
           unownedBytes: 0,
+          unownedIds: [],
         },
         orphans: { dirs: 0, bytes: 0 },
       },

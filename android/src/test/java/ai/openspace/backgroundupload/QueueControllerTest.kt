@@ -1113,13 +1113,19 @@ class QueueControllerTest {
   private fun snapshot(records: List<DiagnosticLog.Record>, field: String): Map<String, Any?> =
     records.single { it.level == DiagnosticLog.INFO }.data!![field] as Map<String, Any?>
 
-  private fun v9(legacyRows: Int = 0, legacyBytes: Long = 0, unownedUploads: Int = 0, unownedBytes: Long = 0) =
-    mapOf(
-      "legacyRows" to legacyRows.toDouble(),
-      "legacyBytes" to legacyBytes.toDouble(),
-      "unownedUploads" to unownedUploads.toDouble(),
-      "unownedBytes" to unownedBytes.toDouble(),
-    )
+  private fun v9(
+    legacyRows: Int = 0,
+    legacyBytes: Long = 0,
+    unownedUploads: Int = 0,
+    unownedBytes: Long = 0,
+    unownedIds: List<String> = emptyList(),
+  ) = mapOf(
+    "legacyRows" to legacyRows.toDouble(),
+    "legacyBytes" to legacyBytes.toDouble(),
+    "unownedUploads" to unownedUploads.toDouble(),
+    "unownedBytes" to unownedBytes.toDouble(),
+    "unownedIds" to unownedIds,
+  )
 
   private fun orphans(dirs: Int = 0, bytes: Long = 0) = mapOf("dirs" to dirs.toDouble(), "bytes" to bytes.toDouble())
 
@@ -1155,13 +1161,13 @@ class QueueControllerTest {
   @Test
   fun `a v9 directory with no row is counted with its size`() {
     v9Dir("cap", v9Parts, 20)
-    assertLeftovers(v9(unownedUploads = 1, unownedBytes = dirSize("cap")), orphans())
+    assertLeftovers(v9(unownedUploads = 1, unownedBytes = dirSize("cap"), unownedIds = listOf("cap")), orphans())
   }
 
   @Test
   fun `a directory with only a v9 manifest tmp file is v9`() {
     orphanFile("cap", "manifest.tmp", 12)
-    assertLeftovers(v9(unownedUploads = 1, unownedBytes = 12), orphans())
+    assertLeftovers(v9(unownedUploads = 1, unownedBytes = 12, unownedIds = listOf("cap")), orphans())
   }
 
   @Test
@@ -1222,7 +1228,10 @@ class QueueControllerTest {
     try {
       val records = sweepRecords()
       assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
-      assertEquals(v9(legacyRows = 1, unownedUploads = 1, unownedBytes = a), snapshot(records, "v9Leftovers"))
+      assertEquals(
+        v9(legacyRows = 1, unownedUploads = 1, unownedBytes = a, unownedIds = listOf("a")),
+        snapshot(records, "v9Leftovers"),
+      )
     } finally {
       locked.setReadable(true)
       locked.setExecutable(true)
@@ -1252,7 +1261,10 @@ class QueueControllerTest {
     store.beforeCountListing = { if (it == store.entryDir("b")) it.deleteRecursively() }
     val records = sweepRecords()
     assertEquals(listOf(DiagnosticLog.INFO), records.map { it.level })
-    assertEquals(v9(unownedUploads = 1, unownedBytes = dirSize("a")), snapshot(records, "v9Leftovers"))
+    assertEquals(
+      v9(unownedUploads = 1, unownedBytes = dirSize("a"), unownedIds = listOf("a")),
+      snapshot(records, "v9Leftovers"),
+    )
   }
 
   @Test
@@ -1264,7 +1276,47 @@ class QueueControllerTest {
     val records = sweepRecords()
     assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
     assertEquals("java.lang.SecurityException: denied", records[0].error)
-    assertEquals(v9(legacyRows = 1, unownedUploads = 1, unownedBytes = dirSize("d0")), snapshot(records, "v9Leftovers"))
+    val counted = snapshot(records, "v9Leftovers")
+    assertEquals(1.0, counted["unownedUploads"])
+    assertEquals(dirSize("d0").toDouble(), counted["unownedBytes"])
+    assertEquals(1.0, counted["legacyRows"])
+    // The first directory listed, which the file system picks.
+    assertTrue((counted["unownedIds"] as List<*>).single() in setOf("d0", "d1", "d2"))
+  }
+
+  @Test
+  fun `unowned ids are the ids of the v9 directories, sorted`() {
+    v9Dir("cap/2", v9Parts, 20)
+    v9Dir("cap 1", v9Parts, 20)
+    orphanFile("orphan", "body-1.json", 7)
+    legacyRow("legacy")
+    v9Dir("legacy", v9Parts, 20)
+    val ids = store.countLeftovers(listOf("legacy")).v9.unownedIds
+    assertEquals(listOf("cap 1", "cap/2"), ids)
+    ids.forEach { assertTrue(store.entryDir(it).isDirectory) }
+  }
+
+  @Test
+  fun `unowned ids stop at the cap and the count stays exact`() {
+    val n = QueueStore.MAX_UNOWNED_IDS + 5
+    repeat(n) { orphanFile("cap-%03d".format(it), "manifest.json", 1) }
+    val v9 = store.countLeftovers(emptyList()).v9
+    assertEquals(n, v9.unownedUploads)
+    assertEquals(n.toLong(), v9.unownedBytes)
+    assertEquals((0 until QueueStore.MAX_UNOWNED_IDS).map { "cap-%03d".format(it) }, v9.unownedIds)
+  }
+
+  @Test
+  fun `a v9 directory whose name is no id counts, with a warning and no id`() {
+    v9Dir("cap", v9Parts, 20)
+    File(root, "not+base64").mkdirs()
+    File(File(root, "not+base64"), "manifest.json").writeText("{}")
+    val records = sweepRecords()
+    assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
+    assertEquals(
+      v9(unownedUploads = 2, unownedBytes = dirSize("cap") + 2, unownedIds = listOf("cap")),
+      snapshot(records, "v9Leftovers"),
+    )
   }
 
   @Test

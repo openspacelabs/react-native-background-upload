@@ -88,13 +88,32 @@ final class QueueStore {
   /// (the only copy of the caller's bytes). A directory with an
   /// `entry.json`, readable or not, is kept. The empty id names the store
   /// root, so it deletes nothing.
-  func removeUnowned(_ id: String) {
-    guard !id.isEmpty else { return }
-    queue.sync {
+  /// Returns the error of a delete that failed.
+  @discardableResult
+  func removeUnowned(_ id: String) -> Error? {
+    guard !id.isEmpty else { return nil }
+    return queue.sync {
       let d = dir(id)
-      guard FileIO.exists(d), Self.isUnowned(d) else { return }
-      _ = try? FileManager.default.removeItem(at: d)
+      guard FileIO.exists(d), Self.isUnowned(d) else { return nil }
+      do {
+        try FileManager.default.removeItem(at: d)
+        return nil
+      } catch {
+        return error
+      }
     }
+  }
+
+  /// The most unowned v9 ids one count lists. The count itself stays exact.
+  static let maxUnownedIds = 100
+
+  /// The id whose `dir(_:)` is named `name`, or nil when no id encodes to it.
+  func id(forDirectoryName name: String) -> String? {
+    var b64 = name.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    while b64.count % 4 != 0 { b64 += "=" }
+    guard let data = Data(base64Encoded: b64), let id = String(data: data, encoding: .utf8),
+          dir(id).lastPathComponent == name else { return nil }
+    return id
   }
 
   /// A directory that `removeUnowned` deletes: it holds no `entry.json`.
@@ -108,7 +127,9 @@ final class QueueStore {
   /// Counts what no v10 entry owns, for the boot snapshot. Only directories
   /// that `removeUnowned` would delete (no `entry.json`, not empty) count:
   /// - v9: the directory holds `manifest.json` or a file named exactly
-  ///   `blob` (v10 names its blobs `blob-<uuid>`);
+  ///   `blob` (v10 names its blobs `blob-<uuid>`). Its id, decoded from the
+  ///   directory name, goes in unownedIds, sorted, at most `maxUnownedIds`.
+  ///   A name that decodes to no id is a warning; the directory still counts;
   /// - orphan: any other, such as `body-<uuid>`, `blob-<uuid>` or a `.tmp`.
   /// Each legacy row in `legacyIds` counts once, and the v9 manifest and
   /// blob it keeps count as legacy bytes. A legacy directory has its
@@ -124,6 +145,7 @@ final class QueueStore {
     var found = Leftovers()
     found.v9.legacyRows = legacyIds.count
     var warnings: [(message: String, error: String)] = []
+    var ids: [String] = []
     let fm = FileManager.default
     let dirs: [URL]
     do {
@@ -151,6 +173,11 @@ final class QueueStore {
       if names.contains(Self.manifestName) || names.contains(ChunkedManifestV9.blobName) {
         found.v9.unownedUploads += 1
         found.v9.unownedBytes += size
+        if let id = id(forDirectoryName: d.lastPathComponent) {
+          ids.append(id)
+        } else {
+          warnings.append(("leftover count: no id encodes to the directory \(d.lastPathComponent)", "the name is not url-safe base64 of a UTF-8 id"))
+        }
       } else {
         found.orphans.dirs += 1
         found.orphans.bytes += size
@@ -161,6 +188,7 @@ final class QueueStore {
       found.v9.legacyBytes += [fileURL(id, Self.manifestName), fileURL(id, ChunkedManifestV9.blobName)]
         .compactMap(Self.regularFileSize).reduce(0, +)
     }
+    found.v9.unownedIds = Array(ids.sorted().prefix(Self.maxUnownedIds))
     return (found, warnings)
   }
 

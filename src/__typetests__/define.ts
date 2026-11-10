@@ -316,6 +316,7 @@ if (v9) {
   expectType<number>(v9.legacyBytes);
   expectType<number>(v9.unownedUploads);
   expectType<number>(v9.unownedBytes);
+  assertEqual<typeof v9.unownedIds, string[]>(true);
 }
 const orphaned = record.data?.orphans;
 assertEqual<typeof orphaned, QueueOrphans | undefined>(true);
@@ -334,6 +335,7 @@ const zero: Diagnostic = {
       legacyBytes: 0,
       unownedUploads: 0,
       unownedBytes: 0,
+      unownedIds: [],
     },
     orphans: { dirs: 0, bytes: 0 },
   },
@@ -355,3 +357,19 @@ const partialOrphans: Diagnostic = {
   data: { orphans: { dirs: 0 } },
 };
 expectType<Diagnostic>(partialOrphans);
+const numericIds: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  data: {
+    v9Leftovers: {
+      legacyRows: 0,
+      legacyBytes: 0,
+      unownedUploads: 1,
+      unownedBytes: 0,
+      // @ts-expect-error ids are strings
+      unownedIds: [1],
+    },
+  },
+};
+expectType<Diagnostic>(numericIds);

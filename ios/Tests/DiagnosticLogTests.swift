@@ -27,7 +27,14 @@ final class DiagnosticLogTests: XCTestCase {
     ["dirs": Int64(dirs), "bytes": bytes]
   }
 
-  /// A field of the snapshot, as numbers.
+  /// The snapshot's v9Leftovers.unownedIds.
+  private func unownedIds(_ records: [[String: Any]]) throws -> [String] {
+    let boot = try XCTUnwrap(records.first { $0["level"] as? String == "info" })
+    let v9 = try XCTUnwrap((boot["data"] as? [String: Any])?["v9Leftovers"] as? [String: Any])
+    return try XCTUnwrap(v9["unownedIds"] as? [String])
+  }
+
+  /// A field of the snapshot, its numbers only.
   private func snapshot(_ records: [[String: Any]], _ field: String) throws -> [String: Int64] {
     let boot = try XCTUnwrap(records.first { $0["level"] as? String == "info" })
     XCTAssertEqual(boot["message"] as? String, DiagnosticLog.bootMessage)
@@ -84,6 +91,51 @@ final class DiagnosticLogTests: XCTestCase {
   func testAV9DirectoryWithNoRowIsCountedWithItsSize() throws {
     let size = try writeV9Upload(disk, "cap", blobBytes: 20)
     try assertLeftovers(v9(unownedUploads: 1, unownedBytes: size), orphans())
+    XCTAssertEqual(try unownedIds(Harness(root: root).takeDiagnostics()), ["cap"])
+  }
+
+  func testUnownedIdsAreTheIdsOfTheV9DirectoriesSorted() throws {
+    let store = disk
+    try writeV9Upload(store, "cap/2", blobBytes: 20)
+    try writeV9Upload(store, "cap 1", blobBytes: 20)
+    writeFile(store.fileURL("orphan", BodyStaging.bodyPrefix + "x"), bytes: 7)
+    let (found, _) = store.countLeftovers(legacyIds: [])
+    XCTAssertEqual(found.v9.unownedIds, ["cap 1", "cap/2"])
+    for id in found.v9.unownedIds { XCTAssertTrue(FileIO.exists(store.dir(id))) }
+  }
+
+  func testUnownedIdsStopAtTheCapAndTheCountStaysExact() throws {
+    let store = disk
+    let n = QueueStore.maxUnownedIds + 5
+    for i in 0..<n { writeFile(store.fileURL(String(format: "cap-%03d", i), QueueStore.manifestName), "{") }
+    let (found, _) = store.countLeftovers(legacyIds: [])
+    XCTAssertEqual(found.v9.unownedUploads, n)
+    XCTAssertEqual(found.v9.unownedBytes, Int64(n))
+    XCTAssertEqual(found.v9.unownedIds, (0..<QueueStore.maxUnownedIds).map { String(format: "cap-%03d", $0) })
+  }
+
+  func testAV9DirectoryWhoseNameIsNoIdCountsWithAWarningAndNoId() throws {
+    let size = try writeV9Upload(disk, "cap", blobBytes: 20)
+    writeFile(disk.root.appendingPathComponent("not+base64").appendingPathComponent(QueueStore.manifestName), "{}")
+    let records = Harness(root: root).takeDiagnostics()
+    XCTAssertEqual(records.compactMap { $0["level"] as? String }, ["warn", "info"])
+    XCTAssertEqual(try snapshot(records, "v9Leftovers"), v9(unownedUploads: 2, unownedBytes: size + 2))
+    XCTAssertEqual(try unownedIds(records), ["cap"])
+  }
+
+  func testAFailedCancelDeleteIsAWarning() throws {
+    let h = Harness(root: root)
+    XCTAssertEqual(h.takeDiagnostics().count, 1, "the boot record")
+    try writeV9Upload(h.store, "cap", blobBytes: 20)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: h.store.root.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: h.store.root.path) }
+    h.cancel("cap")
+    let records = h.takeDiagnostics()
+    XCTAssertEqual(records.count, 1)
+    XCTAssertEqual(records[0]["level"] as? String, "warn")
+    XCTAssertEqual(records[0]["message"] as? String, "could not delete the unowned files of 'cap'")
+    XCTAssertNotNil(records[0]["error"] as? String)
+    XCTAssertTrue(FileIO.exists(h.store.dir("cap")))
   }
 
   func testADirectoryWithOnlyAManifestIsV9() throws {
@@ -181,7 +233,7 @@ final class DiagnosticLogTests: XCTestCase {
       try? FileManager.default.removeItem(at: $0)
     } }
     let (found, warnings) = store.countLeftovers(legacyIds: [])
-    XCTAssertEqual(found.v9, V9Leftovers(unownedUploads: 1, unownedBytes: a))
+    XCTAssertEqual(found.v9, V9Leftovers(unownedUploads: 1, unownedBytes: a, unownedIds: ["a"]))
     XCTAssertTrue(warnings.isEmpty)
   }
 

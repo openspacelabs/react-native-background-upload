@@ -485,6 +485,8 @@ not overlap: `legacyRows + unownedUploads` is the number of v9 ids left.
   them. A directory is v9 when it holds a v9 manifest. On iOS a file named
   exactly `blob` also marks it.
 - `unownedBytes`: the size of the files in those directories, best effort.
+- `unownedIds`: the upload ids of those directories, sorted, at most 100.
+  `unownedUploads` stays exact when there are more.
 
 Its `data.orphans` (`{ dirs, bytes }`) counts the other directories with no
 entry file. These are the library's own leftovers, such as the file of an
@@ -501,7 +503,9 @@ are reported, not left out.
 Android keeps the newest 50 records. They are the module's warnings and
 errors, including those from background runs that had no JS, and the boot
 record. A new boot record replaces one that no `takeDiagnostics()` took, so
-launches without a call do not push out warnings and errors. The record's
+launches without a call do not push out warnings and errors. The replaced
+record's WorkManager-run detail is lost with it: you see only the newest
+launch's runs. The record's
 `data` also counts the entries the start schedules, by state and by key, and
 gives the oldest `updatedAt` among them, all as the start found them: an
 entry that was running when its process died counts as running. It also
@@ -510,9 +514,11 @@ changed them: the count by state, how many are delayed wakes, how many of
 those are due more than 24 hours out, the highest run attempt count, and how
 many queued or running entries had no run at all.
 
-On iOS the boot record has only `v9Leftovers` and `orphans`. iOS keeps its
-records in memory, the newest 50, so a record that no `takeDiagnostics()`
-took is gone when the process ends. The next launch counts again.
+On iOS the boot record has only `v9Leftovers` and `orphans`. The other iOS
+records are the warnings of the count, and a warning when `cancel(id)`
+cannot delete an unowned directory. iOS keeps its records in memory, the
+newest 50, so a record that no `takeDiagnostics()` took is gone when the
+process ends. The next launch counts again.
 
 ### `chunkPlan(sizeBytes, { min?, max? }): Array<{ start, end }>`
 Splits a byte count into contiguous, end-exclusive ranges: a deterministic
@@ -565,7 +571,11 @@ What happens to work a v9 build left behind:
   uploads with no row and their bytes. The library never deletes them by
   itself, because only the app knows which v9 ids it will still send. When
   every device reports zeros, the v9 paths can go. `data.orphans` is not v9
-  work and does not count toward this.
+  work and does not count toward this. A v9 upload with no row is known to
+  the app only by its id, so the record lists them in
+  `v9Leftovers.unownedIds`. Compare these ids with the transfers the app
+  still means to send, and `cancel(id)` the rest. Otherwise the count never
+  reaches zero.
 - **Wi-Fi only starts off.** Call `setWifiOnly(true)` again if the app had it
   on.
 
@@ -637,7 +647,7 @@ with a code such as `E_STORAGE`. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
 them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
 `seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record
-with those counts, the others 0.
+with those counts, the others 0 and no ids.
 
 An app that builds its client at module load can use the fake from the mock
 for every client instead. Get it with
