@@ -20,16 +20,19 @@ protocol UploadTask: AnyObject {
   var bytesSent: Int64 { get }
   /// The task has a response: the server answered, whatever bytesSent says.
   var hasResponse: Bool { get }
+  /// Starts a task that `Transport.upload` created. Call it only after the
+  /// task's TaskMap entry is written.
+  func resume()
   func cancel()
 }
 
 protocol Transport: AnyObject {
-  /// Creates an upload task, sets its description and begin date, calls
-  /// `beforeResume` with its key (the caller writes the TaskMap there), then
-  /// resumes it. Throws when the session cannot open `file`: no task exists
-  /// then, and `beforeResume` was not called.
+  /// Creates an upload task and sets its description and begin date. It
+  /// does not resume the task: the caller writes the TaskMap entry for its
+  /// key, then calls resume(). So a batch of tasks needs one TaskMap write.
+  /// Throws when the session cannot open `file`: no task exists then.
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask
+              beginAt: Date?) throws -> UploadTask
 
   /// Every task of both sessions. The completion may run on any queue.
   func allTasks(_ completion: @escaping ([UploadTask]) -> Void)

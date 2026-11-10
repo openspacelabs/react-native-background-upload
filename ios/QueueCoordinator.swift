@@ -92,8 +92,8 @@ final class QueueCoordinator {
   /// Bumped by scheduleReplace: only the latest scheduled replace runs.
   var replaceGeneration = 0
   /// Open grace waits (a completion that may still replay), by name. While
-  /// any is open, `afterGrace` holds the background completion handler
-  /// release.
+  /// any is open, or a part slice is queued, `afterGrace` holds the
+  /// background completion handler release (whenIdle).
   var graces: [String: Grace] = [:]
   var afterGrace: [() -> Void] = []
   /// Settle outcomes (never a user cancel) whose journal write failed, by

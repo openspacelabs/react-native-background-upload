@@ -10,6 +10,11 @@ import Foundation
 /// each enqueued part to the key of the one task that owns it. Only
 /// enqueueParts creates part tasks.
 ///
+/// refill builds the part tasks one slice at a time (about 32 MiB of parts),
+/// each slice in its own block on the queue. Another call (the next
+/// enqueue, a delegate callback) waits for one slice at most, not for the
+/// whole plan.
+///
 /// The entry (QueueEntry) is the durable truth: parts, accepted flags,
 /// incarnation. Terminals go through QueueCoordinator.settle.
 final class ChunkedCoordinator {
@@ -36,6 +41,18 @@ final class ChunkedCoordinator {
   // begins. When every part in flight waits, the row shows the earliest
   // as nextAttemptAt.
   private var partBeginAt: [String: [Int: Double]] = [:]
+
+  /// About how many part bytes one block on the queue copies.
+  static let defaultSliceBytes: Int64 = 32 << 20
+  /// A test hook: a small budget builds a plan in many slices.
+  var sliceBytes = ChunkedCoordinator.defaultSliceBytes
+  /// Ids with a slice block queued. At most one block per id: the block
+  /// takes its id out, then refills, which queues the next block when parts
+  /// are left. While it is not empty, the coordinator holds the background
+  /// completion handler (QueueCoordinator.whenIdle).
+  private(set) var queuedSlices: Set<String> = []
+  /// A test hook: where a slice block goes. nil puts it on the queue.
+  var dispatchSlice: ((@escaping () -> Void) -> Void)?
 
   init(_ coordinator: QueueCoordinator) {
     q = coordinator
@@ -275,24 +292,27 @@ final class ChunkedCoordinator {
         && inFlight[id]?[$0.part] == $0.key
     }
     guard !stale.isEmpty else { return }
-    let requests: [(index: Int, delayMs: Int?)] = stale.map { (index: $0.part, delayMs: remainingMs(id, $0.part)) }
     q.cancelTasks(keys: stale.map(\.key), purpose: .superseded)
     for r in stale {
       inFlight[id]?[r.part] = nil
       partSent[id]?[r.part] = nil
     }
-    // On false a part got no task: enqueueParts settled the entry or
-    // scheduled a refill, which gives the part a task. partBeginAt still
-    // holds the begin date of each part left over, so the refill keeps
-    // what is left of its backoff.
-    _ = enqueueParts(id, requests)
+    // The parts have no task now: refill gives them one, a slice at a time.
+    // partBeginAt still holds the begin date of each one, so the new task
+    // keeps what is left of its backoff.
+    refill(id)
     updateWait(id)
   }
 
-  /// Gives every pending part with no task one. Called at start, after every
-  /// part completion, and at the end of every reconcile. After start, it
-  /// only replaces a task that ended without its part being accepted (a
-  /// lost task, or one that could not be built).
+  /// Gives every pending part with no task one, a slice at a time. Called at
+  /// start, after every part completion, at the end of every reconcile, and
+  /// from each slice block. After start, it only replaces a task that ended
+  /// without its part being accepted (a lost task, or one that could not be
+  /// built).
+  ///
+  /// Each call checks the entry again and computes "pending minus in
+  /// flight" again. So a part never gets a second task, and a cancel, pause,
+  /// replace, settle or expiry between two slices stops the build.
   func refill(_ id: String) {
     guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
           !q.settings.isPaused(e.key) else { return }
@@ -314,8 +334,27 @@ final class ChunkedCoordinator {
     }
     let flight = Set((inFlight[id] ?? [:]).keys)
     let indexes = ChunkedEngine.indexesToEnqueue(pending: e.pendingIndexes(), inFlight: flight)
-    let requests: [(index: Int, delayMs: Int?)] = indexes.map { (index: $0, delayMs: remainingMs(id, $0)) }
-    _ = enqueueParts(id, requests) // settled or deferred inside
+    guard !indexes.isEmpty else { return }
+    let slice = ChunkedEngine.slice(indexes, budget: sliceBytes) { e.parts[$0].size }
+    let requests: [(index: Int, delayMs: Int?)] = slice.map { (index: $0, delayMs: remainingMs(id, $0)) }
+    let built = Signpost.interval("part slice", "\(id) parts \(slice.count) of \(indexes.count)") {
+      enqueueParts(id, requests)
+    }
+    // On false the entry settled, or a refill after a backoff follows.
+    if built && slice.count < indexes.count { refillNextSlice(id) }
+  }
+
+  /// Queues one block that refills `id`, unless one is queued already. The
+  /// blocks of other calls already queued run first.
+  private func refillNextSlice(_ id: String) {
+    guard queuedSlices.insert(id).inserted else { return }
+    let block = { [weak self] in
+      guard let self else { return }
+      self.queuedSlices.remove(id)
+      self.refill(id)
+      self.q.releaseIfIdle()
+    }
+    if let dispatchSlice { dispatchSlice(block) } else { q.queue.async(execute: block) }
   }
 
   /// What is left of a part's begin date, or nil once it has passed.
@@ -334,11 +373,12 @@ final class ChunkedCoordinator {
 
   /// Part tasks for `requests`, in order. Write-ahead: every part file is
   /// built, then one save of the entry carries every new attempt ordinal,
-  /// before any task exists. Each TaskMap entry is written before its task
-  /// resumes. A part that cannot be built stops the batch: a terminal
-  /// settles the entry with no task made, and a transient failure keeps the
-  /// tasks of the parts before it and refills after a backoff. Returns false
-  /// when the entry settled, or a part got no task and a refill follows.
+  /// before any task exists. The tasks are created suspended, their TaskMap
+  /// entries go in one write, and then they resume. A part that cannot be
+  /// built stops the batch: a terminal settles the entry with no task made,
+  /// and a transient failure keeps the tasks of the parts before it and
+  /// refills after a backoff. Returns false when the entry settled, or a
+  /// part got no task and a refill follows.
   private func enqueueParts(_ id: String, _ requests: [(index: Int, delayMs: Int?)]) -> Bool {
     guard var e = q.index.entry(id) else { return false }
     let blob = e.bodyPath ?? ChunkedManifestV9.blobName
@@ -379,6 +419,8 @@ final class ChunkedCoordinator {
         refillLater(e, part: e.parts[first.index], delayMs: first.delayMs)
         return false
       }
+      var made: [(index: Int, delayMs: Int?, task: UploadTask, meta: TaskMap.Meta)] = []
+      var unopened: (index: Int, delayMs: Int?, error: Error)?
       for (offset, b) in built.enumerated() {
         let part = e.parts[b.index]
         let requestId = UUID().uuidString
@@ -386,34 +428,44 @@ final class ChunkedCoordinator {
           id: id, partIndex: b.index, incarnation: e.incarnation, attempt: base + offset + 1,
           requestId: requestId, headerGeneration: q.settings.headerGeneration,
           generation: e.generation, purpose: .attempt, foreground: q.activity.isActive)
-        let task: UploadTask
         do {
-          task = try q.transport.upload(
+          let task = try q.transport.upload(
             q.buildRequest(e, url: b.url, requestId: requestId, partHeaders: part.headers),
             fromFile: b.file, wifiOnly: q.settings.wifiOnly(e.wifiOnly),
             description: ChunkedEngine.taskDescription(id: id, part: b.index, incarnation: e.incarnation),
-            beginAt: b.delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) },
-            beforeResume: { key in self.q.taskMap.set(meta, forKey: key) })
+            beginAt: b.delayMs.map { Date(timeIntervalSince1970: (q.now() + Double($0)) / 1000) })
+          made.append((index: b.index, delayMs: b.delayMs, task: task, meta: meta))
         } catch {
-          // The session could not open the part file. As for a failed part
-          // file build: a short blob can never succeed; otherwise try again
-          // later. The ordinals saved for the parts left are not reused.
-          let blobSize = FileIO.size(q.store.fileURL(id, blob)) ?? 0
-          if blobSize < part.end {
-            q.settle(id, .fileError("cannot read part \(b.index): \(error.localizedDescription)",
-                                    partIndex: b.index))
-          } else {
-            refillLater(e, part: part, delayMs: b.delayMs)
-          }
-          return false
+          unopened = (index: b.index, delayMs: b.delayMs, error: error)
+          break
         }
-        inFlight[id, default: [:]][b.index] = task.key
-        q.liveTasks[task.key] = (id, task)
-        if let delayMs = b.delayMs {
-          partBeginAt[id, default: [:]][b.index] = q.now() + Double(delayMs)
+      }
+      // One TaskMap write for the batch, before any of its tasks resumes.
+      q.taskMap.set(made.map { (key: $0.task.key, meta: $0.meta) })
+      for m in made {
+        inFlight[id, default: [:]][m.index] = m.task.key
+        q.liveTasks[m.task.key] = (id, m.task)
+        if let delayMs = m.delayMs {
+          partBeginAt[id, default: [:]][m.index] = q.now() + Double(delayMs)
         } else {
-          partBeginAt[id]?[b.index] = nil
+          partBeginAt[id]?[m.index] = nil
         }
+        m.task.resume()
+      }
+      if let unopened {
+        // The session could not open the part file. As for a failed part
+        // file build: a short blob can never succeed; otherwise try again
+        // later. The tasks made before it keep running. The ordinals saved
+        // for the parts left are not reused.
+        let part = e.parts[unopened.index]
+        let blobSize = FileIO.size(q.store.fileURL(id, blob)) ?? 0
+        if blobSize < part.end {
+          q.settle(id, .fileError("cannot read part \(unopened.index): \(unopened.error.localizedDescription)",
+                                  partIndex: unopened.index))
+        } else {
+          refillLater(e, part: part, delayMs: unopened.delayMs)
+        }
+        return false
       }
     }
     if case .later(let part, let delayMs) = failure {

@@ -37,6 +37,7 @@ let package = Package(
         "QueueStore.swift",
         "RequestIndex.swift",
         "RetryClassifier.swift",
+        "Signpost.swift",
         "TaskMap.swift",
         "Transport.swift",
         "UploadOutcome.swift",

@@ -94,6 +94,19 @@ final class TaskMap {
     }
   }
 
+  /// set for many tasks, in one write of the file.
+  func set(_ entries: [(key: String, meta: Meta)]) {
+    guard !entries.isEmpty else { return }
+    queue.sync {
+      for (key, meta) in entries { cache[key] = meta }
+      write()
+    }
+  }
+
+  /// How many times this instance wrote the file. For tests.
+  var writeCount: Int { queue.sync { writes } }
+  private var writes = 0
+
   func meta(forKey key: String) -> Meta? {
     queue.sync { cache[key] }
   }
@@ -146,6 +159,7 @@ final class TaskMap {
 
   // Caller holds `queue`.
   private func write() {
+    writes += 1
     guard let data = try? JSONEncoder().encode(cache) else { return }
     do {
       try FileIO.writeAtomically(data, to: fileURL)

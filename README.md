@@ -226,9 +226,16 @@ two background sessions (cellular allowed, and Wi-Fi only) sets
 `httpMaximumConnectionsPerHost = 4`. That caps connections to one host, not
 requests: over HTTP/2, every queued part can be in flight at once.
 
-**Every part is queued at once.** A chunked upload creates a task for every
-part at `mutate()`. Each part task reads its own part file, so a chunked
+**Every part is queued at once.** A chunked upload starts creating a task
+for every part at `mutate()`. It copies the parts and creates their tasks in
+slices of about 32 MiB, one slice at a time, and other calls run between two
+slices. So a `mutate()` right after a large chunked one waits for one slice,
+not for the whole file. Each part task reads its own part file, so a chunked
 upload needs the file's size again in free space until its parts are sent.
+
+**Instruments.** Each `enqueue`, each `issue` and each part slice is an
+`os_signpost` interval (subsystem `ai.openspace.rnbgupload`, Points of
+Interest), with the entry id and the part count.
 
 **Not at the system's discretion.** Both sessions set
 `isDiscretionary = false`, but iOS only honors that for a task created while

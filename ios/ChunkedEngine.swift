@@ -6,14 +6,29 @@ import Foundation
 // place. ChunkedCoordinator owns the session side.
 enum ChunkedEngine {
 
-  /// The part indexes to enqueue now: every pending (not accepted) part not
-  /// already in flight. Every part gets its task at once, so the tasks are
-  /// created while the caller is in mutate(), usually in the foreground. iOS
-  /// starts a task created in the background at its own discretion. It never
+  /// The part indexes that need a task: every pending (not accepted) part
+  /// not already in flight. The coordinator starts creating every one of
+  /// them at once, a slice at a time (see slice), so the tasks are created
+  /// right after the caller's mutate(), usually in the foreground. iOS starts
+  /// a task created in the background at its own discretion. It never
   /// returns an index in `inFlight`: the one-task-per-part invariant. A part
   /// waiting out a backoff is in flight (its delayed task holds the slot).
   static func indexesToEnqueue(pending: [Int], inFlight: Set<Int>) -> [Int] {
     pending.filter { !inFlight.contains($0) }
+  }
+
+  /// The first parts of `indexes`, in order, until their bytes reach
+  /// `budget`. Always at least one part. One slice is what one block on the
+  /// coordinator queue builds, so another call waits for one slice at most.
+  static func slice(_ indexes: [Int], budget: Int64, size: (Int) -> Int64) -> [Int] {
+    var bytes: Int64 = 0
+    var out: [Int] = []
+    for i in indexes {
+      if !out.isEmpty && bytes >= budget { break }
+      out.append(i)
+      bytes += size(i)
+    }
+    return out
   }
 
   // MARK: - Task identity

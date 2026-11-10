@@ -1,5 +1,18 @@
 ## Unreleased
 
+iOS no longer makes a `mutate()` wait while a chunked upload copies all of
+its parts. Since 11.0.0, a chunked `mutate()` copied every part out of the
+file and created every part task in one block on the queue, so the next
+`mutate()` waited for all of it. For a 2 GiB file on an older iPhone this
+could pass the 10 s enqueue timeout. The parts are now built in slices of
+about 32 MiB, and other calls run between two slices. Each slice writes the
+task map once; before, every part task wrote the whole task map. The parts
+still get their tasks right after `mutate()`, one slice after the other. A
+background wake keeps its completion handler until the last slice is built.
+
+iOS adds `os_signpost` intervals for each enqueue, issue and part slice, so
+Instruments can show how long each one holds the queue.
+
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the
 caller's file into its queue, so this deleted the only copy. The file now
@@ -41,8 +54,8 @@ A replaced simple request whose body landed anyway now completes its entry,
 even when its replacement failed and the entry moved to a later attempt.
 Before, the late success was dropped and the request was sent again.
 
-A chunked upload saves its entry and the task map once per batch of part
-tasks instead of once per part.
+A chunked upload saves its entry once per batch of part tasks instead of
+once per part.
 
 ## 11.0.0
 

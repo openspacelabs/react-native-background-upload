@@ -8,19 +8,28 @@ extension QueueCoordinator {
   /// daemon may still replay before it re-issues.
   static let graceMs = 10_000
 
-  /// `completion` runs on the queue once every entry has its tasks again and
-  /// every grace wait has ended. The caller holds the background completion
-  /// handlers until then, so the system cannot suspend the app before the
-  /// refill enqueues new tasks, or in the middle of a grace wait.
+  /// `completion` runs on the queue once every entry has its tasks again:
+  /// every grace wait has ended and every queued part slice has run. The
+  /// caller holds the background completion handlers until then, so the
+  /// system cannot suspend the app before the refill enqueues new tasks, or
+  /// in the middle of a grace wait.
   func reconcileAll(completion: @escaping () -> Void) {
     queue.async {
       self.transport.allTasks { tasks in
         self.queue.async {
           self.reconcile(tasks)
-          self.whenGraceEnds(completion)
+          self.whenIdleLocked(completion)
         }
       }
     }
+  }
+
+  /// Runs `block` on the queue once no grace wait is open and no part slice
+  /// is queued. urlSessionDidFinishEvents holds the session's completion
+  /// handler until then: the completions it just delivered may have queued
+  /// part slices.
+  func whenIdle(_ block: @escaping () -> Void) {
+    queue.async { self.whenIdleLocked(block) }
   }
 
   /// One open grace wait: the TaskMap keys whose completion may still
@@ -31,13 +40,25 @@ extension QueueCoordinator {
     let resolve: () -> Void
   }
 
-  /// Runs `block` now when no grace wait is open, or when the last one ends.
-  func whenGraceEnds(_ block: @escaping () -> Void) {
-    if graces.isEmpty {
+  /// Runs `block` now when no grace wait is open and no part slice is
+  /// queued. Otherwise it runs when the last of them ends.
+  func whenIdleLocked(_ block: @escaping () -> Void) {
+    if isIdle {
       block()
     } else {
       afterGrace.append(block)
     }
+  }
+
+  private var isIdle: Bool { graces.isEmpty && chunked.queuedSlices.isEmpty }
+
+  /// Runs the held blocks when nothing holds them any more. Called when a
+  /// grace wait ends and after each part slice.
+  func releaseIfIdle() {
+    guard isIdle, !afterGrace.isEmpty else { return }
+    let blocks = afterGrace
+    afterGrace = []
+    blocks.forEach { $0() }
   }
 
   /// Opens a grace wait for `keys`. It ends when the completion of every key
@@ -66,10 +87,7 @@ extension QueueCoordinator {
     guard let grace = graces[name], grace.token == token else { return }
     graces[name] = nil
     grace.resolve()
-    guard graces.isEmpty else { return }
-    let blocks = afterGrace
-    afterGrace = []
-    blocks.forEach { $0() }
+    releaseIfIdle()
   }
 
   func reconcile(_ tasks: [UploadTask]) {

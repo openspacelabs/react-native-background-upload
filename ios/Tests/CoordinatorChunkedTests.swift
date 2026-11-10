@@ -430,4 +430,242 @@ final class CoordinatorChunkedTests: XCTestCase {
     let recreated = fresh.transport.created.compactMap { ChunkedEngine.parsePartDescription($0.taskDescription)?.part }
     XCTAssertEqual(recreated.sorted(), [0, 1], "every pending part gets its task again")
   }
+  // MARK: - Part slices
+
+  /// The part indexes of `tasks`, sorted.
+  private func parts(_ tasks: [FakeTask]) -> [Int] {
+    tasks.compactMap { ChunkedEngine.parsePartDescription($0.taskDescription)?.part }.sorted()
+  }
+
+  private func partTasks(_ incarnation: String? = nil) -> [FakeTask] {
+    h.transport.created.filter {
+      guard let p = ChunkedEngine.parsePartDescription($0.taskDescription) else { return false }
+      return incarnation == nil || p.incarnation == incarnation
+    }
+  }
+
+  private func partFiles(_ id: String) -> [String] {
+    ((try? FileManager.default.contentsOfDirectory(atPath: h.store.dir(id).path)) ?? [])
+      .filter { $0.hasPrefix("part-") }.sorted()
+  }
+
+  // 6 parts of 10 bytes and a 20-byte budget: 3 slices of 2 parts.
+  private func enqueueSixPartsInThreeSlices(id: String = "cap", extra: [String: Any] = [:]) throws {
+    h.sliceBytes = 20
+    _ = try h.enqueue(h.chunkedRaw(id: id, size: 60, parts: 6, extra: extra)).get()
+  }
+
+  func testAnEnqueueAfterAChunkedEnqueueResolvesBeforeEveryPartHasATask() throws {
+    h.sliceBytes = 20
+    var partTasksAtResolve: Int?
+    // As Diana does: the metadata mutate() right after the file mutate() resolves.
+    h.coordinator.enqueue(h.chunkedRaw(id: "cap", size: 60, parts: 6), resolve: { [unowned self] _ in
+      self.h.coordinator.enqueue(self.h.dataRaw(id: "meta"), resolve: { [unowned self] _ in
+        partTasksAtResolve = self.partTasks().count
+      }, reject: { _, _ in XCTFail("meta rejected") })
+    }, reject: { _, _ in XCTFail("cap rejected") })
+    h.drainAll()
+    XCTAssertEqual(partTasksAtResolve, 2, "the next enqueue waits for one slice, not the whole plan")
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "then every part gets its task")
+    XCTAssertEqual(h.entry("meta")?.state, .running)
+  }
+
+  func testSlicesBuildInOrderAndEveryPartGetsExactlyOneTask() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1])
+    XCTAssertEqual(h.heldSlices.count, 1, "one continuation per entry")
+    h.runHeldSlice()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3])
+    h.runHeldSlice()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
+    XCTAssertTrue(h.heldSlices.isEmpty, "nothing left to build")
+    XCTAssertEqual(h.transport.created.count, 6)
+    XCTAssertTrue(h.transport.created.allSatisfy(\.resumed))
+    let attempts = h.transport.created.compactMap { h.map.meta(forKey: $0.key)?.attempt }
+    XCTAssertEqual(attempts.sorted(), [1, 2, 3, 4, 5, 6], "each task has its own ordinal")
+    XCTAssertEqual(h.store.load("cap")?.attempts, 6)
+  }
+
+  func testAPartThatCompletesBetweenSlicesGetsNoSecondTask() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.complete(try XCTUnwrap(partTask(0)), status: 500) // a delayed retry holds the slot
+    h.complete(try XCTUnwrap(partTask(1))) // accepted: its refill builds the next slice
+    XCTAssertEqual(parts(h.transport.live), [0, 2, 3])
+    XCTAssertEqual(h.heldSlices.count, 1, "the refill did not queue a second continuation")
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 2, 3, 4, 5], "one task per pending part")
+    XCTAssertEqual(parts(partTasks()), [0, 0, 1, 2, 3, 4, 5], "only part 0's retry is a second task")
+  }
+
+  func testCancelBetweenSlicesStopsTheBuild() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.cancel("cap")
+    h.runHeldSlices()
+    XCTAssertEqual(h.transport.created.count, 2, "no task after the cancel")
+    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.sink.settled.last?["kind"] as? String, "cancelled")
+    XCTAssertFalse(partFiles("cap").contains { !$0.hasPrefix("part-0.") && !$0.hasPrefix("part-1.") },
+                   "no part file after the cancel: \(partFiles("cap"))")
+  }
+
+  func testPauseBetweenSlicesStopsTheBuildAndResumeFinishesIt() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.pause()
+    h.runHeldSlices()
+    XCTAssertEqual(h.transport.created.count, 2, "a paused entry builds no part")
+    XCTAssertTrue(h.transport.live.isEmpty)
+    h.resume()
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
+  }
+
+  func testReplaceBetweenSlicesBuildsOnlyTheNewPlan() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices(extra: ["retry": ["terminalHttp": ["exempt": []]]])
+    let old = try XCTUnwrap(h.entry("cap")?.incarnation)
+    h.complete(try XCTUnwrap(partTask(0)), status: 404)
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 60, parts: 6, urlPrefix: "https://s3.test/v2-")).get()
+    let new = try XCTUnwrap(h.entry("cap")?.incarnation)
+    XCTAssertNotEqual(new, old)
+    h.runHeldSlices()
+    XCTAssertEqual(parts(partTasks(old)), [0, 1], "the old plan stopped at its first slice")
+    XCTAssertTrue(partTasks(old).allSatisfy { !$0.isLive })
+    XCTAssertEqual(parts(partTasks(new)), [0, 1, 2, 3, 4, 5], "the new plan: one task per part")
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
+  }
+
+  func testExpiryBetweenSlicesSettlesAndBuildsNothingMore() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    h.clock += 15 * 24 * 3_600_000
+    h.runHeldSlices()
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+    XCTAssertEqual(h.transport.created.count, 2)
+    XCTAssertTrue(h.transport.live.isEmpty)
+  }
+
+  /// Slice 1 has tasks and TaskMap keys; the process dies with the rest
+  /// queued. Returns a new process over the same disk, before boot.
+  private func crashAfterTheFirstSlice() throws -> (fresh: Harness, survivors: [FakeTask]) {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    let survivors = h.transport.live.map {
+      FakeTask(key: $0.key, description: $0.taskDescription, request: $0.request, beginAt: $0.beginAt)
+    }
+    XCTAssertEqual(parts(survivors), [0, 1])
+    let fresh = Harness(root: h.root)
+    fresh.sliceBytes = 20
+    fresh.relaunch(daemonTasks: survivors)
+    return (fresh, survivors)
+  }
+
+  func testACrashBetweenSlicesIsRepairedByReconcileAndRefill() throws {
+    let (fresh, survivors) = try crashAfterTheFirstSlice()
+    fresh.boot()
+    fresh.drainAll()
+    XCTAssertEqual(parts(fresh.transport.created), [2, 3, 4, 5], "the parts with no task get one")
+    XCTAssertTrue(survivors.allSatisfy { !$0.cancelled }, "the live tasks are adopted")
+    let attempts = (survivors + fresh.transport.created).compactMap { fresh.map.meta(forKey: $0.key)?.attempt }
+    XCTAssertEqual(Set(attempts).count, 6, "no ordinal repeats")
+  }
+
+  func testTheBackgroundCompletionHandlerWaitsForQueuedSlices() throws {
+    let (fresh, _) = try crashAfterTheFirstSlice()
+    fresh.holdSlices = true
+    var partsAtRelease: [Int]?
+    fresh.coordinator.reconcileAll { partsAtRelease = self.parts(fresh.transport.created) }
+    fresh.drain()
+    fresh.drain()
+    XCTAssertNil(partsAtRelease, "a slice is still queued")
+    XCTAssertEqual(fresh.heldSlices.count, 1)
+    fresh.runHeldSlices()
+    XCTAssertEqual(partsAtRelease, [2, 3, 4, 5], "released after the last slice")
+  }
+
+  func testWhenIdleWaitsForQueuedSlices() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    var idle = false
+    h.coordinator.whenIdle { idle = true }
+    h.drain()
+    XCTAssertFalse(idle)
+    h.runHeldSlices()
+    XCTAssertTrue(idle)
+  }
+
+  func testTheTaskMapIsWrittenOncePerSlice() throws {
+    let before = h.map.writeCount
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    XCTAssertEqual(h.transport.live.count, 6)
+    XCTAssertEqual(h.map.writeCount - before, 3, "one write per slice of 2 tasks")
+  }
+
+  func testEveryTaskMapEntryIsWrittenBeforeItsTaskResumes() throws {
+    var missing: [String] = []
+    h.transport.onResume = { [unowned self] task in
+      if self.h.map.meta(forKey: task.key) == nil { missing.append(task.key) }
+    }
+    try enqueueSixPartsInThreeSlices()
+    _ = try h.enqueue(h.dataRaw(id: "note")).get()
+    h.drainAll()
+    XCTAssertEqual(h.transport.created.count, 7)
+    XCTAssertTrue(h.transport.created.allSatisfy(\.resumed))
+    XCTAssertEqual(missing, [])
+  }
+}
+
+/// `RNBGU_PERF=1 swift test --filter ChunkedPerfTests`. Writes about 1.2 GB
+/// to the temp directory, so it does not run by default.
+final class ChunkedPerfTests: XCTestCase {
+  private static let mib = 1 << 20
+
+  /// The time from the resolve of a 200 MiB chunked enqueue (10 parts of 20
+  /// MiB) to the resolve of the enqueue that follows it at once. Real part
+  /// files, fake sessions: it leaves out nsurlsessiond.
+  private func nextEnqueueMs(sliceBytes: Int64?) throws -> Double {
+    let h = Harness()
+    defer { try? FileManager.default.removeItem(at: h.root) }
+    h.boot()
+    h.sliceBytes = sliceBytes
+    let size = 200 * Self.mib
+    let src = h.root.appendingPathComponent("capture.bin")
+    FileManager.default.createFile(atPath: src.path, contents: nil)
+    let writer = try FileHandle(forWritingTo: src)
+    let block = Data(repeating: 7, count: Self.mib)
+    for _ in 0..<200 { try writer.write(contentsOf: block) }
+    try writer.close()
+
+    var first: UInt64 = 0
+    var next: UInt64 = 0
+    let done = DispatchSemaphore(value: 0)
+    h.coordinator.enqueue(h.chunkedRaw(id: "cap", size: size, parts: 10, source: src), resolve: { _ in
+      first = DispatchTime.now().uptimeNanoseconds
+      h.coordinator.enqueue(h.dataRaw(id: "meta"), resolve: { _ in
+        next = DispatchTime.now().uptimeNanoseconds
+        done.signal()
+      }, reject: { _, _ in XCTFail("meta rejected") })
+    }, reject: { _, _ in XCTFail("cap rejected") })
+    done.wait()
+    h.drainAll()
+    XCTAssertEqual(h.transport.live.count, 11)
+    return Double(next - first) / 1_000_000
+  }
+
+  func testTheNextEnqueueWaitsForOneSliceOfA200MiBPlan() throws {
+    try XCTSkipUnless(ProcessInfo.processInfo.environment["RNBGU_PERF"] == "1", "set RNBGU_PERF=1 to run")
+    func median(_ v: [Double]) -> Double { v.sorted()[v.count / 2] }
+    let sliced = try (0..<3).map { _ in try nextEnqueueMs(sliceBytes: nil) }
+    // Int64.max puts every part in one slice: the build before slices.
+    let whole = try (0..<3).map { _ in try nextEnqueueMs(sliceBytes: .max) }
+    print(String(format: "RNBGU_PERF nextMs: sliced median %.1f ms %@; one block median %.1f ms %@",
+                 median(sliced), sliced.description, median(whole), whole.description))
+    XCTAssertLessThan(median(sliced), 500)
+  }
 }
