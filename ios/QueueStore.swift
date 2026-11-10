@@ -181,6 +181,7 @@ final class QueueStore {
       } else {
         found.orphans.dirs += 1
         found.orphans.bytes += size
+        found.orphanDirs.append(d)
       }
     }
     // A legacy id with no entry file was counted above, as the scan found it.
@@ -190,6 +191,104 @@ final class QueueStore {
     }
     found.v9.unownedIds = Array(ids.sorted().prefix(Self.maxUnownedIds))
     return (found, warnings)
+  }
+
+  // MARK: - Boot cleanup of orphans
+
+  /// The boot cleanup deletes an orphan directory only when its newest file,
+  /// and the directory itself, changed longer ago than this. A guard against
+  /// a staging path the name rules below do not know.
+  static let orphanMinAgeMs: Double = 24 * 60 * 60 * 1000
+
+  /// `body-<uuid>`, as `BodyStaging.uniqueName(bodyPrefix)` makes it, with
+  /// an optional `.tmp`.
+  private static let copiedBody = try! NSRegularExpression(
+    pattern: "^body-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\\.tmp)?$")
+
+  /// The files of an orphan that the boot cleanup may delete: copies whose
+  /// source the caller still has, and the tmp files of their atomic writes.
+  /// - `body-<uuid>`: a bodiless, data, form or copied file body
+  ///   (`BodyStaging.stage`);
+  /// - `body-<uuid>.tmp` and `entry.json.tmp`: an atomic write that did not
+  ///   finish (`FileIO.tmpURL`).
+  /// Never a chunked blob (`blob`, `blob-<uuid>`): that file was moved in,
+  /// so it can be the only copy, and a same-id enqueue adopts it
+  /// (`adoptableBlob`). Never a part file: its entry is gone, so its use is
+  /// not known.
+  static func isCopiedBodyFile(_ name: String) -> Bool {
+    if name == entryName + ".tmp" { return true }
+    let range = NSRange(name.startIndex..., in: name)
+    return copiedBody.firstMatch(in: name, range: range) != nil
+  }
+
+  /// Test seam: runs before the cleanup checks an orphan directory.
+  var beforeOrphanRemoval: ((URL) -> Void)?
+
+  /// The boot cleanup. Deletes each directory of `dirs` (the orphans that
+  /// `countLeftovers` listed) when all of these hold, checked on `queue`
+  /// just before the delete:
+  /// - it has no `entry.json`;
+  /// - every item in it is a regular file that `isCopiedBodyFile` accepts.
+  ///   So a v9 manifest or bare `blob`, a chunked blob, a part file, an
+  ///   unknown file or a subdirectory keeps the whole directory;
+  /// - its newest file, and the directory itself, changed more than
+  ///   `orphanMinAgeMs` before `now` (epoch ms).
+  /// The caller runs it where no enqueue can be staging (the coordinator
+  /// queue). A failed delete goes in `warnings`, and the other directories
+  /// go on. Returns what it deleted: directories fully gone, and the bytes
+  /// of every file deleted.
+  func removeOrphans(_ dirs: [URL], now: Double)
+    -> (removedDirs: Int, removedBytes: Int64, warnings: [(message: String, error: Error?)]) {
+    var removedDirs = 0
+    var removedBytes: Int64 = 0
+    var warnings: [(message: String, error: Error?)] = []
+    for d in dirs {
+      beforeOrphanRemoval?(d)
+      let result = queue.sync { Self.removeOrphan(d, now: now) }
+      removedBytes += result.bytes
+      if result.gone { removedDirs += 1 }
+      if let w = result.warning { warnings.append(w) }
+    }
+    return (removedDirs, removedBytes, warnings)
+  }
+
+  /// One directory of `removeOrphans`. Callers hold `queue`.
+  private static func removeOrphan(_ d: URL, now: Double)
+    -> (bytes: Int64, gone: Bool, warning: (message: String, error: Error?)?) {
+    let keep: (bytes: Int64, gone: Bool, warning: (message: String, error: Error?)?) = (0, false, nil)
+    let fm = FileManager.default
+    let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+    guard isUnowned(d),
+          let dirDate = try? d.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+          let files = try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: keys),
+          !files.isEmpty else { return keep }
+    var newest = dirDate
+    var sizes: [Int64] = []
+    for f in files {
+      // URL resource values do not follow a symbolic link, so a link is not
+      // a regular file and keeps the directory.
+      guard isCopiedBodyFile(f.lastPathComponent),
+            let v = try? f.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
+            let date = v.contentModificationDate else { return keep }
+      newest = max(newest, date)
+      sizes.append(Int64(v.fileSize ?? 0))
+    }
+    guard now - newest.timeIntervalSince1970 * 1000 > orphanMinAgeMs else { return keep }
+    var freed: Int64 = 0
+    for (f, size) in zip(files, sizes) {
+      do {
+        try fm.removeItem(at: f)
+      } catch {
+        return (freed, false, ("orphan cleanup: could not delete \(d.lastPathComponent)/\(f.lastPathComponent)", error))
+      }
+      freed += size
+    }
+    // rmdir deletes an empty directory only.
+    guard Foundation.rmdir(d.path) == 0 else {
+      let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+      return (freed, false, ("orphan cleanup: could not delete \(d.lastPathComponent)", error))
+    }
+    return (freed, true, nil)
   }
 
   /// The size of a regular file, or nil for anything else or a failed read.

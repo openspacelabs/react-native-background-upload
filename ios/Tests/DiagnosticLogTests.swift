@@ -24,7 +24,7 @@ final class DiagnosticLogTests: XCTestCase {
   }
 
   private func orphans(_ dirs: Int = 0, _ bytes: Int64 = 0) -> [String: Int64] {
-    ["dirs": Int64(dirs), "bytes": bytes]
+    ["dirs": Int64(dirs), "bytes": bytes, "removedDirs": 0, "removedBytes": 0]
   }
 
   /// The snapshot's v9Leftovers.unownedIds.

@@ -20,18 +20,33 @@ struct V9Leftovers: Equatable {
   }
 }
 
-/// Directories with no entry file that are not v9: the library's own leftovers.
+/// Directories with no entry file that are not v9: the library's own
+/// leftovers. `dirs` and `bytes` are what is left; `removedDirs` and
+/// `removedBytes` are what the boot cleanup deleted.
 struct Orphans: Equatable {
   var dirs = 0
   var bytes: Int64 = 0
+  var removedDirs = 0
+  var removedBytes: Int64 = 0
 
-  var dictionary: [String: Any] { ["dirs": dirs, "bytes": bytes] }
+  var dictionary: [String: Any] {
+    ["dirs": dirs, "bytes": bytes, "removedDirs": removedDirs, "removedBytes": removedBytes]
+  }
+
+  /// The counts after the cleanup deleted `removedDirs` directories and
+  /// `removedBytes` bytes of the ones counted here.
+  func afterCleanup(removedDirs: Int, removedBytes: Int64) -> Orphans {
+    Orphans(dirs: max(0, dirs - removedDirs), bytes: max(0, bytes - removedBytes),
+            removedDirs: removedDirs, removedBytes: removedBytes)
+  }
 }
 
-/// What `QueueStore.countLeftovers` found.
+/// What `QueueStore.countLeftovers` found. `orphanDirs`: the orphan
+/// directories it counted, for `QueueStore.removeOrphans`.
 struct Leftovers: Equatable {
   var v9 = V9Leftovers()
   var orphans = Orphans()
+  var orphanDirs: [URL] = []
 }
 
 /// The records takeDiagnostics() returns on iOS, in the Android shape

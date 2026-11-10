@@ -133,17 +133,32 @@ final class QueueCoordinator {
   /// One boot snapshot per process, after the import so its legacy rows
   /// count. The disk count runs on the diagnostic log's queue, so it delays
   /// neither the thread that creates the coordinator nor `queue`.
+  ///
+  /// Then the orphan cleanup (`QueueStore.removeOrphans`) runs on `queue`,
+  /// over the orphans the count listed, and only when there are any. On
+  /// `queue`, no enqueue is between staging its body and saving its entry:
+  /// enqueue runs there from start to end. The cleanup is one block on
+  /// `queue`, so it runs before or after reconcile, never during it. The
+  /// snapshot reports what is left and what it deleted.
   private func recordBootSnapshot() {
     let legacyIds = index.entries().filter(\.legacy).map(\.id)
     let store = self.store
     let log = diagnostics
+    let queue = self.queue
     // The boot time, read here: the count must not call `now` off this thread.
     let at = now()
     log.perform {
       let (found, warnings) = store.countLeftovers(legacyIds: legacyIds)
       for w in warnings { log.warn(w.message, error: w.error, at: at) }
+      var orphans = found.orphans
+      if !found.orphanDirs.isEmpty {
+        // The log's queue waits for `queue`; `queue` never waits for it.
+        let removed = queue.sync { store.removeOrphans(found.orphanDirs, now: at) }
+        for w in removed.warnings { log.warn(w.message, error: w.error, at: at) }
+        orphans = orphans.afterCleanup(removedDirs: removed.removedDirs, removedBytes: removed.removedBytes)
+      }
       log.info(DiagnosticLog.bootMessage,
-               data: ["v9Leftovers": found.v9.dictionary, "orphans": found.orphans.dictionary], at: at)
+               data: ["v9Leftovers": found.v9.dictionary, "orphans": orphans.dictionary], at: at)
     }
   }
 
