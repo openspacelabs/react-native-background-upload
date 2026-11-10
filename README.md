@@ -415,8 +415,9 @@ event (`paused`, then `queued`). No outcome is produced and the bytes are
 kept. A paused entry past `expiresAt` settles `error` with
 `errorKind: 'expired'` when it is resumed.
 
-Neither call rejects because the settings cannot be saved. See
-[Settings on a full disk](#settings-on-a-full-disk).
+Neither call rejects because the settings cannot be saved. On Android,
+either call can still reject `E_STORAGE` when an entry file cannot be saved.
+See [Settings on a full disk](#settings-on-a-full-disk).
 
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
@@ -448,8 +449,9 @@ reaches requests that stalled on 401. Each call bumps a header generation: a
 401 or 403 from an attempt issued under an older generation re-issues at once
 instead of parking. Parking emits one `state` event per entry. A header name
 or value the platform HTTP client cannot send rejects with `E_INVALID` and
-changes nothing. That is the only rejection: a full disk does not reject.
-See [Settings on a full disk](#settings-on-a-full-disk).
+changes nothing. A settings file that cannot be saved does not reject. On
+Android, an entry file that cannot be saved does reject `E_STORAGE`. See
+[Settings on a full disk](#settings-on-a-full-disk).
 
 ### Settings on a full disk
 `setWifiOnly()`, `updateHeaders()`, `pause()`, `resume()` and `configure()`
@@ -478,6 +480,19 @@ in the background with no JS, uses the last value that reached the disk:
 So send your settings again at each app start: call `setWifiOnly()`, and
 `pause()` or `resume()`, with the values you want. A call with the value
 native already has writes nothing.
+
+`updateHeaders()`, `pause()` and `resume()` also save each entry they
+change. On iOS, a failed entry save is logged, the entry changes in memory,
+and the next save of that entry writes it. On Android, the entries are read
+from disk, so they cannot change in memory only. There, the call changes and
+schedules every entry it can save, then rejects `E_STORAGE` when one or more
+entries could not be saved. Each entry that failed keeps its old state:
+
+- `updateHeaders()`: it keeps its old headers and stays in `awaiting-auth`
+  if it was there. Call `updateHeaders()` again.
+- `pause()`: it keeps its state, but its worker sees the pause before its
+  next attempt.
+- `resume()`: it stays `paused`. Call `resume()` again.
 
 ### `getRequests(filter?): RequestRow[]`
 Synchronous, from native's in-memory index, so it works offline. Returns

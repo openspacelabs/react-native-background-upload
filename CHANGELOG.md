@@ -16,6 +16,18 @@ defaults when the save fails; before, they were dropped. See "Settings on
 a full disk" in the README. `updateHeaders()` with an invalid header still
 rejects `E_INVALID` and changes nothing.
 
+On Android, `updateHeaders()`, `pause()` and `resume()` still reject
+`E_STORAGE` when an entry file cannot be saved, because Android reads the
+entries from disk. They now change and schedule every other entry first.
+Before, the first failed entry stopped the loop, and entries already saved
+as `queued` got no work until the next launch. An entry that failed keeps
+its old state.
+
+On Android, `resume()` and the launch sweep now compare a parked entry with
+its own header generation, not the one in the settings file. Before, after
+a settings save that never landed, a resumed entry that already had new
+headers could go back to `awaiting-auth`.
+
 The header generation no longer goes back after a relaunch that read an
 older settings file. iOS raises it at launch above every entry and task
 record. Android raises it above every entry at each `updateHeaders()`.

@@ -197,8 +197,10 @@ export const createUploadClient = ({
    * same-named headers a part carries. This is how a fresh token
    * reaches requests that stalled on 401. Native bumps a header generation, so
    * a 401 from an attempt issued under the old headers re-issues at once
-   * instead of parking. Rejects only for a header native cannot send
-   * (`E_INVALID`); a failed save still applies the patch.
+   * instead of parking. Rejects `E_INVALID` for a header native cannot
+   * send. A failed settings save does not reject. On Android, an entry file
+   * that cannot be saved rejects `E_STORAGE` after the other entries are
+   * patched.
    */
   const updateHeaders = (patch: Record<string, string>): Promise<void> =>
     native.updateHeaders(patch);

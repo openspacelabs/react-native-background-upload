@@ -600,7 +600,9 @@ final class QueueCoordinator {
       try store.saveSettings(settings)
       settingsBehind = false
     } catch {
-      reportSettingsSaveFailure(error)
+      // Only the first failure in a row, so retries on a full disk do not
+      // repeat it at every activation, as on Android.
+      if !settingsBehind { reportSettingsSaveFailure(error) }
       settingsBehind = true
     }
   }
