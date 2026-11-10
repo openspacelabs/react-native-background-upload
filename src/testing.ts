@@ -37,6 +37,7 @@ import type {
   RequestDescriptor,
   RequestRow,
   RequestState,
+  V9Leftovers,
 } from './types';
 
 export type { SettledEvent } from './delivery';
@@ -157,6 +158,11 @@ export type FakeNative = Spec & {
   seedUnacknowledged: (events: SettledEvent[]) => void;
   /** Adds diagnostic records. The next takeDiagnostics() returns and clears them. */
   seedDiagnostics: (records: Diagnostic[]) => void;
+  /**
+   * Adds a boot snapshot record, as native writes at each module start,
+   * with these v9 leftover counts. A count left out is 0.
+   */
+  seedV9Leftovers: (counts?: Partial<V9Leftovers>) => void;
   /**
    * The next call of `method` rejects (getRequests throws) with an Error
    * that carries `code`, as a native rejection does.
@@ -594,6 +600,22 @@ export const createFakeNative = (
 
     seedDiagnostics: (records) => {
       diagnostics.push(...records.map((record) => ({ ...record })));
+    },
+
+    seedV9Leftovers: (counts = {}) => {
+      diagnostics.push({
+        at: Date.now(),
+        level: 'info',
+        message: 'boot sweep',
+        data: {
+          v9Leftovers: {
+            legacyRows: 0,
+            unownedUploads: 0,
+            unownedBytes: 0,
+            ...counts,
+          },
+        },
+      });
     },
 
     failNext: (method, code, message) => {

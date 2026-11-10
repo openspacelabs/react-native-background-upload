@@ -356,6 +356,28 @@ export interface AddListener {
 export type PauseScope = { keys?: string[] };
 
 /**
+ * v9 work still on the device, counted at each module start. All zero is
+ * the normal state once the app has adopted or cancelled every v9 id.
+ * - `legacyRows`: rows with key `legacy` (see Upgrading from v9).
+ * - `unownedUploads`: v9 upload directories no v10+ entry owns, the ones
+ *   `cancel(id)` deletes, plus the v9 manifest and blob a legacy row keeps.
+ * - `unownedBytes`: the size of those files, best effort.
+ */
+export type V9Leftovers = {
+  legacyRows: number;
+  unownedUploads: number;
+  unownedBytes: number;
+};
+
+/**
+ * A diagnostic record's structured fields. The boot snapshot (message
+ * `'boot sweep'`) always has `v9Leftovers`; its other fields are untyped.
+ */
+export type DiagnosticData = Record<string, unknown> & {
+  v9Leftovers?: V9Leftovers;
+};
+
+/**
  * One native diagnostic record. `error` is the exception's class and
  * message. `data` carries structured fields, such as the boot snapshot's
  * counts.
@@ -365,7 +387,7 @@ export type Diagnostic = {
   level: 'info' | 'warn' | 'error';
   message: string;
   error?: string | null;
-  data?: Record<string, unknown> | null;
+  data?: DiagnosticData | null;
 };
 
 export type UploadClient = {

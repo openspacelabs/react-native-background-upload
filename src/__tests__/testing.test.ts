@@ -259,6 +259,28 @@ describe('takeDiagnostics', () => {
     await expect(fake.takeDiagnostics()).resolves.toEqual([record]);
     await expect(fake.takeDiagnostics()).resolves.toEqual([]);
   });
+
+  it('seeds a boot snapshot whose v9Leftovers default to zero', async () => {
+    const fake = createFakeNative();
+    fake.seedV9Leftovers({ unownedUploads: 2, unownedBytes: 4096 });
+    fake.seedV9Leftovers();
+    const records = await fake.takeDiagnostics();
+    expect(records).toEqual([
+      expect.objectContaining({ level: 'info', message: 'boot sweep' }),
+      expect.objectContaining({ level: 'info', message: 'boot sweep' }),
+    ]);
+    expect(records.map((record) => record.data?.v9Leftovers)).toEqual([
+      { legacyRows: 0, unownedUploads: 2, unownedBytes: 4096 },
+      { legacyRows: 0, unownedUploads: 0, unownedBytes: 0 },
+    ]);
+  });
+
+  it('clears seeded v9Leftovers on reset()', async () => {
+    const fake = createFakeNative();
+    fake.seedV9Leftovers({ legacyRows: 1 });
+    fake.reset();
+    await expect(fake.takeDiagnostics()).resolves.toEqual([]);
+  });
 });
 
 describe('emitters', () => {

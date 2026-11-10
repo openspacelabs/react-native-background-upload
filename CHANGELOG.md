@@ -1,5 +1,15 @@
 ## Unreleased
 
+`takeDiagnostics()` now reports how much v9 work is still on the device. The
+boot record (`info`, message `boot sweep`) has `data.v9Leftovers` with
+`legacyRows`, `unownedUploads` and `unownedBytes`. The library counts them
+at each module start, after queued work is scheduled, from a directory
+listing and file sizes. It deletes nothing. The record is now written at
+every start, even an idle one, so zero is reported. Before, Android skipped
+it when nothing was queued. iOS now returns this record and the warnings of
+its count, held in memory. Before, it returned an empty list. The fake
+native module has `seedV9Leftovers()`.
+
 `cancel(id)` on an id with no row now deletes the id's directory when it
 holds no entry file. A v9 chunked upload that was still running at the
 upgrade got no legacy row, so its manifest and blob could never be released.

@@ -468,17 +468,37 @@ they can be seen, such as an error tracker, once per launch. A record is
 `{ at, level, message, error?, data? }`, with `level` one of `info`, `warn`
 or `error`. `error` is the exception's class and message.
 
+Each time the module starts, once per launch plus once per JS reload, both
+platforms add one `info` record with the message `boot sweep`. Its
+`data.v9Leftovers` says how much v9 work is still on the device, so you can
+tell when no device needs the v9 upgrade paths any more:
+
+- `legacyRows`: rows with key `legacy` that the app has not cancelled.
+- `unownedUploads`: v9 uploads that no v10 or later entry owns. These are
+  the id directories that `cancel(id)` deletes because they hold no entry
+  file, plus the v9 manifest and blob a legacy row still keeps. A directory
+  counts once. An empty one does not count.
+- `unownedBytes`: the size of those files, best effort.
+
+The count lists directories and reads file sizes. It opens no file and
+changes nothing. It runs after the start has scheduled queued work. When a
+directory cannot be read, a `warn` record comes before the snapshot, and the
+counts leave that directory out. On a clean install all three are 0. They
+are reported, not left out.
+
 Android keeps the newest 50 records. They are the module's warnings and
-errors, including those from background runs that had no JS, and one `info`
-record each time the module starts and finds queued or parked entries or
-WorkManager runs. That is once per launch, plus once per JS reload. The
-record's `data` counts the entries the start schedules, by state and by key,
-and gives the oldest `updatedAt` among them, all as the start found them: an
-entry that was running when its process died counts as running. It also
-describes every unfinished WorkManager run the library had before the start
-changed them: the count by state, how many are delayed wakes, how many of
-those are due more than 24 hours out, the highest run attempt count, and how
-many queued or running entries had no run at all. iOS returns an empty list.
+errors, including those from background runs that had no JS, and the boot
+record. Its `data` also counts the entries the start schedules, by state and
+by key, and gives the oldest `updatedAt` among them, all as the start found
+them: an entry that was running when its process died counts as running. It
+also describes every unfinished WorkManager run the library had before the
+start changed them: the count by state, how many are delayed wakes, how many
+of those are due more than 24 hours out, the highest run attempt count, and
+how many queued or running entries had no run at all.
+
+iOS returns only the boot record, with `v9Leftovers` and no other field, and
+the warnings of its count. It keeps them in memory, so a record that no
+`takeDiagnostics()` took is gone at the next launch, which counts again.
 
 ### `chunkPlan(sizeBytes, { min?, max? }): Array<{ start, end }>`
 Splits a byte count into contiguous, end-exclusive ranges: a deterministic
@@ -526,6 +546,11 @@ What happens to work a v9 build left behind:
   from the accepted parts; different parts start over on the kept bytes. An
   id with no `mutate()` keeps its bytes until `cancel(id)`, which deletes
   them. Cancel every v9 upload id you will not send again.
+- **Track what is left.** The boot record of `takeDiagnostics()` has
+  `data.v9Leftovers`: the legacy rows, and the v9 uploads and bytes no v10
+  entry owns. The library never deletes them by itself, because only the app
+  knows which v9 ids it will still send. When every device reports zeros,
+  the v9 paths can go.
 - **Wi-Fi only starts off.** Call `setWifiOnly(true)` again if the app had it
   on.
 
@@ -595,7 +620,9 @@ re-emit) or the header merge of `updateHeaders()`; script those with
 `data` parsed back from JSON. `failNext()` makes the next native call reject
 with a code such as `E_STORAGE`. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
-them.
+them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
+`seedV9Leftovers({ unownedUploads: 2 })` adds a boot record with those
+counts, the others 0.
 
 An app that builds its client at module load can use the fake from the mock
 for every client instead. Get it with
