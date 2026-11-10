@@ -52,17 +52,53 @@ class WorkerOpsTest {
   private val ok = UploadResponse(200, """{"id":7}""", mapOf("x" to "y"))
 
   @Test
-  fun `recordTransientHit raises the count under the lock and refuses past the cap`() {
+  fun `recordTransientHit raises the count by rule identity and refuses past the cap`() {
     store.save(entry())
+    val g = store.load("e1")!!.generation
+    val capped = UploadOutcome.TransientRule(400, "Bad Request", maxRetries = 2)
+    val uncapped = UploadOutcome.TransientRule(404)
+    assertTrue(ops.recordTransientHit("e1", g, null, capped))
+    assertEquals(mapOf("400|Bad Request" to 1), store.load("e1")!!.transientHitsByRule)
+    assertTrue(ops.recordTransientHit("e1", g, null, capped))
+    assertFalse(ops.recordTransientHit("e1", g, null, capped))
+    assertFalse(ops.recordTransientHit("e1", g, null, capped.copy(maxRetries = 1))) // a lowered cap applies to the count
+    assertEquals(mapOf("400|Bad Request" to 2), store.load("e1")!!.transientHitsByRule) // not raised past the cap
+    assertTrue(ops.recordTransientHit("e1", g, null, capped.copy(maxRetries = 3))) // a raised cap allows more
+    assertTrue(ops.recordTransientHit("e1", g, null, uncapped)) // no cap
+    assertTrue(ops.recordTransientHit("e1", g + 1, null, UploadOutcome.TransientRule(404, maxRetries = 1))) // another generation: ignored, allowed
+    assertEquals(mapOf("400|Bad Request" to 3, "404" to 1), store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `recordTransientHit counts each part on its own`() {
+    store.save(entry(descriptor = desc(url = null, parts = listOf(part(0, 10), part(10, 20))), body = StagedBody(StagedBody.CHUNKED, "blob", null, 20)))
+    val g = store.load("e1")!!.generation
+    val rule = UploadOutcome.TransientRule(400, maxRetries = 1)
+    assertTrue(ops.recordTransientHit("e1", g, 0, rule))
+    assertFalse(ops.recordTransientHit("e1", g, 0, rule))
+    assertTrue(ops.recordTransientHit("e1", g, 1, rule)) // part 1 has its own count
+    assertTrue(ops.recordTransientHit("e1", g, 5, rule)) // no such part: allowed, nothing written
     val e = store.load("e1")!!
-    assertTrue(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
-    assertEquals(listOf(0, 1), store.load("e1")!!.transientHits)
-    assertTrue(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
-    assertFalse(ops.recordTransientHit("e1", e.generation, 1, cap = 2))
-    assertEquals(listOf(0, 2), store.load("e1")!!.transientHits) // not raised past the cap
-    assertTrue(ops.recordTransientHit("e1", e.generation, 0, cap = null)) // no cap
-    assertTrue(ops.recordTransientHit("e1", e.generation + 1, 0, cap = 1)) // another generation: ignored, allowed
-    assertEquals(listOf(1, 2), store.load("e1")!!.transientHits)
+    assertEquals(listOf(mapOf("400" to 1), mapOf("400" to 1)), e.descriptor!!.parts!!.map { it.transientHitsByRule })
+    assertNull(e.transientHitsByRule)
+  }
+
+  @Test
+  fun `concurrent hits cannot pass the cap`() {
+    store.save(entry(descriptor = desc(url = null, parts = listOf(part(0, 10))), body = StagedBody(StagedBody.CHUNKED, "blob", null, 10)))
+    store.save(entry(id = "e2"))
+    val rule = UploadOutcome.TransientRule(400, maxRetries = 3)
+    for ((id, partIndex) in listOf("e1" to 0, "e2" to null)) {
+      val allowed = java.util.concurrent.atomic.AtomicInteger()
+      val threads = List(16) {
+        Thread { if (ops.recordTransientHit(id, 1, partIndex, rule)) allowed.incrementAndGet() }
+      }
+      threads.forEach { it.start() }
+      threads.forEach { it.join() }
+      assertEquals(id, 3, allowed.get())
+    }
+    assertEquals(mapOf("400" to 3), store.load("e1")!!.descriptor!!.parts!![0].transientHitsByRule)
+    assertEquals(mapOf("400" to 3), store.load("e2")!!.transientHitsByRule)
   }
 
   @Test

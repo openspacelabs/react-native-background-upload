@@ -50,10 +50,17 @@ export type AcceptRule = { status: number; bodyIncludes?: string };
  * A 4xx response to retry instead of settling. `bodyIncludes` narrows the
  * rule by a response-body substring, so one status can mean "try again"
  * with one body and "rejected" with another. `maxRetries` caps the retries
- * the rule causes for one entry: `maxRetries: 3` retries three matching
- * responses, and the fourth settles `error` with `errorKind: 'http'`. A
- * same-id `mutate()` resets the count. 401, 403, 408 and 429 are not
- * allowed: the standard table handles them before any rule.
+ * the rule causes: `maxRetries: 3` retries three matching responses, and the
+ * fourth settles `error` with `errorKind: 'http'`. No `maxRetries` means no
+ * cap. The first matching rule in the list wins.
+ *
+ * The count is kept by `status` and `bodyIncludes`, not by list position:
+ * reordering the rules or changing `maxRetries` keeps it. A simple request
+ * has one count per rule. A chunked request has one per rule for each part,
+ * and each part gets the full `maxRetries`. A same-id `mutate()` that reopens
+ * a settled entry starts the counts at 0; one on a live entry keeps them.
+ * 401, 403, 408 and 429 are not allowed: the standard table handles them
+ * before any rule.
  */
 export type TransientRule = {
   status: number;

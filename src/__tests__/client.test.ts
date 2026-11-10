@@ -196,6 +196,40 @@ describe('configure', () => {
     );
   });
 
+  it('a later invalid option leaves every earlier setting unchanged', async () => {
+    const client = createUploadClient();
+    const send = client.define({
+      key: 'k',
+      request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
+    });
+    client.configure({ lifetimeMs: 1000, maxVarsBytes: 16 });
+    native.configure.mockClear();
+    expect(() =>
+      client.configure({ lifetimeMs: 5, enqueueTimeoutMs: 0 }),
+    ).toThrow(/enqueueTimeoutMs/);
+    expect(() =>
+      client.configure({
+        lifetimeMs: 5,
+        maxVarsBytes: 64,
+        enqueueTimeoutMs: 5,
+        retry: 7 as never,
+      }),
+    ).toThrow(/^configure: /);
+    expect(() =>
+      client.configure({ lifetimeMs: 5, enqueueTimeoutMs: 5, maxVarsBytes: 0 }),
+    ).toThrow(/maxVarsBytes/);
+    expect(native.configure).not.toHaveBeenCalled();
+    // The first call's lifetime and vars cap still apply.
+    const before = Date.now();
+    await send.mutate({ s: 'a'.repeat(8) });
+    const entry = native.enqueue.mock.calls.at(-1)![0];
+    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
+    expect(entry.descriptor.expiresAt).toBeLessThan(before + 1000 + 5000);
+    await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
+      /is 17 bytes; the limit is 16/,
+    );
+  });
+
   it('sends the 14 day default lifetime and no retry when neither is given', () => {
     createUploadClient().configure({});
     expect(native.configure).toHaveBeenCalledWith({
