@@ -149,12 +149,19 @@ class WorkerOps(
    * rule's identity, is checked and raised under the store lock, so two
    * writers cannot both pass the cap. [partStart] is null for a simple
    * entry, which counts on the entry; a chunked entry counts on the part
-   * with that range start, so each part gets the full maxRetries. The start,
-   * not the index, names the part: a live re-mutate may reorder the parts
-   * while the attempt is in flight. Returns false when the count is already
-   * at the rule's maxRetries; the caller then settles the response as
-   * terminal. A lost write, another generation, or no part with that start
-   * allows the retry: one retry too many, never one too few.
+   * with that range start, so each part gets the full maxRetries.
+   *
+   * The start names the part, as in carryAccepted. Within one generation the
+   * parts keep their order: JS rejects a parts list that is not sorted
+   * ascending, and a live re-mutate keeps the generation only when
+   * ChunkedParts.sameParts matches, so the list has the same ranges in the
+   * same order. The index would work today. The start is a defensive choice:
+   * it stays right if either rule changes.
+   *
+   * Returns false when the count is already at the rule's maxRetries; the
+   * caller then settles the response as terminal. A lost write, another
+   * generation, or no part with that start allows the retry: one retry too
+   * many, never one too few.
    */
   fun recordTransientHit(id: String, generation: Int, partStart: Long?, rule: UploadOutcome.TransientRule): Boolean {
     val key = rule.identity
