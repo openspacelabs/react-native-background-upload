@@ -16,6 +16,12 @@ runs before the replay. In development, a later `define()` of a key that is
 not listed logs a warning. Nothing else changes: an unlisted key still
 receives its outcomes. The new `AnyDefined` type names one entry of the list.
 
+iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
+entry, for example on a full disk. The library had already moved the
+caller's file into its queue, so this deleted the only copy. The file now
+stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
+uses it, as Android already did.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
