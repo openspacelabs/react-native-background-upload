@@ -147,34 +147,37 @@ class WorkerOps(
   /**
    * A `transient` [rule] matched this response. The count, keyed by the
    * rule's identity, is checked and raised under the store lock, so two
-   * writers cannot both pass the cap. [partIndex] is null for a simple entry,
-   * which counts on the entry; a chunked entry counts on that part, so each
-   * part gets the full maxRetries. Returns false when the count is already
+   * writers cannot both pass the cap. [partStart] is null for a simple
+   * entry, which counts on the entry; a chunked entry counts on the part
+   * with that range start, so each part gets the full maxRetries. The start,
+   * not the index, names the part: a live re-mutate may reorder the parts
+   * while the attempt is in flight. Returns false when the count is already
    * at the rule's maxRetries; the caller then settles the response as
-   * terminal. A lost write, another generation, or a part index out of
-   * range allows the retry: one retry too many, never one too few.
+   * terminal. A lost write, another generation, or no part with that start
+   * allows the retry: one retry too many, never one too few.
    */
-  fun recordTransientHit(id: String, generation: Int, partIndex: Int?, rule: UploadOutcome.TransientRule): Boolean {
+  fun recordTransientHit(id: String, generation: Int, partStart: Long?, rule: UploadOutcome.TransientRule): Boolean {
     val key = rule.identity
     val cap = rule.maxRetries
     var within = true
     store.update(id) { e ->
       val parts = e.descriptor?.parts
+      val partIndex = partStart?.let { start -> parts?.indexOfFirst { it.start == start } }
       val hits = when {
         e.generation != generation -> return@update e
-        partIndex == null -> e.transientHitsByRule
-        parts == null || partIndex !in parts.indices -> return@update e
+        partStart == null -> e.transientHitsByRule
+        parts == null || partIndex == null || partIndex < 0 -> return@update e
         else -> parts[partIndex].transientHitsByRule
       }
       if (cap != null && (hits?.get(key) ?: 0) >= cap) {
         within = false
         return@update e
       }
-      if (partIndex == null) {
+      if (partStart == null) {
         val map = hits ?: emptyMap()
         e.copy(transientHitsByRule = map + (key to (map[key] ?: 0) + 1))
       } else {
-        e.copy(descriptor = e.descriptor!!.copy(parts = ChunkedParts.withTransientHit(parts!!, partIndex, key)))
+        e.copy(descriptor = e.descriptor!!.copy(parts = ChunkedParts.withTransientHit(parts!!, partIndex!!, key)))
       }
     }
     return within
