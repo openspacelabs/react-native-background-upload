@@ -307,12 +307,27 @@ Retry classes:
 | 2xx, or an `accept` rule matches | settle `completed` |
 | network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt` |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
-| other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. `maxRetries: 3` retries three matching responses; the fourth settles. The entry counts per rule; a same-id `mutate()` resets the count. A rule for 401, 403, 408 or 429 is rejected at the call |
+| other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
 | other 4xx, or a rule past its `maxRetries` | settle `error` with `errorKind: 'http'`, response attached |
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
 | `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
+
+**Transient rule counts.** The library counts the responses each rule
+excuses. It keeps the count by the rule's `status` and `bodyIncludes`, not by
+its place in the list:
+
+- Reorder the rules, or add a rule in front, and each rule keeps its count.
+- Change a rule's `maxRetries`, and the new cap applies to the count so far.
+- Change a rule's `status` or `bodyIncludes`, and it is a new rule. Its count
+  starts at 0.
+- A simple request has one count per rule.
+- A chunked request has one count per rule for each part. Each part gets the
+  full `maxRetries`. The request settles `error` when one part goes past the
+  cap, with that part's response.
+- A same-id `mutate()` that reopens a settled entry starts every count at 0.
+  A same-id `mutate()` on a live entry keeps the counts.
 
 Every attempt sends an `X-Request-Id` header, minted per attempt. `Meta.requestId`
 carries the last one.
