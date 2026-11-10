@@ -109,6 +109,32 @@ final class SettingsSaveTests: XCTestCase {
     XCTAssertTrue(saved.wifiOnly)
   }
 
+  func testLeavingTheForegroundSavesTheValueThatWasBehind() {
+    failSettingsSaves()
+    h.setWifiOnly(true)
+    allowSettingsSaves()
+    h.resignActive()
+    h.drain()
+    XCTAssertTrue(saved.wifiOnly, "the last chance before a relaunch with no JS")
+  }
+
+  func testConfigureWithUnchangedOptionsSavesTheValueThatWasBehind() {
+    failSettingsSaves()
+    h.setWifiOnly(true)
+    allowSettingsSaves()
+    h.coordinator.configure([:]) // no retry, as now
+    h.drain()
+    XCTAssertTrue(saved.wifiOnly)
+  }
+
+  func testPauseOrResumeThatChangesNothingSavesTheValueThatWasBehind() {
+    failSettingsSaves()
+    h.setWifiOnly(true)
+    allowSettingsSaves()
+    h.resume() // nothing is paused
+    XCTAssertTrue(saved.wifiOnly)
+  }
+
   func testARetryThatFailsAgainKeepsTheValueAndTriesLater() {
     failSettingsSaves()
     h.setWifiOnly(true)
@@ -135,12 +161,24 @@ final class SettingsSaveTests: XCTestCase {
     h.updateHeaders(["Authorization": "t1"]) // entry a saves generation 1; settings.json keeps 0
     allowSettingsSaves()
     XCTAssertEqual(h.store.load("a")?.headerGeneration, 1)
+    XCTAssertEqual(saved.headerGeneration, 0)
     h.relaunch()
     h.boot()
-    XCTAssertEqual(h.coordinator.settings.headerGeneration, 0, "the relaunch reads the older saved value")
+    XCTAssertEqual(h.coordinator.settings.headerGeneration, 1, "raised to the entry's value at launch")
     h.updateHeaders(["Authorization": "t2"])
     // A task sent under generation 1 (t1) that gets a 401 must see newer headers.
     XCTAssertEqual(h.coordinator.settings.headerGeneration, 2)
     XCTAssertEqual(h.entry("a")?.headerGeneration, 2)
+  }
+
+  func testTheHeaderGenerationAtLaunchIsAboveEveryTaskTag() {
+    // taskWillBegin re-tags a task without saving its entry, so a tag can be
+    // above every saved entry and above settings.json.
+    h.map.set(TaskMap.Meta(id: "a", headerGeneration: 5), forKey: "any:99")
+    h.relaunch()
+    XCTAssertEqual(h.coordinator.settings.headerGeneration, 5)
+    h.boot()
+    h.updateHeaders(["Authorization": "t"])
+    XCTAssertEqual(h.coordinator.settings.headerGeneration, 6)
   }
 }

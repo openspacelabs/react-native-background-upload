@@ -455,17 +455,29 @@ See [Settings on a full disk](#settings-on-a-full-disk).
 `setWifiOnly()`, `updateHeaders()`, `pause()`, `resume()` and `configure()`
 change queue settings that native saves to a file. They apply the new value
 in memory first, so this session uses it at once. Then they save the file.
-If the save fails, for example on a full disk, the call still resolves. The
-library records a warning (on Android, in `takeDiagnostics()`) and tries the
-save again at the next one of these calls and each time the app becomes
-active.
+If the save fails, for example on a full disk, the call still resolves.
 
-The cost: until a save lands, a relaunch in the background with no JS reads
-the older saved value. For `updateHeaders()`, a request can then send the
-older headers, get a 401, and wait in `awaiting-auth` for the next
-`updateHeaders()`. For `setWifiOnly()`, the earlier Wi-Fi setting applies
-during that relaunch. For `pause()` and `resume()`, the earlier pause state
-applies, so a paused entry can run or a resumed one can wait.
+The library records a warning. On Android, `takeDiagnostics()` returns it.
+On iOS, the warning goes to the device log only for now. It will go to
+`takeDiagnostics()` when iOS has a diagnostics list.
+
+The library tries the save again at the next one of these calls, when the
+app becomes active, and when the app leaves the foreground. These retries
+happen only while the process lives. A new process, for example a relaunch
+in the background with no JS, uses the last value that reached the disk:
+
+- `setWifiOnly()`: the earlier Wi-Fi setting applies.
+- `pause()` and `resume()`: the earlier pause state applies. At launch,
+  native moves the entries to match it. So an entry that was paused can run,
+  and an entry that was resumed can wait.
+- `updateHeaders()`: the headers are saved with each entry, not in the
+  settings file, so they are not lost. Only a counter of header updates is.
+  Native raises that counter again above the entries' values, so a 401 still
+  re-issues as described above.
+
+So send your settings again at each app start: call `setWifiOnly()`, and
+`pause()` or `resume()`, with the values you want. A call with the value
+native already has writes nothing.
 
 ### `getRequests(filter?): RequestRow[]`
 Synchronous, from native's in-memory index, so it works offline. Returns

@@ -121,6 +121,36 @@ class QueueSettingsTest {
   }
 
   @Test
+  fun `a second failure in a row is not persisted to the diagnostic log`() {
+    val dir = tmp.newFolder()
+    Diag.log = DiagnosticLog(File(tmp.newFolder(), "diagnostics.json"))
+    val store = QueueSettingsStore(File(dir, "settings.json"))
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(wifiOnly = true) }
+      store.update { it.copy(paused = true) }
+      store.saveIfBehind()
+    } finally {
+      dir.setWritable(true)
+      val records = Diag.log!!.drain()
+      Diag.log = null
+      assertEquals("only the first failure", 1, records.size)
+    }
+    // After a write lands, the next failure is persisted again.
+    store.saveIfBehind()
+    Diag.log = DiagnosticLog(File(tmp.newFolder(), "diagnostics.json"))
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(paused = false) }
+    } finally {
+      dir.setWritable(true)
+      val records = Diag.log!!.drain()
+      Diag.log = null
+      assertEquals(1, records.size)
+    }
+  }
+
+  @Test
   fun `the next update saves a value that is behind, even when it changes nothing`() {
     val dir = tmp.newFolder()
     val file = File(dir, "settings.json")

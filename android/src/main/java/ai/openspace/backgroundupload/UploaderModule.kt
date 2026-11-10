@@ -78,12 +78,16 @@ class UploaderModule(context: ReactApplicationContext) :
   }
 
   // A settings write that failed earlier is tried again each time the app
-  // comes to the foreground. Off the UI thread, on the queue executor.
+  // comes to the foreground, and when it leaves: the last chance before a
+  // relaunch with no JS reads the file. Off the UI thread, on the queue
+  // executor.
   override fun onHostResume() {
     queueExecutor.execute { settings.saveIfBehind() }
   }
 
-  override fun onHostPause() = Unit
+  override fun onHostPause() {
+    queueExecutor.execute { settings.saveIfBehind() }
+  }
 
   override fun onHostDestroy() = Unit
 

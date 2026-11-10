@@ -88,9 +88,9 @@ class QueueSettingsStore(private val file: File) {
   /**
    * Applies [transform] to the cache at once, then writes the file. A failed
    * write does not throw: this process uses the new value, a warning is
-   * recorded, and the file stays behind until a later write lands. Until
-   * then, a new process (a background relaunch with no JS) reads the older
-   * value.
+   * recorded, and the file stays behind until a later write in this process
+   * lands. A new process (a background relaunch with no JS) reads the last
+   * value that reached the file.
    *
    * A [transform] that changes nothing writes nothing, unless the file is
    * behind. So a call such as setWifiOnly() at every app start does not
@@ -109,7 +109,7 @@ class QueueSettingsStore(private val file: File) {
     return next
   }
 
-  /** Writes the cache when an earlier write failed. The module calls it when the app comes to the foreground. */
+  /** Writes the cache when an earlier write failed. The module calls it when the app enters and leaves the foreground. */
   @Synchronized
   fun saveIfBehind() {
     if (isBehind) write(load())

@@ -68,8 +68,9 @@ export interface Spec extends TurboModule {
   //
   // pause, resume, setWifiOnly, updateHeaders and configure apply the new
   // settings in memory, then save them best-effort. A failed save does not
-  // reject: native logs it and saves again at the next settings call and at
-  // the next app activation.
+  // reject: native logs it and saves again at the next settings call and
+  // when the app becomes active or leaves the foreground, while the process
+  // lives. A new process reads the last value that reached the disk.
   pause(scope: CodegenTypes.UnsafeObject): Promise<void>;
   resume(scope: CodegenTypes.UnsafeObject): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. The

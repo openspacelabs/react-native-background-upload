@@ -128,6 +128,13 @@ final class QueueCoordinator {
     // the time JS can call it, legacy rows included.
     index.load(store.all())
     importLegacyIfNeeded()
+    // After a settings save that never landed, settings.json can hold an
+    // older header generation than an entry or a task tag (taskWillBegin
+    // re-tags a task without saving its entry). The next updateHeaders must
+    // go above all of them, or a 401 under the newest headers parks.
+    settings.headerGeneration = max(settings.headerGeneration,
+                                    index.entries().map(\.headerGeneration).max() ?? 0,
+                                    taskMap.maxHeaderGeneration() ?? 0)
   }
 
   // MARK: - Module methods
@@ -310,11 +317,7 @@ final class QueueCoordinator {
         return
       }
       var next = self.settings
-      // Above every entry's value too. After a failed save and a relaunch,
-      // settings.json can hold an older generation than the entries, and a
-      // 401 under the newest one must still see newer headers.
-      next.headerGeneration = max(next.headerGeneration,
-                                  self.index.entries().map(\.headerGeneration).max() ?? 0) + 1
+      next.headerGeneration += 1 // init raised it above every saved tag
       self.applySettings(next)
       for e in self.index.entries() where !e.legacy {
         var n = e
@@ -363,9 +366,11 @@ final class QueueCoordinator {
   }
 
   /// The app is about to leave the foreground. Tasks created from now on are
-  /// background tasks.
+  /// background tasks. A settings save that failed earlier is tried again:
+  /// this is the last chance before a relaunch with no JS reads the file.
   func appResignedActive() {
     activity.isActive = false
+    queue.async { self.retrySettingsSave() }
   }
 
   /// Replaces every live task that was created while the app was not active
@@ -577,15 +582,15 @@ final class QueueCoordinator {
 
   /// Applies `next` in memory, then saves it. The caller's value never
   /// depends on the disk: a failed save is logged, settings.json stays
-  /// behind, and retrySettingsSave writes it later. Until then, a relaunch
-  /// with no JS reads the older saved value.
+  /// behind, and retrySettingsSave writes it later in this process. A new
+  /// process reads the last value that reached the file.
   func applySettings(_ next: QueueSettings) {
     settings = next
     persistSettings()
   }
 
   /// Saves `settings` when an earlier save failed. Runs at every settings
-  /// call and at app activation; no timer.
+  /// call and when the app becomes or resigns active; no timer.
   func retrySettingsSave() {
     if settingsBehind { persistSettings() }
   }
@@ -595,9 +600,15 @@ final class QueueCoordinator {
       try store.saveSettings(settings)
       settingsBehind = false
     } catch {
-      NSLog("[RNFileUploader] cannot save the queue settings; this session uses the new value, and the next "
-              + "settings call or app activation tries again" + FileIO.cause(error))
+      reportSettingsSaveFailure(error)
       settingsBehind = true
     }
+  }
+
+  /// The device log only for now. iOS has no diagnostics list yet; once it
+  /// has one, record this there too, so takeDiagnostics() returns it.
+  private func reportSettingsSaveFailure(_ error: Error) {
+    NSLog("[RNFileUploader] cannot save the queue settings; this session uses the new value, and the next "
+            + "settings call or app activation tries again" + FileIO.cause(error))
   }
 }
