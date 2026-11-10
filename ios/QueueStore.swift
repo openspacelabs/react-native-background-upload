@@ -84,8 +84,10 @@ final class QueueStore {
   }
 
   /// Deletes the id directory when it holds no `entry.json`: v9 files that
-  /// no row owns. A directory with an `entry.json`, readable or not, is kept.
-  /// The empty id names the store root, so it deletes nothing.
+  /// no row owns, or a chunked file kept after an enqueue whose save failed
+  /// (the only copy of the caller's bytes). A directory with an
+  /// `entry.json`, readable or not, is kept. The empty id names the store
+  /// root, so it deletes nothing.
   func removeUnowned(_ id: String) {
     guard !id.isEmpty else { return }
     queue.sync {

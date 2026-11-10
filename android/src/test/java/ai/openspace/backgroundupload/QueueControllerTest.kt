@@ -273,6 +273,38 @@ class QueueControllerTest {
     assertEquals(setOf("entry.json", "blob"), dirFiles()) // the manifest is pruned
   }
 
+  /** A legacy row whose v9 manifest can not be read, over a v9 blob of 20 zero bytes. */
+  private fun legacyRowOverV9Blob(): File {
+    val dir = store.entryDir("e1").apply { mkdirs() }
+    File(dir, "blob").writeBytes(ByteArray(20))
+    File(dir, "manifest.json").writeText("""{"id":"e1","parts":[""")
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    return dir
+  }
+
+  @Test
+  fun `a same-id plan that does not tile the v9 blob of a legacy row rejects E_INVALID`() {
+    val dir = legacyRowOverV9Blob()
+    val e = assertThrows(QueueException::class.java) {
+      controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = "/gone.bin", parts = listOf(part(0, 10), part(10, 30)))))
+    }
+    assertEquals(QueueException.E_INVALID, e.code)
+    assertTrue(store.load("e1")!!.legacy)
+    assertEquals(20, File(dir, "blob").length())
+  }
+
+  @Test
+  fun `a caller file that exists wins over the v9 blob of a legacy row`() {
+    legacyRowOverV9Blob()
+    val src = source("new.bin", 30)
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = src.path, parts = listOf(part(0, 15), part(15, 30)))))
+    val e = store.load("e1")!!
+    assertFalse(e.legacy)
+    val body = store.bodyFile(e)!!
+    assertEquals(30, body.length())
+    assertArrayEquals(ByteArray(30) { it.toByte() }, body.readBytes())
+  }
+
   @Test
   fun `a same-id enqueue over a legacy row with no blob and a missing file rejects E_FILE_MISSING`() {
     store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)

@@ -118,7 +118,8 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
 
   /**
    * Deletes [id]'s directory when it holds no `entry.json`: v9 files that no
-   * row owns, or a body a failed enqueue left behind. A directory with an
+   * row owns, or a body a failed enqueue left behind, such as a moved
+   * chunked file (the only copy of the caller's bytes). A directory with an
    * `entry.json`, readable or not, is kept. The empty id encodes to the store
    * root, so it deletes nothing.
    */

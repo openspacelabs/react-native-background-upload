@@ -418,7 +418,9 @@ kept. A paused entry past `expiresAt` settles `error` with
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
 unacknowledged outcomes. An id with no row resolves. If its directory has
-no entry file, such as a v9 upload's bytes, the directory is deleted.
+no entry file, the directory is deleted. That is a v9 upload's bytes, or a
+chunked file kept after an enqueue that rejected `E_STORAGE`. The library
+had moved that file into its queue, so the delete discards the only copy.
 
 For a live entry, the journaled `cancelled` outcome is the cancel. Once it is
 written, `cancel()` resolves, even if the entry save that follows fails: the
