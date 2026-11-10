@@ -332,10 +332,11 @@ export type ConfigureOptions = {
   headers?: () => Record<string, string>;
   /**
    * Default 10 s. How long `mutate()` waits for native enqueue before it
-   * rejects. Enqueue includes the time to stage a copy of a `file` body and
-   * of form `path` parts, so a large file takes longer. A timeout means
-   * native did not answer, not that the request failed. A watchdog for a
-   * native bug, not a tuning knob.
+   * warns one time. `mutate()` keeps waiting after the warning: it resolves
+   * when native stored the entry and rejects only with native's own error.
+   * Enqueue includes the time to stage a copy of a `file` body and of form
+   * `path` parts, and on iOS it waits behind earlier enqueues, so a large
+   * file takes longer.
    */
   enqueueTimeoutMs?: number;
   android?: Partial<AndroidNotificationConfig>;

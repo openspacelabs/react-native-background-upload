@@ -289,7 +289,9 @@ while the app was dead from being sent twice.
    `error` with `errorKind: 'expired'` when it is resumed. A same-id
    `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
-   caller's promise.
+   caller's promise. While native has not answered `enqueue`, the id's
+   outcomes wait too. They stay journaled and unacknowledged, so none is
+   lost.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
    deliver then. Call every `define()` first.
 6. **Unknown key is loud.** An outcome whose key has no definition stays
@@ -374,7 +376,9 @@ copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
 field, a GET with a body, input native cannot send (`E_INVALID`), a missing
 file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running entry
 with a different body (`E_RUNNING`), or `vars` over
-`maxVarsBytes` (1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a definition
+`maxVarsBytes` (1 MB by default). Only `vars` are capped. `mutate()` has no
+timeout: it settles only with native's answer, and warns one time when that
+takes longer than `enqueueTimeoutMs`. `id` defaults to a UUID. For a definition
 whose `request` takes no vars, call `mutate()` with no arguments; native stores
 `null`.
 
@@ -389,7 +393,7 @@ outcomes. A second call updates the settings and does not replay again.
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
-| `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when native enqueue has not settled by then. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, so a large file takes longer. A timeout means native did not answer, not that the request failed. A watchdog for a native bug, not a tuning knob. |
+| `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and on iOS it waits behind earlier enqueues, so a large file takes longer. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(scope?): Promise<void>` and `resume(scope?): Promise<void>`

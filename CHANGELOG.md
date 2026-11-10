@@ -1,5 +1,20 @@
 ## Unreleased
 
+`mutate()` no longer rejects when native is slow to answer. Before, it
+rejected after `enqueueTimeoutMs` (default 10 s) even though native could
+still store the entry and upload it. On iOS a large chunked file can hold
+the native queue while its part tasks are built, so the next `mutate()`
+timed out, the app recorded a failure, and the request uploaded anyway.
+Now `mutate()` warns one time at `enqueueTimeoutMs` and keeps waiting. It
+resolves when native stored the entry and rejects only with native's own
+error (`E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`, `E_STORAGE`). An app that
+treated the timeout rejection as a failure no longer gets it. The outcomes
+of that id wait for the answer too, so a handler still never runs before
+the caller has the id. `enqueueTimeoutMs` stays and sets when the warning
+fires. If native never answers, which is a native bug, `mutate()` stays
+pending and the warning is the only signal. Do not await `mutate()` where a
+wait blocks other work.
+
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the
 caller's file into its queue, so this deleted the only copy. The file now
