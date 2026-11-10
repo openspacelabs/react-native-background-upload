@@ -95,9 +95,11 @@ export type RetryPolicy = {
   /**
    * 4xx responses that retry under a body match and a retry cap. Checked
    * after `accept` and before `exempt`: a matching rule wins, and `exempt`
-   * is the blanket fallback for a status no rule matched. Default `[]`.
+   * is the blanket fallback for a status no rule matched. Optional, so a
+   * full `RetryPolicy` written for 11.1.0 still compiles. Absent means no
+   * rules. Default `[]`.
    */
-  transient: TransientRule[];
+  transient?: TransientRule[];
 };
 
 /** What `request(vars)` returns. Native persists it next to `vars`. */
