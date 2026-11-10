@@ -13,7 +13,10 @@ rows are left out by default. `addRequestsListener()` and
 included until their outcome is acknowledged. An app that keeps its
 own copy of `getRequests()` for display, and wraps `cancel()` to update it,
 can remove that code. Delivery, acks and cancel are unchanged. `define()`
-now returns the two hooks with `key` and `mutate`.
+now returns the two hooks with `key` and `mutate`. The `Defined` and
+`UploadClient` types gained the new functions as required members, so a
+test double built by hand with one of those types no longer compiles until
+it adds them.
 
 `createFakeNative().settle()` now resolves one promise turn later, after the
 client has handled the ack, so the row hooks are up to date when it resolves.

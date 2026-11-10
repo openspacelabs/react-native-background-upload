@@ -642,3 +642,72 @@ describe('jsonEqual', () => {
     );
   });
 });
+
+describe('guards', () => {
+  it('warns instead of throwing out of a native state callback', () => {
+    const native = createFakeNative();
+    const client = createUploadClient({ native });
+    native.seedRows([row()]);
+    const warn = jest.fn();
+    const cache = createRequestCache({
+      readNative: () => native.getRequests() as RequestRow[],
+      addListener: client.addListener,
+      warn,
+    });
+    // The cache's listener is registered first, so a throw in it would stop
+    // the app's listener below.
+    cache.subscribe(() => {
+      throw new Error('boom');
+    });
+    cache.subscribeWithProgress(() => {
+      throw new Error('boom');
+    });
+    const appListener = jest.fn();
+    client.addListener('state', appListener);
+    client.addListener('progress', appListener);
+    expect(() =>
+      native.emit.state(row({ state: 'running', updatedAt: 2 })),
+    ).not.toThrow();
+    expect(() =>
+      native.emit.progress({ id: 'a', bytesSent: 1, totalBytes: 100 }),
+    ).not.toThrow();
+    expect(appListener).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/from a state event threw/),
+      expect.any(Error),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/from a progress event threw/),
+      expect.any(Error),
+    );
+  });
+});
+
+describe('with nothing listening', () => {
+  it('drops the rows at an ack instead of reading native', async () => {
+    const { native, client, ping, getRequests } = setup();
+    const { id } = await ping.mutate({ n: 1 });
+    // A read with no listener fills the cache, then nobody listens.
+    client.getCachedRequests();
+    native.seedRows([row({ id, key: 'ping', state: 'running' })]);
+    getRequests.mockClear();
+    // The cached row is queued, the outcome completed: with a listener this
+    // would read native.
+    await native.settle(id, { kind: 'completed' });
+    expect(getRequests).not.toHaveBeenCalled();
+    // The next read takes native's rows.
+    expect(client.getCachedRequests()).toEqual([]);
+  });
+
+  it('drops the rows at cancel() too, and the next subscribe reads native', async () => {
+    const { native, client, getRequests } = setup();
+    native.seedRows([row({ id: 'e', state: 'error' })]);
+    client.getCachedRequests();
+    getRequests.mockClear();
+    await client.cancel('e');
+    expect(getRequests).not.toHaveBeenCalled();
+    listen(client);
+    expect(getRequests).toHaveBeenCalledTimes(1);
+    expect(client.getCachedRequests()).toEqual([]);
+  });
+});

@@ -121,6 +121,10 @@ export const createDelivery = ({
       return;
     }
     // Display only: the ack has already landed, and a throw here is caught.
+    // This runs one promise turn after ackEvents() resolves, with no other
+    // await before it. createFakeNative().settle() counts on that order to
+    // resolve after the row cache dropped the row; an await added above
+    // breaks that test helper (requests.test.ts "drops a completed row").
     try {
       onAcked?.(event);
     } catch (e) {

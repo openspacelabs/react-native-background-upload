@@ -587,7 +587,11 @@ export const createFakeNative = (
       // Waiters resolve after the journal and rows are up to date, and one
       // promise turn after the caller's own continuation on this promise.
       // So when settle() resolves, the client has handled the ack too, for
-      // example dropped the row from its row cache.
+      // example dropped the row from its row cache. This depends on
+      // delivery's ack() handling the ack in the turn after ackEvents()
+      // resolves (see the comment there). A macrotask would not depend on it,
+      // but it would make settle() wait on timers, which Jest fake timers
+      // hold.
       void acked
         .then(() => undefined)
         .then(() => {

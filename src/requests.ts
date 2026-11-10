@@ -414,8 +414,22 @@ export const createRequestCache = ({
   const listening = (): boolean =>
     rowListeners.size + progressListeners.size > 0;
 
+  // These run inside native's event callbacks. A throw there would surface
+  // as an uncaught error and stop the app's later listeners of that event.
+  const guarded =
+    <E>(name: string, handle: (event: E) => void) =>
+    (event: E): void => {
+      try {
+        handle(event);
+      } catch (e) {
+        warn(`requests: updating the rows from a ${name} event threw`, e);
+      }
+    };
+  const onStateGuarded = guarded('state', onState);
+  const onProgressGuarded = guarded('progress', onProgress);
+
   const start = (): void => {
-    stateSubscription = addListener('state', onState);
+    stateSubscription = addListener('state', onStateGuarded);
     // Always check: an event emitted between an earlier read (a render) and
     // this subscribe went to no listener. reconcile() keeps the same array
     // when nothing changed, so this adds no render.
@@ -430,7 +444,7 @@ export const createRequestCache = ({
   };
 
   const startProgress = (): void => {
-    progressSubscription = addListener('progress', onProgress);
+    progressSubscription = addListener('progress', onProgressGuarded);
   };
 
   const stopProgress = (): void => {
@@ -499,7 +513,25 @@ export const createRequestCache = ({
     return withProgress;
   };
 
+  /**
+   * With nothing listening, the rows may already be out of date and nobody
+   * shows them. Drop them instead of patching them: the next subscribe or
+   * read reads native. This keeps native reads out of the delivery lane
+   * while the journal drains at launch.
+   */
+  const dropWhenIdle = (): boolean => {
+    if (listening()) {
+      return false;
+    }
+    rows = undefined;
+    withProgress = undefined;
+    return true;
+  };
+
   const acked = ({ id, kind }: { id: string; kind: string }): void => {
+    if (dropWhenIdle()) {
+      return;
+    }
     const row = rows ? indexById(rows).get(id) : undefined;
     if (!row) {
       return;
@@ -528,6 +560,9 @@ export const createRequestCache = ({
   };
 
   const cancelled = (id: string): void => {
+    if (dropWhenIdle()) {
+      return;
+    }
     // A settled entry is forgotten at once, with no event. A live one
     // settles 'cancelled' with an event, and its ack forgets it.
     const row = rows ? indexById(rows).get(id) : undefined;
