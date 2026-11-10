@@ -77,7 +77,7 @@ class WorkerOpsTest {
     assertTrue(ops.recordTransientHit("e1", g, 0L, rule))
     assertFalse(ops.recordTransientHit("e1", g, 0L, rule))
     assertTrue(ops.recordTransientHit("e1", g, 50L, rule)) // no part starts there: allowed, nothing written
-    // A live re-mutate reordered the parts while the attempt was in flight: the hit still lands on its range.
+    // Defensive: should the stored order ever differ from the attempt's, the hit still lands on its range.
     val e = store.load("e1")!!
     store.save(e.copy(descriptor = e.descriptor!!.copy(parts = e.descriptor!!.parts!!.reversed())))
     assertTrue(ops.recordTransientHit("e1", g, 10L, rule)) // the part at 10 has its own count
