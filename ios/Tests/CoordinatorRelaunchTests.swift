@@ -522,6 +522,31 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertEqual(l.transport.live.count, 3)
   }
 
+  func testLegacyErrorRowWithAPlanThatDoesNotTileTheV9BlobRejectsInvalid() throws {
+    let l = legacyErrorWithUnreadableManifest(blobBytes: 30)
+    defer { try? FileManager.default.removeItem(at: l.root) }
+    let gone = l.root.appendingPathComponent("gone")
+    guard case .failure(let invalid) = l.enqueue(l.chunkedRaw(id: "cap-1", size: 40, parts: 4, source: gone))
+    else { return XCTFail("expected E_INVALID") }
+    XCTAssertEqual(invalid.code, "E_INVALID")
+    XCTAssertEqual(l.entry("cap-1")?.legacy, true, "the legacy row stays")
+    XCTAssertEqual(FileIO.size(l.store.fileURL("cap-1", "blob")), 30, "the v9 blob stays")
+  }
+
+  func testLegacyErrorRowWithACallerFileThatExistsUsesTheCallerFile() throws {
+    let l = legacyErrorWithUnreadableManifest(blobBytes: 30)
+    defer { try? FileManager.default.removeItem(at: l.root) }
+    let source = l.root.appendingPathComponent("new-source")
+    writeFile(source, bytes: 40)
+    let expected = try Data(contentsOf: source)
+    _ = try l.enqueue(l.chunkedRaw(id: "cap-1", size: 40, parts: 4, source: source)).get()
+    let e = try XCTUnwrap(l.entry("cap-1"))
+    XCTAssertFalse(e.legacy)
+    let body = try XCTUnwrap(l.store.bodyURL(e))
+    XCTAssertEqual(try Data(contentsOf: body), expected, "the caller's bytes, not the v9 blob")
+    XCTAssertEqual(l.transport.live.count, 4)
+  }
+
   func testLegacyErrorRowWithNoBlobAndAMissingFileRejectsFileMissing() throws {
     let l = legacyErrorWithUnreadableManifest(blobBytes: nil)
     defer { try? FileManager.default.removeItem(at: l.root) }

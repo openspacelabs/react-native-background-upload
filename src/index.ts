@@ -180,7 +180,8 @@ export const createUploadClient = ({
    * On a live entry: settles it 'cancelled' with reason 'user', then forgets
    * it after the ack. On a settled entry: forgets it now: row, bytes, and its
    * unacknowledged outcomes. On an id with no row: deletes the id's directory
-   * when it has no entry file, such as a v9 upload's bytes.
+   * when it has no entry file: a v9 upload's bytes, or a chunked file kept
+   * after an enqueue that rejected E_STORAGE.
    */
   const cancel = (id: string): Promise<void> => native.cancel(id);
 

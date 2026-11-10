@@ -21,8 +21,9 @@ warnings of its count. The fake native module has `seedBootSnapshot()`.
 `cancel(id)` on an id with no row now deletes the id's directory when it
 holds no entry file. A v9 chunked upload that was still running at the
 upgrade got no legacy row, so its manifest and blob could never be released.
-Before, `cancel()` on such an id did nothing. A delete that fails is reported
-through `takeDiagnostics()` on Android.
+Before, `cancel()` on such an id did nothing. The same cancel also discards
+a chunked file the library kept after an enqueue that rejected `E_STORAGE`.
+A delete that fails is reported through `takeDiagnostics()` on Android.
 
 A same-id `mutate()` over a legacy row whose v9 manifest could not be read
 now runs over the kept v9 blob. Before, it ignored the blob and failed with
