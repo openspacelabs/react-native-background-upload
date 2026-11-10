@@ -323,7 +323,7 @@ carries the last one.
 `createUploadClient()` returns a client. The default export is one client;
 an app needs one.
 
-### `define(definition): { key, mutate }`
+### `define(definition): { key, mutate, useRequests, useRequestsWithProgress }`
 
 ```ts
 type Definition<V extends object | null, T> =
@@ -465,6 +465,62 @@ uploads
   .forEach((row) => uploads.cancel(row.id));
 ```
 
+### `useRequests(filter?)` and `useRequestsWithProgress(filter?)`
+React hooks that return the queue rows, for display. The client keeps one
+copy of the rows in memory. It reads native when the first hook mounts, and
+each `state` event updates the row it carries. Every component shares that
+copy, so the app does not keep its own.
+
+```tsx
+const CaptureBadge = ({ captureId }: { captureId: string }) => {
+  // Typed vars: the rows of this definition only.
+  const rows = captureUpload.useRequests();
+  const pending = rows.filter(
+    (row) => row.vars.captureId === captureId && row.state !== 'completed',
+  );
+  return pending.length > 0 ? <Badge count={pending.length} /> : null;
+};
+```
+
+- `filter` is `{ key?, id?, includeCancelled? }`. `key` and `id` match as in
+  `getRequests()`. Cancelled rows are left out unless `includeCancelled` is
+  `true`. A cancelled row has no work left, and native forgets it at its ack.
+- `useRequests()` re-renders when a row appears, changes state, or goes. A
+  row's bytes are those of its last `state` event.
+- `useRequestsWithProgress()` also re-renders on each `progress` event of a
+  row it returns, with that event's bytes. Use it only where bytes are shown.
+- The result is the same array while the rows it holds are the same, even
+  when the filter is a new object each render. The array and its rows are
+  shared, so do not change them.
+- `definition.useRequests(filter?)` and `definition.useRequestsWithProgress(filter?)`
+  return the rows of that definition's key, with `vars` typed as its vars.
+  The type is not checked at run time: `vars` is what native stored, so a
+  `Date` reads back as a string, and a row enqueued under an older vars type
+  keeps its old shape.
+
+Native emits no event when it forgets a row, so the library removes the row
+itself when its own call made native forget it: when the ack of a
+`completed` or `cancelled` outcome resolves, and when `cancel(id)` resolves
+on a settled entry. An `error` row stays until `cancel()` or a same-id
+`mutate()`, as in native. A same-id `mutate()` emits a `state` event, so it
+needs nothing extra.
+
+Limits. While no hook or listener is mounted, the copy is not updated. The
+first one to mount checks it against native, so it can show the old rows
+for one render. When the native read fails, the library keeps the rows it
+has and sends a warning to `onWarning`. Any change that native makes with no
+event and that this library's JS did not start is missed until the next
+check. A review of the native enqueue, pause, resume, header, cancel and
+ack paths found no such change.
+
+### `addRequestsListener(listener)` and `getCachedRequests(filter?)`
+The same rows outside React, for code such as a store or a logger.
+`addRequestsListener` calls `listener` with `getCachedRequests()` each time a
+row appears, changes state, or goes, and returns `{ remove }`. It keeps the
+copy up to date as a mounted hook does. `getCachedRequests(filter?)` returns
+the rows the hooks see. While nothing listens, it reads native first. Without
+`key` or `id` it returns the same array while nothing changed.
+
 ### `takeDiagnostics(): Promise<Diagnostic[]>`
 The library's persisted diagnostic records, oldest first. Each call returns
 the records since the last call and clears them, so send them somewhere
@@ -593,6 +649,14 @@ handler and the ack later. Flush pending promises (for example
 The fake does not model the same-id rules (resume, replace, `E_RUNNING`,
 re-emit) or the header merge of `updateHeaders()`; script those with
 `failNext()` and `seedUnacknowledged()`.
+
+The fake drives the row hooks as native does. `settle()` resolves after the
+client has handled the ack, so a completed row is already gone from
+`useRequests()`. `seedRows()` and `reset()` change rows with no event, as
+leftovers from a dead session would. Call them before the first hook mounts
+or listener subscribes, or unmount and mount again: the next mount checks the
+rows against the fake. The hooks need a React renderer, for example
+`react-test-renderer`, and its updates wrapped in `act()`.
 
 `native.entries` holds every enqueue as `mutate()` sent it, with `vars` and
 `data` parsed back from JSON. `failNext()` makes the next native call reject

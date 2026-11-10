@@ -1,5 +1,22 @@
 ## Unreleased
 
+Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
+hooks that return the queue rows for display, and
+`definition.useRequests()` and `definition.useRequestsWithProgress()`, which
+return one definition's rows with typed `vars`. The client keeps one copy of
+the rows in memory, read from native when the first hook mounts and updated
+by each `state` event. It also removes a row when native forgets it with no
+event: after the ack of a `completed` or `cancelled` outcome, and after
+`cancel()` on a settled entry. The filter takes `includeCancelled`; cancelled
+rows are left out by default. `addRequestsListener()` and
+`getCachedRequests()` give the same rows outside React. An app that keeps its
+own copy of `getRequests()` for display, and wraps `cancel()` to update it,
+can remove that code. Delivery, acks and cancel are unchanged. `define()`
+now returns the two hooks with `key` and `mutate`.
+
+`createFakeNative().settle()` now resolves one promise turn later, after the
+client has handled the ack, so the row hooks are up to date when it resolves.
+
 Behavior change: `mutate()` no longer rejects when native is slow to answer. Before, it
 rejected after `enqueueTimeoutMs` (default 10 s) even though native could
 still store the entry and upload it. On iOS a large chunked file can hold
