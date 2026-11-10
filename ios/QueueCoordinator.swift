@@ -101,7 +101,8 @@ final class QueueCoordinator {
   /// entry still names them.
   var pendingJournal: [String: JournaledEvent] = [:]
   lazy var chunked = ChunkedCoordinator(self)
-  let diagnostics = BootDiagnostics()
+  /// What takeDiagnostics() returns. Set in init, with the clock.
+  let diagnostics: DiagnosticLog
 
   init(store: QueueStore, journal: EventJournal, taskMap: TaskMap, transport: Transport,
        sink: EventSink?, queue: DispatchQueue = DispatchQueue(label: QueueCoordinator.queueLabel),
@@ -115,6 +116,7 @@ final class QueueCoordinator {
     self.transport = transport
     self.sink = sink
     self.now = now
+    diagnostics = DiagnosticLog(clock: now)
     self.random = random
     self.schedule = schedule ?? { ms, block in
       queue.asyncAfter(deadline: .now() + .milliseconds(ms), execute: block)
@@ -125,14 +127,30 @@ final class QueueCoordinator {
     // the time JS can call it, legacy rows included.
     index.load(store.all())
     importLegacyIfNeeded()
-    // After the import, so its legacy rows count. Off this thread.
-    diagnostics.start(store: store, legacyIds: index.entries().filter(\.legacy).map(\.id), at: now())
+    recordBootSnapshot()
+  }
+
+  /// One boot snapshot per process, after the import so its legacy rows
+  /// count. The disk count runs on the diagnostic log's queue, so it delays
+  /// neither the thread that creates the coordinator nor `queue`.
+  private func recordBootSnapshot() {
+    let legacyIds = index.entries().filter(\.legacy).map(\.id)
+    let store = self.store
+    let log = diagnostics
+    // The boot time, read here: the count must not call `now` off this thread.
+    let at = now()
+    log.perform {
+      let (found, warnings) = store.countLeftovers(legacyIds: legacyIds)
+      for w in warnings { log.warn(w.message, error: w.error, at: at) }
+      log.info(DiagnosticLog.bootMessage,
+               data: ["v9Leftovers": found.v9.dictionary, "orphans": found.orphans.dictionary], at: at)
+    }
   }
 
   // MARK: - Module methods
 
-  /// The boot snapshot and its warnings, then none. Waits for the boot
-  /// count, off the coordinator queue.
+  /// The diagnostic records, then none. Waits for the boot count, off the
+  /// coordinator queue.
   func takeDiagnostics(_ completion: @escaping ([[String: Any]]) -> Void) {
     diagnostics.take(completion)
   }

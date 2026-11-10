@@ -226,12 +226,12 @@ export const createUploadClient = ({
   /**
    * The library's persisted diagnostic records, oldest first. Each call
    * returns the records since the last one, so report them where they can
-   * be seen, such as an error tracker. Each module start adds an 'info'
-   * boot snapshot whose data has `v9Leftovers`, zeros included. Android
-   * keeps the newest 50: native warnings and errors, including ones from
-   * background runs with no JS, and the snapshot also describes the queue
-   * and its WorkManager runs. iOS holds only the snapshot and the warnings
-   * of its count, in memory.
+   * be seen, such as an error tracker. A boot record (message 'boot
+   * sweep') has `v9Leftovers` and `orphans`, zeros included. Android adds
+   * it at each module start and keeps the newest 50 records: native
+   * warnings and errors, including ones from background runs with no JS,
+   * and that record, which also describes the queue and its WorkManager
+   * runs. iOS adds it once per process and keeps its records in memory.
    */
   const takeDiagnostics = async (): Promise<Diagnostic[]> =>
     (await native.takeDiagnostics()) as Diagnostic[];

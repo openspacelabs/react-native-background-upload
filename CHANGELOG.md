@@ -2,13 +2,21 @@
 
 `takeDiagnostics()` now reports how much v9 work is still on the device. The
 boot record (`info`, message `boot sweep`) has `data.v9Leftovers` with
-`legacyRows`, `unownedUploads` and `unownedBytes`. The library counts them
-at each module start, after queued work is scheduled, from a directory
-listing and file sizes. It deletes nothing. The record is now written at
-every start, even an idle one, so zero is reported. Before, Android skipped
-it when nothing was queued. iOS now returns this record and the warnings of
-its count, held in memory. Before, it returned an empty list. The fake
-native module has `seedV9Leftovers()`.
+`legacyRows`, `legacyBytes`, `unownedUploads` and `unownedBytes`. The counts
+do not overlap, so `legacyRows + unownedUploads` is the number of v9 ids
+left. It also has `data.orphans` (`{ dirs, bytes }`): directories with no
+entry file that are not v9. The library counts these when the module
+starts, after queued work is scheduled, from a directory listing and file
+sizes. It deletes nothing.
+
+On Android the boot record is now written at every module start, even an
+idle one, so zero is reported. Before, it was skipped when nothing was
+queued. A new boot record replaces one that JS has not taken, so it never
+pushes warnings and errors out of the 50-record log.
+
+iOS used to return an empty list. It now keeps up to 50 records in memory:
+one boot record per process, with `v9Leftovers` and `orphans` only, and the
+warnings of its count. The fake native module has `seedBootSnapshot()`.
 
 `cancel(id)` on an id with no row now deletes the id's directory when it
 holds no entry file. A v9 chunked upload that was still running at the

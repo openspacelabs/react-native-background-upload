@@ -5,6 +5,7 @@ import type {
   Diagnostic,
   Meta,
   OutcomeError,
+  QueueOrphans,
   RawResponse,
   UploadClient,
   V9Leftovers,
@@ -305,22 +306,37 @@ client.define({
   request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
 });
 
-// takeDiagnostics(): the boot snapshot's v9Leftovers is typed; other data
-// fields stay unknown.
+// takeDiagnostics(): the boot snapshot's v9Leftovers and orphans are typed;
+// other data fields stay unknown.
 declare const record: Diagnostic;
 const v9 = record.data?.v9Leftovers;
 assertEqual<typeof v9, V9Leftovers | undefined>(true);
 if (v9) {
   expectType<number>(v9.legacyRows);
+  expectType<number>(v9.legacyBytes);
   expectType<number>(v9.unownedUploads);
   expectType<number>(v9.unownedBytes);
+}
+const orphaned = record.data?.orphans;
+assertEqual<typeof orphaned, QueueOrphans | undefined>(true);
+if (orphaned) {
+  expectType<number>(orphaned.dirs);
+  expectType<number>(orphaned.bytes);
 }
 assertEqual<NonNullable<typeof record.data>['entries'], unknown>(true);
 const zero: Diagnostic = {
   at: 1,
   level: 'info',
   message: 'boot sweep',
-  data: { v9Leftovers: { legacyRows: 0, unownedUploads: 0, unownedBytes: 0 } },
+  data: {
+    v9Leftovers: {
+      legacyRows: 0,
+      legacyBytes: 0,
+      unownedUploads: 0,
+      unownedBytes: 0,
+    },
+    orphans: { dirs: 0, bytes: 0 },
+  },
 };
 expectType<Diagnostic>(zero);
 const partial: Diagnostic = {
@@ -331,3 +347,11 @@ const partial: Diagnostic = {
   data: { v9Leftovers: { legacyRows: 0 } },
 };
 expectType<Diagnostic>(partial);
+const partialOrphans: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error orphans needs dirs and bytes
+  data: { orphans: { dirs: 0 } },
+};
+expectType<Diagnostic>(partialOrphans);

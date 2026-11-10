@@ -26,6 +26,8 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   companion object {
     const val ENTRY_FILE = "entry.json"
     const val V9_MANIFEST_FILE = "manifest.json"
+    /** The v9 manifest and the tmp file of its atomic write. v10 writes neither. */
+    val V9_MANIFEST_FILES = setOf(V9_MANIFEST_FILE, "manifest.tmp")
     const val BLOB_FILE = "blob"
 
     private val gson = Gson()
@@ -134,48 +136,67 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   /** A directory that [removeUnowned] deletes: it holds no `entry.json`. */
   private fun isUnowned(d: File) = d.isDirectory && !File(d, ENTRY_FILE).exists()
 
+  /** Test seam: runs before the count lists an unowned directory. */
+  internal var beforeCountListing: (File) -> Unit = {}
+
   /**
-   * Counts the v9 work still on disk, for the boot snapshot. An upload is
-   * an id directory that [removeUnowned] would delete, or the v9 manifest
-   * and blob that a legacy row in [legacyIds] keeps: a same-id enqueue
-   * falls back to that blob. An empty directory is not counted. The bytes
-   * are the sizes of the files directly in the counted directories.
+   * Counts what no v10 entry owns, for the boot snapshot. Only directories
+   * that [removeUnowned] would delete (no `entry.json`, not empty) count:
+   * - v9: the directory holds a v9 manifest ([V9_MANIFEST_FILES]);
+   * - orphan: any other, such as a body a failed enqueue left. A bare
+   *   `blob` is an orphan: a first-generation v10 chunked body keeps that
+   *   name, so it does not show v9.
+   * Each legacy row in [legacyIds] counts once, and the v9 manifest and
+   * blob it keeps count as legacy bytes. A legacy directory has its
+   * `entry.json`, so it is never an unowned upload too.
    *
    * Lists directories and reads file sizes only. It opens no file and
    * changes nothing. It does not take the store lock, so workers do not
    * wait; a directory that changes during the count can be counted either
    * way. An error is a warning, and the counts found so far are returned.
    */
-  fun countV9Leftovers(legacyIds: Collection<String>): V9Leftovers {
-    var uploads = 0
-    var bytes = 0L
+  fun countLeftovers(legacyIds: Collection<String>): Leftovers {
+    var legacyBytes = 0L
+    var v9Dirs = 0
+    var v9Bytes = 0L
+    var orphanDirs = 0
+    var orphanBytes = 0L
     try {
       val dirs = dir.listFiles()
-      if (dirs == null) Diag.warn("v9 leftover count: could not list the queue directory")
+      if (dirs == null) Diag.warn("leftover count: could not list the queue directory")
       dirs?.forEach { d ->
         if (!isUnowned(d)) return@forEach
+        beforeCountListing(d)
         val files = d.listFiles()
         if (files == null) {
           // Gone since the root listing (a cancel or a forget) is not an error.
-          if (d.exists()) Diag.warn("v9 leftover count: could not list ${d.name}")
+          if (d.exists()) Diag.warn("leftover count: could not list ${d.name}")
           return@forEach
         }
         if (files.isEmpty()) return@forEach
-        uploads++
-        bytes += files.sumOf { if (it.isFile) it.length() else 0L }
+        val size = files.sumOf { if (it.isFile) it.length() else 0L }
+        if (files.any { it.name in V9_MANIFEST_FILES }) {
+          v9Dirs++
+          v9Bytes += size
+        } else {
+          orphanDirs++
+          orphanBytes += size
+        }
       }
-      // A legacy id with no entry file was counted above: each directory counts once.
-      legacyIds.filterNot { isUnowned(entryDir(it)) }.forEach { id ->
-        val v9 = listOf(File(entryDir(id), V9_MANIFEST_FILE), blobFile(id)).filter { it.isFile }
-        if (v9.isNotEmpty()) {
-          uploads++
-          bytes += v9.sumOf { it.length() }
+      legacyIds.forEach { id ->
+        val d = entryDir(id)
+        if (isUnowned(d)) return@forEach // counted above, as the scan found it
+        legacyBytes += (V9_MANIFEST_FILES + BLOB_FILE).sumOf { name ->
+          File(d, name).let { if (it.isFile) it.length() else 0L }
         }
       }
     } catch (error: Exception) {
-      Diag.warn("v9 leftover count stopped early; the counts are partial", error)
+      Diag.warn("leftover count stopped early; the counts are partial", error)
     }
-    return V9Leftovers(legacyIds.size, uploads, bytes)
+    return Leftovers(
+      V9Leftovers(legacyIds.size, legacyBytes, v9Dirs, v9Bytes),
+      Orphans(orphanDirs, orphanBytes),
+    )
   }
 
   /** Every v10 entry. A directory with only a v9 manifest is not a row. */
@@ -251,17 +272,33 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
 }
 
 /**
- * v9 work still on the device, from [QueueStore.countV9Leftovers]: the
- * legacy rows, and the v9 uploads no v10 entry owns with their size in
- * bytes. All zero once the app has adopted or cancelled every v9 id.
+ * v9 work still on the device, from [QueueStore.countLeftovers]. The
+ * counts are disjoint: legacyRows + unownedUploads is the number of v9 ids.
+ * - legacyRows: legacy rows; legacyBytes: the v9 manifest and blob they keep.
+ * - unownedUploads: v9 directories with no row; unownedBytes: their files.
+ * All zero once the app has adopted or cancelled every v9 id.
  */
-data class V9Leftovers(val legacyRows: Int, val unownedUploads: Int, val unownedBytes: Long) {
+data class V9Leftovers(
+  val legacyRows: Int,
+  val legacyBytes: Long,
+  val unownedUploads: Int,
+  val unownedBytes: Long,
+) {
   fun toMap(): Map<String, Any?> = mapOf(
     "legacyRows" to legacyRows,
+    "legacyBytes" to legacyBytes,
     "unownedUploads" to unownedUploads,
     "unownedBytes" to unownedBytes,
   )
 }
+
+/** Directories with no entry file that are not v9: the library's own leftovers. */
+data class Orphans(val dirs: Int, val bytes: Long) {
+  fun toMap(): Map<String, Any?> = mapOf("dirs" to dirs, "bytes" to bytes)
+}
+
+/** What [QueueStore.countLeftovers] found. */
+data class Leftovers(val v9: V9Leftovers, val orphans: Orphans)
 
 /**
  * A v9 chunked manifest, only the fields v10 reads. The field names are the

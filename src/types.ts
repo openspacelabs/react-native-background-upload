@@ -356,25 +356,41 @@ export interface AddListener {
 export type PauseScope = { keys?: string[] };
 
 /**
- * v9 work still on the device, counted at each module start. All zero is
- * the normal state once the app has adopted or cancelled every v9 id.
+ * v9 work still on the device, counted when the module starts. The counts
+ * are disjoint: `legacyRows + unownedUploads` is the number of v9 ids left.
+ * All zero is the normal state once the app has adopted or cancelled every
+ * v9 id.
  * - `legacyRows`: rows with key `legacy` (see Upgrading from v9).
- * - `unownedUploads`: v9 upload directories no v10+ entry owns, the ones
- *   `cancel(id)` deletes, plus the v9 manifest and blob a legacy row keeps.
- * - `unownedBytes`: the size of those files, best effort.
+ * - `legacyBytes`: the v9 manifest and blob those rows still keep.
+ * - `unownedUploads`: v9 upload directories with no row. `cancel(id)`
+ *   deletes them.
+ * - `unownedBytes`: the size of their files, best effort.
  */
 export type V9Leftovers = {
   legacyRows: number;
+  legacyBytes: number;
   unownedUploads: number;
   unownedBytes: number;
 };
 
 /**
+ * Directories with no entry file that are not v9: the library's own
+ * leftovers, such as the file of an enqueue whose save failed. Not part of
+ * the v9 count.
+ */
+export type QueueOrphans = {
+  dirs: number;
+  bytes: number;
+};
+
+/**
  * A diagnostic record's structured fields. The boot snapshot (message
- * `'boot sweep'`) always has `v9Leftovers`; its other fields are untyped.
+ * `'boot sweep'`) always has `v9Leftovers` and `orphans`; its other fields
+ * are untyped.
  */
 export type DiagnosticData = Record<string, unknown> & {
   v9Leftovers?: V9Leftovers;
+  orphans?: QueueOrphans;
 };
 
 /**

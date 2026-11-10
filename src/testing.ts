@@ -36,6 +36,7 @@ import type {
   RawResponse,
   RequestDescriptor,
   RequestRow,
+  QueueOrphans,
   RequestState,
   V9Leftovers,
 } from './types';
@@ -159,10 +160,13 @@ export type FakeNative = Spec & {
   /** Adds diagnostic records. The next takeDiagnostics() returns and clears them. */
   seedDiagnostics: (records: Diagnostic[]) => void;
   /**
-   * Adds a boot snapshot record, as native writes at each module start,
-   * with these v9 leftover counts. A count left out is 0.
+   * Adds a boot snapshot record, as native writes when the module starts,
+   * with these counts. A count left out is 0.
    */
-  seedV9Leftovers: (counts?: Partial<V9Leftovers>) => void;
+  seedBootSnapshot: (counts?: {
+    v9Leftovers?: Partial<V9Leftovers>;
+    orphans?: Partial<QueueOrphans>;
+  }) => void;
   /**
    * The next call of `method` rejects (getRequests throws) with an Error
    * that carries `code`, as a native rejection does.
@@ -602,7 +606,7 @@ export const createFakeNative = (
       diagnostics.push(...records.map((record) => ({ ...record })));
     },
 
-    seedV9Leftovers: (counts = {}) => {
+    seedBootSnapshot: (counts = {}) => {
       diagnostics.push({
         at: Date.now(),
         level: 'info',
@@ -610,10 +614,12 @@ export const createFakeNative = (
         data: {
           v9Leftovers: {
             legacyRows: 0,
+            legacyBytes: 0,
             unownedUploads: 0,
             unownedBytes: 0,
-            ...counts,
+            ...counts.v9Leftovers,
           },
+          orphans: { dirs: 0, bytes: 0, ...counts.orphans },
         },
       });
     },

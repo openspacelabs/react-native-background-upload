@@ -468,37 +468,49 @@ they can be seen, such as an error tracker, once per launch. A record is
 `{ at, level, message, error?, data? }`, with `level` one of `info`, `warn`
 or `error`. `error` is the exception's class and message.
 
-Each time the module starts, once per launch plus once per JS reload, both
-platforms add one `info` record with the message `boot sweep`. Its
-`data.v9Leftovers` says how much v9 work is still on the device, so you can
-tell when no device needs the v9 upgrade paths any more:
+When the module starts, both platforms add one `info` record with the
+message `boot sweep`. On Android that is once per launch plus once per JS
+reload. On iOS it is once per process: a JS reload after the record was
+taken gets no new one.
+
+Its `data.v9Leftovers` says how much v9 work is still on the device, so you
+can tell when no device needs the v9 upgrade paths any more. The counts do
+not overlap: `legacyRows + unownedUploads` is the number of v9 ids left.
 
 - `legacyRows`: rows with key `legacy` that the app has not cancelled.
-- `unownedUploads`: v9 uploads that no v10 or later entry owns. These are
-  the id directories that `cancel(id)` deletes because they hold no entry
-  file, plus the v9 manifest and blob a legacy row still keeps. A directory
-  counts once. An empty one does not count.
-- `unownedBytes`: the size of those files, best effort.
+- `legacyBytes`: the v9 manifest and blob those rows still keep.
+- `unownedUploads`: v9 upload directories with no row. `cancel(id)` deletes
+  them. A directory is v9 when it holds a v9 manifest. On iOS a file named
+  exactly `blob` also marks it.
+- `unownedBytes`: the size of the files in those directories, best effort.
+
+Its `data.orphans` (`{ dirs, bytes }`) counts the other directories with no
+entry file. These are the library's own leftovers, such as the file of an
+enqueue whose save failed. They are not v9 work. On Android a directory with
+only a `blob` and no manifest counts here, because a v10 chunked upload also
+uses that name.
 
 The count lists directories and reads file sizes. It opens no file and
 changes nothing. It runs after the start has scheduled queued work. When a
 directory cannot be read, a `warn` record comes before the snapshot, and the
-counts leave that directory out. On a clean install all three are 0. They
+counts leave that directory out. On a clean install every count is 0. Zeros
 are reported, not left out.
 
 Android keeps the newest 50 records. They are the module's warnings and
 errors, including those from background runs that had no JS, and the boot
-record. Its `data` also counts the entries the start schedules, by state and
-by key, and gives the oldest `updatedAt` among them, all as the start found
-them: an entry that was running when its process died counts as running. It
-also describes every unfinished WorkManager run the library had before the
-start changed them: the count by state, how many are delayed wakes, how many
-of those are due more than 24 hours out, the highest run attempt count, and
-how many queued or running entries had no run at all.
+record. A new boot record replaces one that no `takeDiagnostics()` took, so
+launches without a call do not push out warnings and errors. The record's
+`data` also counts the entries the start schedules, by state and by key, and
+gives the oldest `updatedAt` among them, all as the start found them: an
+entry that was running when its process died counts as running. It also
+describes every unfinished WorkManager run the library had before the start
+changed them: the count by state, how many are delayed wakes, how many of
+those are due more than 24 hours out, the highest run attempt count, and how
+many queued or running entries had no run at all.
 
-iOS returns only the boot record, with `v9Leftovers` and no other field, and
-the warnings of its count. It keeps them in memory, so a record that no
-`takeDiagnostics()` took is gone at the next launch, which counts again.
+On iOS the boot record has only `v9Leftovers` and `orphans`. iOS keeps its
+records in memory, the newest 50, so a record that no `takeDiagnostics()`
+took is gone when the process ends. The next launch counts again.
 
 ### `chunkPlan(sizeBytes, { min?, max? }): Array<{ start, end }>`
 Splits a byte count into contiguous, end-exclusive ranges: a deterministic
@@ -547,10 +559,11 @@ What happens to work a v9 build left behind:
   id with no `mutate()` keeps its bytes until `cancel(id)`, which deletes
   them. Cancel every v9 upload id you will not send again.
 - **Track what is left.** The boot record of `takeDiagnostics()` has
-  `data.v9Leftovers`: the legacy rows, and the v9 uploads and bytes no v10
-  entry owns. The library never deletes them by itself, because only the app
-  knows which v9 ids it will still send. When every device reports zeros,
-  the v9 paths can go.
+  `data.v9Leftovers`: the legacy rows and the bytes they keep, and the v9
+  uploads with no row and their bytes. The library never deletes them by
+  itself, because only the app knows which v9 ids it will still send. When
+  every device reports zeros, the v9 paths can go. `data.orphans` is not v9
+  work and does not count toward this.
 - **Wi-Fi only starts off.** Call `setWifiOnly(true)` again if the app had it
   on.
 
@@ -621,8 +634,8 @@ re-emit) or the header merge of `updateHeaders()`; script those with
 with a code such as `E_STORAGE`. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
 them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
-`seedV9Leftovers({ unownedUploads: 2 })` adds a boot record with those
-counts, the others 0.
+`seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record
+with those counts, the others 0.
 
 An app that builds its client at module load can use the fake from the mock
 for every client instead. Get it with

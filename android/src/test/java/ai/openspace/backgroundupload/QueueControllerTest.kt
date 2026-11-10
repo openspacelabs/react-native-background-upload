@@ -1066,7 +1066,7 @@ class QueueControllerTest {
     assertEquals(0.0, data["runs"])
   }
 
-  // MARK: - boot snapshot: v9 leftovers
+  // MARK: - boot snapshot: v9 leftovers and orphans
 
   /** Runs the sweep and returns what it wrote to the diagnostic log. */
   private fun sweepRecords(): List<DiagnosticLog.Record> {
@@ -1076,16 +1076,29 @@ class QueueControllerTest {
     return DiagnosticLog(file).drain()
   }
 
-  /** The snapshot's v9Leftovers, read back from the JSON file, so its numbers are doubles. */
+  /** A field of the snapshot, read back from the JSON file, so its numbers are doubles. */
   @Suppress("UNCHECKED_CAST")
-  private fun leftovers(records: List<DiagnosticLog.Record>): Map<String, Any?> =
-    records.single { it.level == DiagnosticLog.INFO }.data!!["v9Leftovers"] as Map<String, Any?>
+  private fun snapshot(records: List<DiagnosticLog.Record>, field: String): Map<String, Any?> =
+    records.single { it.level == DiagnosticLog.INFO }.data!![field] as Map<String, Any?>
 
-  private fun counts(legacyRows: Int, unownedUploads: Int, unownedBytes: Long) = mapOf(
-    "legacyRows" to legacyRows.toDouble(),
-    "unownedUploads" to unownedUploads.toDouble(),
-    "unownedBytes" to unownedBytes.toDouble(),
-  )
+  private fun v9(legacyRows: Int = 0, legacyBytes: Long = 0, unownedUploads: Int = 0, unownedBytes: Long = 0) =
+    mapOf(
+      "legacyRows" to legacyRows.toDouble(),
+      "legacyBytes" to legacyBytes.toDouble(),
+      "unownedUploads" to unownedUploads.toDouble(),
+      "unownedBytes" to unownedBytes.toDouble(),
+    )
+
+  private fun orphans(dirs: Int = 0, bytes: Long = 0) = mapOf("dirs" to dirs.toDouble(), "bytes" to bytes.toDouble())
+
+  /** Asserts both snapshot fields of one sweep. */
+  private fun assertLeftovers(v9: Map<String, Any?>, orphans: Map<String, Any?>) {
+    val records = sweepRecords()
+    assertEquals(v9, snapshot(records, "v9Leftovers"))
+    assertEquals(orphans, snapshot(records, "orphans"))
+  }
+
+  private fun dirSize(id: String) = store.entryDir(id).listFiles()!!.sumOf { it.length() }
 
   /** Every path under the store root, with its size and modification time. */
   private fun diskState(): Map<String, Pair<Long, Long>> =
@@ -1094,70 +1107,90 @@ class QueueControllerTest {
   private fun legacyRow(id: String) =
     store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x-$id", id, "error", 5))!!)
 
+  private fun orphanFile(id: String, name: String, size: Int) {
+    store.entryDir(id).mkdirs()
+    File(store.entryDir(id), name).writeBytes(ByteArray(size))
+  }
+
   @Test
-  fun `a clean install reports zero v9 leftovers`() {
+  fun `a clean install reports zeros`() {
     val records = sweepRecords()
     assertEquals(1, records.size)
-    assertEquals(counts(0, 0, 0), leftovers(records))
+    assertEquals(v9(), snapshot(records, "v9Leftovers"))
+    assertEquals(orphans(), snapshot(records, "orphans"))
   }
 
   @Test
   fun `a v9 directory with no row is counted with its size`() {
-    val dir = v9Dir("cap", v9Parts, 20)
-    val size = dir.listFiles()!!.sumOf { it.length() }
-    assertEquals(counts(0, 1, size), leftovers(sweepRecords()))
+    v9Dir("cap", v9Parts, 20)
+    assertLeftovers(v9(unownedUploads = 1, unownedBytes = dirSize("cap")), orphans())
   }
 
   @Test
-  fun `a directory with only a v9 blob is counted`() {
-    store.entryDir("cap").mkdirs()
-    store.blobFile("cap").writeBytes(ByteArray(30))
-    assertEquals(counts(0, 1, 30), leftovers(sweepRecords()))
+  fun `a directory with only a v9 manifest tmp file is v9`() {
+    orphanFile("cap", "manifest.tmp", 12)
+    assertLeftovers(v9(unownedUploads = 1, unownedBytes = 12), orphans())
+  }
+
+  @Test
+  fun `a directory with only a bare blob is an orphan`() {
+    orphanFile("cap", "blob", 30)
+    assertLeftovers(v9(), orphans(1, 30))
+  }
+
+  @Test
+  fun `a directory with only a staged v10 body is an orphan`() {
+    orphanFile("a", "body-1.json", 7)
+    orphanFile("b", "body-2.multipart", 9)
+    orphanFile("c", "file-1", 11)
+    orphanFile("d", "entry.json.tmp", 3)
+    assertLeftovers(v9(), orphans(4, 30))
   }
 
   @Test
   fun `a directory a v10 entry owns is not counted`() {
     controller.enqueue(parsed())
     // A v10 chunked entry that adopted a v9 blob owns it too.
-    val adopted = store.entryDir("adopted").apply { mkdirs() }
-    File(adopted, "blob").writeBytes(ByteArray(40))
+    orphanFile("adopted", "blob", 40)
     store.save(entry(id = "adopted", body = StagedBody(StagedBody.CHUNKED, "blob", null, 40)))
-    assertEquals(counts(0, 0, 0), leftovers(sweepRecords()))
+    assertLeftovers(v9(), orphans())
   }
 
   @Test
   fun `a directory with an unreadable entry file is not counted`() {
     val dir = v9Dir("cap", v9Parts, 20)
     File(dir, "entry.json").writeText("{")
-    assertEquals(counts(0, 0, 0), leftovers(sweepRecords()))
+    assertLeftovers(v9(), orphans())
   }
 
   @Test
   fun `an empty directory is not counted`() {
     store.entryDir("cap").mkdirs()
-    assertEquals(counts(0, 0, 0), leftovers(sweepRecords()))
+    assertLeftovers(v9(), orphans())
   }
 
   @Test
-  fun `a legacy row is counted, and the v9 files it keeps as unowned bytes`() {
+  fun `legacy rows count once, and the v9 files they keep are legacy bytes`() {
     legacyRow("t-1")
     legacyRow("cap")
     val dir = v9Dir("cap", v9Parts, 20)
-    val v9Size = File(dir, "blob").length() + File(dir, "manifest.json").length()
-    assertEquals(counts(2, 1, v9Size), leftovers(sweepRecords()))
+    legacyRow("blob-only")
+    store.blobFile("blob-only").writeBytes(ByteArray(30))
+    val capBytes = File(dir, "blob").length() + File(dir, "manifest.json").length()
+    assertLeftovers(v9(legacyRows = 3, legacyBytes = capBytes + 30), orphans())
   }
 
   @Test
   fun `a directory that can not be listed leaves a warning and the other counts`() {
     v9Dir("a", v9Parts, 20)
-    val a = store.entryDir("a").listFiles()!!.sumOf { it.length() }
+    val a = dirSize("a")
     legacyRow("t-1")
     val locked = v9Dir("b", v9Parts, 50)
     assertTrue(locked.setReadable(false) && locked.setExecutable(false))
     try {
       val records = sweepRecords()
       assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
-      assertEquals(counts(1, 1, a), leftovers(records))
+      assertEquals(v9(legacyRows = 1, unownedUploads = 1, unownedBytes = a), snapshot(records, "v9Leftovers"))
     } finally {
       locked.setReadable(true)
       locked.setExecutable(true)
@@ -1166,17 +1199,67 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `a root that can not be listed leaves a warning and zeros`() {
+    v9Dir("a", v9Parts, 20)
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    assertTrue(root.setReadable(false))
+    val counted = try {
+      store.countLeftovers(listOf("t-1"))
+    } finally {
+      root.setReadable(true)
+    }
+    assertEquals(Leftovers(V9Leftovers(1, 0, 0, 0), Orphans(0, 0)), counted)
+    assertEquals(listOf(DiagnosticLog.WARN), DiagnosticLog(file).drain().map { it.level })
+  }
+
+  @Test
+  fun `a directory that is gone before it is listed is not counted and is not an error`() {
+    v9Dir("a", v9Parts, 20)
+    v9Dir("b", v9Parts, 20)
+    store.beforeCountListing = { if (it == store.entryDir("b")) it.deleteRecursively() }
+    val records = sweepRecords()
+    assertEquals(listOf(DiagnosticLog.INFO), records.map { it.level })
+    assertEquals(v9(unownedUploads = 1, unownedBytes = dirSize("a")), snapshot(records, "v9Leftovers"))
+  }
+
+  @Test
+  fun `an exception stops the count with a warning and the counts so far`() {
+    repeat(3) { v9Dir("d$it", v9Parts, 20) }
+    legacyRow("t-1")
+    var listed = 0
+    store.beforeCountListing = { if (++listed == 2) throw SecurityException("denied") }
+    val records = sweepRecords()
+    assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
+    assertEquals("java.lang.SecurityException: denied", records[0].error)
+    assertEquals(v9(legacyRows = 1, unownedUploads = 1, unownedBytes = dirSize("d0")), snapshot(records, "v9Leftovers"))
+  }
+
+  @Test
+  fun `boot snapshots no one took do not push out warnings`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    Diag.warn("a real warning")
+    repeat(DiagnosticLog.MAX_RECORDS + 5) { controller.sweep() }
+    val records = DiagnosticLog(file).drain()
+    assertEquals(listOf(DiagnosticLog.WARN, DiagnosticLog.INFO), records.map { it.level })
+    assertEquals("a real warning", records[0].message)
+  }
+
+  @Test
   fun `counting changes nothing on disk`() {
     v9Dir("cap", v9Parts, 20)
-    store.entryDir("blob-only").mkdirs()
-    store.blobFile("blob-only").writeBytes(ByteArray(30))
+    orphanFile("orphan", "body-1.json", 30)
+    orphanFile("bare", "blob", 30)
     legacyRow("legacy")
     v9Dir("legacy", v9Parts, 20)
     store.save(entry(id = "done", state = EntryState.ERROR))
     store.entryDir("empty").mkdirs()
     val before = diskState()
-    val counted = store.countV9Leftovers(listOf("legacy"))
-    assertEquals(V9Leftovers(legacyRows = 1, unownedUploads = 3, unownedBytes = counted.unownedBytes), counted)
+    val counted = store.countLeftovers(listOf("legacy"))
+    assertEquals(1, counted.v9.legacyRows)
+    assertEquals(1, counted.v9.unownedUploads)
+    assertEquals(Orphans(2, 60), counted.orphans)
     assertEquals(before, diskState())
   }
 }

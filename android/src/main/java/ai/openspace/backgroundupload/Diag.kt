@@ -32,16 +32,27 @@ internal object Diag {
     record(DiagnosticLog.ERROR, message, error, null)
   }
 
-  /** A structured report, such as the boot snapshot. Not an error by itself. */
-  fun info(message: String, data: Map<String, Any?>) {
+  /**
+   * A structured report, such as the boot snapshot. Not an error by itself.
+   * [replaceUntaken] drops the earlier `info` records with this message that
+   * JS has not taken, so a report written at each start keeps one slot.
+   */
+  fun info(message: String, data: Map<String, Any?>, replaceUntaken: Boolean = false) {
     runCatching { Log.i(TAG, "$message $data") }
-    record(DiagnosticLog.INFO, message, null, data)
+    record(DiagnosticLog.INFO, message, null, data, replaceUntaken)
   }
 
-  private fun record(level: String, message: String, error: Throwable?, data: Map<String, Any?>?) {
+  private fun record(
+    level: String,
+    message: String,
+    error: Throwable?,
+    data: Map<String, Any?>?,
+    replaceUntaken: Boolean = false,
+  ) {
     val target = log ?: return
     runCatching {
-      target.append(DiagnosticLog.Record(clock(), level, message, DiagnosticLog.describe(error), data))
+      val record = DiagnosticLog.Record(clock(), level, message, DiagnosticLog.describe(error), data)
+      if (replaceUntaken) target.replace(record) else target.append(record)
     }
   }
 }

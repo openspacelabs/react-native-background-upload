@@ -100,18 +100,27 @@ final class QueueStore {
     !FileIO.exists(d.appendingPathComponent(entryName))
   }
 
-  /// Counts the v9 work still on disk, for the boot snapshot. An upload is
-  /// an id directory that `removeUnowned` would delete, or the v9 manifest
-  /// and blob that a legacy row in `legacyIds` keeps: a same-id enqueue
-  /// falls back to that blob. An empty directory is not counted. The bytes
-  /// are the sizes of the files directly in the counted directories.
+  /// Test seam: runs before the count lists an unowned directory.
+  var beforeCountListing: ((URL) -> Void)?
+
+  /// Counts what no v10 entry owns, for the boot snapshot. Only directories
+  /// that `removeUnowned` would delete (no `entry.json`, not empty) count:
+  /// - v9: the directory holds `manifest.json` or a file named exactly
+  ///   `blob` (v10 names its blobs `blob-<uuid>`);
+  /// - orphan: any other, such as `body-<uuid>`, `blob-<uuid>` or a `.tmp`.
+  /// Each legacy row in `legacyIds` counts once, and the v9 manifest and
+  /// blob it keeps count as legacy bytes. A legacy directory has its
+  /// `entry.json`, so it is never an unowned upload too. Hidden directories
+  /// (a `.forget-` set aside by a cancel) are skipped.
   ///
   /// Lists directories and reads file sizes only. It opens no file and
   /// changes nothing. It does not run on `queue`, so store calls do not
-  /// wait; a directory that changes during the count can be counted either
-  /// way. An error goes in `warnings`, and the count goes on.
-  func countV9Leftovers(legacyIds: [String]) -> (V9Leftovers, warnings: [(message: String, error: String)]) {
-    var counts = V9Leftovers(legacyRows: legacyIds.count)
+  /// wait; a directory that changes during the count, such as one an
+  /// enqueue is staging, can be counted either way. An error goes in
+  /// `warnings`, and the count goes on.
+  func countLeftovers(legacyIds: [String]) -> (Leftovers, warnings: [(message: String, error: String)]) {
+    var found = Leftovers()
+    found.v9.legacyRows = legacyIds.count
     var warnings: [(message: String, error: String)] = []
     let fm = FileManager.default
     let dirs: [URL]
@@ -119,33 +128,38 @@ final class QueueStore {
       dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
                                         options: [.skipsHiddenFiles])
     } catch {
-      warnings.append(("v9 leftover count: could not list the queue directory", error.localizedDescription))
+      warnings.append(("leftover count: could not list the queue directory", error.localizedDescription))
       dirs = []
     }
     for d in dirs where (try? d.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && Self.isUnowned(d) {
+      beforeCountListing?(d)
       let files: [URL]
       do {
         files = try fm.contentsOfDirectory(at: d, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
       } catch {
         // Gone since the root listing (a cancel or a forget) is not an error.
         if FileIO.exists(d) {
-          warnings.append(("v9 leftover count: could not list \(d.lastPathComponent)", error.localizedDescription))
+          warnings.append(("leftover count: could not list \(d.lastPathComponent)", error.localizedDescription))
         }
         continue
       }
       guard !files.isEmpty else { continue }
-      counts.unownedUploads += 1
-      counts.unownedBytes += files.reduce(0) { $0 + (Self.regularFileSize($1) ?? 0) }
+      let size = files.reduce(0) { $0 + (Self.regularFileSize($1) ?? 0) }
+      let names = Set(files.map(\.lastPathComponent))
+      if names.contains(Self.manifestName) || names.contains(ChunkedManifestV9.blobName) {
+        found.v9.unownedUploads += 1
+        found.v9.unownedBytes += size
+      } else {
+        found.orphans.dirs += 1
+        found.orphans.bytes += size
+      }
     }
-    // A legacy id with no entry file was counted above: each directory counts once.
+    // A legacy id with no entry file was counted above, as the scan found it.
     for id in legacyIds where !Self.isUnowned(dir(id)) {
-      let v9 = [fileURL(id, Self.manifestName), fileURL(id, ChunkedManifestV9.blobName)]
-        .compactMap(Self.regularFileSize)
-      guard !v9.isEmpty else { continue }
-      counts.unownedUploads += 1
-      counts.unownedBytes += v9.reduce(0, +)
+      found.v9.legacyBytes += [fileURL(id, Self.manifestName), fileURL(id, ChunkedManifestV9.blobName)]
+        .compactMap(Self.regularFileSize).reduce(0, +)
     }
-    return (counts, warnings)
+    return (found, warnings)
   }
 
   /// The size of a regular file, or nil for anything else or a failed read.

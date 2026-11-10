@@ -181,8 +181,8 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     coordinator.unacknowledgedEvents { resolve($0) }
   }
 
-  /// The boot snapshot of this process (the v9 leftover count) and the
-  /// warnings of its count, then none. Kept in memory only.
+  /// The diagnostic records of this process, then none: the boot snapshot
+  /// with the leftover count, and warnings. Kept in memory only.
   @objc(takeDiagnostics:reject:)
   public func takeDiagnostics(_ resolve: @escaping RCTPromiseResolveBlock,
                               reject: @escaping RCTPromiseRejectBlock) {
