@@ -79,13 +79,59 @@ final class OrphanCleanupTests: XCTestCase {
     orphanFile("a", body(), bytes: 7)
     orphanFile("a", body(), bytes: 9)
     orphanFile("a", body() + ".tmp", bytes: 2)
-    orphanFile("a", "entry.json.tmp", bytes: 3)
     age("a", old)
-    XCTAssertEqual(try bootOrphans(), orphans(removedDirs: 1, removedBytes: 21))
+    XCTAssertEqual(try bootOrphans(), orphans(removedDirs: 1, removedBytes: 18))
     XCTAssertFalse(FileIO.exists(disk.dir("a")))
   }
 
   // MARK: - Kept
+
+  func testAnOrphanWithAnEntryJsonTmpFileIsNeverDeleted() throws {
+    // A save that renamed entry.json.tmp but did not reach the disk before
+    // a crash: the enqueue may have resolved, so this can be the only copy.
+    let copy = body()
+    orphanFile("a", copy, bytes: 7)
+    orphanFile("a", "entry.json.tmp", bytes: 3)
+    age("a", old)
+    XCTAssertEqual(try bootOrphans(), orphans(1, 10))
+    XCTAssertEqual(names("a"), [copy, "entry.json.tmp"])
+  }
+
+  func testAnOrphanWithASymbolicLinkIsNeverDeleted() throws {
+    let target = root.appendingPathComponent("elsewhere")
+    writeFile(target, bytes: 5)
+    let copy = body()
+    let link = body()
+    orphanFile("a", copy, bytes: 7)
+    try FileManager.default.createSymbolicLink(at: disk.fileURL("a", link), withDestinationURL: target)
+    age("a", old)
+    // The link's own time, so only the link rule can keep the directory.
+    var times = [timeval(tv_sec: Int(old / 1000), tv_usec: 0), timeval(tv_sec: Int(old / 1000), tv_usec: 0)]
+    XCTAssertEqual(lutimes(disk.fileURL("a", link).path, &times), 0)
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: old / 1000)],
+                                          ofItemAtPath: disk.dir("a").path)
+    _ = Harness(root: root).takeDiagnostics()
+    XCTAssertEqual(names("a"), [copy, link])
+    XCTAssertEqual(FileIO.size(target), 5)
+  }
+
+  func testAnOrphanWithAFileTimeOfZeroOrInTheFutureIsNeverDeleted() throws {
+    let zero = body()
+    orphanFile("zero", body(), bytes: 7)
+    orphanFile("zero", zero, bytes: 5)
+    let future = body()
+    orphanFile("future", future, bytes: 7)
+    age("zero", old)
+    age("future", old)
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)],
+                                          ofItemAtPath: disk.fileURL("zero", zero).path)
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: (clock + QueueStore.orphanMinAgeMs) / 1000)],
+      ofItemAtPath: disk.fileURL("future", future).path)
+    XCTAssertEqual(try bootOrphans(), orphans(2, 19))
+    XCTAssertEqual(names("zero").count, 2)
+    XCTAssertEqual(names("future"), [future])
+  }
 
   func testAnOrphanYoungerThanTheAgeLimitIsKept() throws {
     orphanFile("a", body(), bytes: 7)
@@ -257,11 +303,11 @@ final class OrphanCleanupTests: XCTestCase {
   // MARK: - Names
 
   func testOnlyTheNamesStagingWritesAreDeletable() {
-    for name in [body(), body() + ".tmp", "entry.json.tmp"] {
+    for name in [body(), body() + ".tmp"] {
       XCTAssertTrue(QueueStore.isCopiedBodyFile(name), name)
     }
     for name in [blob(), blob() + ".tmp", ChunkedManifestV9.blobName, QueueStore.manifestName,
-                 QueueStore.entryName, "body-", "body-123", "body-" + UUID().uuidString, // upper case
+                 QueueStore.entryName, "entry.json.tmp", "body-", "body-123", "body-" + UUID().uuidString, // upper case
                  body() + ".tmp.tmp", body() + "x", "part-0.inc.0-10", "part-0.tmp", "notes.tmp"] {
       XCTAssertFalse(QueueStore.isCopiedBodyFile(name), name)
     }

@@ -209,14 +209,15 @@ final class QueueStore {
   /// source the caller still has, and the tmp files of their atomic writes.
   /// - `body-<uuid>`: a bodiless, data, form or copied file body
   ///   (`BodyStaging.stage`);
-  /// - `body-<uuid>.tmp` and `entry.json.tmp`: an atomic write that did not
-  ///   finish (`FileIO.tmpURL`).
+  /// - `body-<uuid>.tmp`: an atomic write that did not finish
+  ///   (`FileIO.tmpURL`).
   /// Never a chunked blob (`blob`, `blob-<uuid>`): that file was moved in,
   /// so it can be the only copy, and a same-id enqueue adopts it
   /// (`adoptableBlob`). Never a part file: its entry is gone, so its use is
-  /// not known.
+  /// not known. Never `entry.json.tmp`: `FileIO.writeAtomically` does not
+  /// sync the directory, so after a crash it can be the only trace of an
+  /// entry whose enqueue already resolved.
   static func isCopiedBodyFile(_ name: String) -> Bool {
-    if name == entryName + ".tmp" { return true }
     let range = NSRange(name.startIndex..., in: name)
     return copiedBody.firstMatch(in: name, range: range) != nil
   }
@@ -229,10 +230,12 @@ final class QueueStore {
   /// just before the delete:
   /// - it has no `entry.json`;
   /// - every item in it is a regular file that `isCopiedBodyFile` accepts.
-  ///   So a v9 manifest or bare `blob`, a chunked blob, a part file, an
-  ///   unknown file or a subdirectory keeps the whole directory;
+  ///   So a v9 manifest or bare `blob`, a chunked blob, `entry.json.tmp`, a
+  ///   part file, an unknown file, a symbolic link or a subdirectory keeps
+  ///   the whole directory;
   /// - its newest file, and the directory itself, changed more than
-  ///   `orphanMinAgeMs` before `now` (epoch ms).
+  ///   `orphanMinAgeMs` before `now` (epoch ms). A time at or before the
+  ///   epoch counts as unknown and keeps the directory.
   /// The caller runs it where no enqueue can be staging (the coordinator
   /// queue). A failed delete goes in `warnings`, and the other directories
   /// go on. Returns what it deleted: directories fully gone, and the bytes
@@ -270,10 +273,13 @@ final class QueueStore {
       guard isCopiedBodyFile(f.lastPathComponent),
             let v = try? f.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
             let date = v.contentModificationDate else { return keep }
+      // A time at or before the epoch is not a real write time: keep.
+      guard date.timeIntervalSince1970 > 0 else { return keep }
       newest = max(newest, date)
       sizes.append(Int64(v.fileSize ?? 0))
     }
-    guard now - newest.timeIntervalSince1970 * 1000 > orphanMinAgeMs else { return keep }
+    guard dirDate.timeIntervalSince1970 > 0,
+          now - newest.timeIntervalSince1970 * 1000 > orphanMinAgeMs else { return keep }
     var freed: Int64 = 0
     for (f, size) in zip(files, sizes) {
       do {

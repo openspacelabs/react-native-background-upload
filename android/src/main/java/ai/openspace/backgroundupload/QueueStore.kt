@@ -46,15 +46,17 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
      * - `body-<gen>.json`, `body-<gen>.multipart`: written from the call
      *   ([BodyStaging.stage]);
      * - `file-<gen>`: a copy of the caller's file ([BodyStaging.copyFile]);
-     * - any of these plus `.tmp`, and `entry.json.tmp`: an atomic write
-     *   that did not finish ([AtomicFiles.tmpFor]).
+     * - any of these plus `.tmp`: an atomic write that did not finish
+     *   ([AtomicFiles.tmpFor]).
      * Never a chunked blob (`blob`, `blob-<gen>`): that file was moved in,
-     * so it can be the only copy, and a same-id enqueue adopts it.
+     * so it can be the only copy, and a same-id enqueue adopts it. Never
+     * `entry.json.tmp`: after a crash it can be the only trace of an entry
+     * whose save renamed it but did not reach the disk, while its enqueue
+     * already resolved.
      */
     private val COPIED_BODY = Regex("""(body-\d+\.(json|multipart)|file-\d+)(\.tmp)?""")
 
-    fun isCopiedBodyFile(name: String): Boolean =
-      name == ENTRY_FILE + AtomicFiles.TMP_SUFFIX || COPIED_BODY.matches(name)
+    fun isCopiedBodyFile(name: String): Boolean = COPIED_BODY.matches(name)
 
     private val gson = Gson()
 
@@ -250,8 +252,8 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
    * store lock just before the delete:
    * - it has no `entry.json`;
    * - every entry in it is a regular file that [isCopiedBodyFile] accepts.
-   *   So a v9 manifest, a chunked blob, an unknown file or a subdirectory
-   *   keeps the whole directory;
+   *   So a v9 manifest, a chunked blob, `entry.json.tmp`, an unknown file,
+   *   a symbolic link or a subdirectory keeps the whole directory;
    * - its newest file, and the directory itself, changed more than
    *   [ORPHAN_MIN_AGE_MS] before [now].
    * The caller runs it where no enqueue can be staging (the queue executor).

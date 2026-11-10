@@ -1376,11 +1376,49 @@ class QueueControllerTest {
     orphanFile("a", "file-3", 11)
     orphanFile("a", "body-4.json.tmp", 2)
     orphanFile("a", "file-5.tmp", 1)
+    age("a", OLD)
+    pastTheAge()
+    assertLeftovers(v9(), orphans(removedDirs = 1, removedBytes = 30))
+    assertFalse(store.entryDir("a").exists())
+  }
+
+  @Test
+  fun `an orphan with an entry json tmp file is never deleted`() {
+    // A save that renamed entry.json.tmp but did not reach the disk before
+    // a crash: the enqueue may have resolved, so this can be the only copy.
+    orphanFile("a", "body-1.json", 7)
     orphanFile("a", "entry.json.tmp", 3)
     age("a", OLD)
     pastTheAge()
-    assertLeftovers(v9(), orphans(removedDirs = 1, removedBytes = 33))
-    assertFalse(store.entryDir("a").exists())
+    assertLeftovers(v9(), orphans(1, 10))
+    assertEquals(setOf("body-1.json", "entry.json.tmp"), dirFiles("a"))
+  }
+
+  @Test
+  fun `an orphan with a symbolic link is never deleted`() {
+    val target = source("elsewhere.json", 5)
+    orphanFile("a", "body-1.json", 7)
+    java.nio.file.Files.createSymbolicLink(File(store.entryDir("a"), "body-2.json").toPath(), target.toPath())
+    age("a", OLD)
+    pastTheAge()
+    sweepRecords()
+    assertEquals(setOf("body-1.json", "body-2.json"), dirFiles("a"))
+    assertEquals(5, target.length())
+  }
+
+  @Test
+  fun `an orphan with a file time of zero or in the future is never deleted`() {
+    orphanFile("zero", "body-1.json", 7)
+    orphanFile("zero", "file-2", 5)
+    orphanFile("future", "body-1.json", 7)
+    age("zero", OLD)
+    age("future", OLD)
+    pastTheAge()
+    assertTrue(File(store.entryDir("zero"), "file-2").setLastModified(0))
+    assertTrue(File(store.entryDir("future"), "body-1.json").setLastModified(now + QueueStore.ORPHAN_MIN_AGE_MS))
+    assertLeftovers(v9(), orphans(2, 19))
+    assertEquals(setOf("body-1.json", "file-2"), dirFiles("zero"))
+    assertEquals(setOf("body-1.json"), dirFiles("future"))
   }
 
   @Test
@@ -1561,10 +1599,10 @@ class QueueControllerTest {
   fun `only the names staging writes are deletable`() {
     listOf(
       "body-1.json", "body-12.multipart", "file-3", "body-1.json.tmp", "body-2.multipart.tmp",
-      "file-4.tmp", "entry.json.tmp",
+      "file-4.tmp",
     ).forEach { assertTrue(it, QueueStore.isCopiedBodyFile(it)) }
     listOf(
-      "blob", "blob-2", "blob.tmp", "manifest.json", "manifest.tmp", "entry.json", "body-.json",
+      "blob", "blob-2", "blob.tmp", "manifest.json", "manifest.tmp", "entry.json", "entry.json.tmp", "body-.json",
       "body-x.json", "body-1.txt", "file-", "file-1.bin", "notes.tmp", ".tmp", "body-1.json.tmp.tmp",
     ).forEach { assertFalse(it, QueueStore.isCopiedBodyFile(it)) }
   }

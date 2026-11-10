@@ -381,7 +381,8 @@ export type V9Leftovers = {
  * Directories with no entry file that are not v9: the library's own
  * leftovers, such as the file of an enqueue whose save failed. Not part of
  * the v9 count. At each start the library deletes the ones that hold only
- * copied request bodies and are more than 24 hours old.
+ * copied request bodies, no `entry.json.tmp`, and are more than 24 hours
+ * old.
  * - `dirs`, `bytes`: what is left after that cleanup.
  * - `removedDirs`, `removedBytes`: what that cleanup deleted.
  */

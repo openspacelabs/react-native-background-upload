@@ -8,13 +8,15 @@ file in it is a request body it copied or wrote (or the temporary file of
 that write), and its newest file and the directory are more than 24 hours
 old. It never deletes a v9 directory, a chunked file it moved in from the
 caller (that can be the only copy, and a same-id `mutate()` still uses it),
-or a directory with any other file or a subdirectory. The cleanup runs after
+a directory with `entry.json.tmp` (after a crash it can hold a request whose
+save did not reach the disk), or a directory with any other file, a
+symbolic link or a subdirectory. The cleanup runs after
 queued work is scheduled, in the same serial order as enqueue, and checks for
 the entry file again just before each delete.
 
 The boot record's `data.orphans` now has `removedDirs` and `removedBytes`:
-what the cleanup deleted. `dirs` and `bytes` now count what is left after
-it. A failed delete is a `warn` record; the cleanup goes on with the next
+what the cleanup deleted. `dirs` and `bytes` now mean what is left after
+it, not everything the count found. A failed delete is a `warn` record; the cleanup goes on with the next
 directory. The fake native module's `seedBootSnapshot()` fills the new
 fields with 0.
 

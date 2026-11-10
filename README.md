@@ -502,25 +502,33 @@ At each start the library deletes some of these directories by itself, so
 the app has nothing to do. It deletes a directory only when all of these
 are true:
 
-- It has no entry file.
+- It has no entry file and no `entry.json.tmp`.
 - It is not v9: no v9 manifest, and on iOS no file named exactly `blob`.
 - Every file in it is a request body the library copied or wrote, or the
-  temporary file of such a write. The caller still has the source of each
-  of these. On Android the names are `body-<n>.json`, `body-<n>.multipart`,
-  `file-<n>`, each with or without `.tmp`, and `entry.json.tmp`. On iOS they
-  are `body-<uuid>`, `body-<uuid>.tmp` and `entry.json.tmp`.
+  temporary file of such a write. On Android the names are `body-<n>.json`,
+  `body-<n>.multipart` and `file-<n>`, each with or without `.tmp`. On iOS
+  they are `body-<uuid>` and `body-<uuid>.tmp`.
 - The newest file in it, and the directory itself, changed more than 24
   hours before the start.
 
-It never deletes a directory that holds anything else, such as a
-subdirectory or a file it does not know. It never deletes a chunked file
-(Android `blob` or `blob-<n>`, iOS `blob-<uuid>`). The library moved that
-file in from the caller, so it can be the only copy of the bytes. A
-`mutate()` with the same id still uses it, as after an enqueue that rejected
-`E_STORAGE`. `cancel(id)` deletes it.
+The cleanup relies on these rules together. With no entry file and no
+`entry.json.tmp`, no entry for the directory was ever saved, so its enqueue
+did not resolve and the caller still has its source.
 
-`dirs` and `bytes` count what is left after this cleanup. `removedDirs` and
-`removedBytes` count what it deleted. When a delete fails, a `warn` record
+It never deletes a directory that holds anything else. A directory with
+`entry.json.tmp` is kept: after a crash or a forced reboot, that file can be
+the only trace of an entry whose save did not reach the disk, while its
+enqueue had already resolved. A subdirectory, a symbolic link, a file it does
+not know, or a file time it cannot use (0, before 1970, or in the future)
+also keeps the directory. It never deletes a chunked file (Android `blob` or
+`blob-<n>`, iOS `blob-<uuid>`). The library moved that file in from the
+caller, so it can be the only copy of the bytes. A `mutate()` with the same
+id still uses it, as after an enqueue that rejected `E_STORAGE`.
+`cancel(id)` deletes it.
+
+`dirs` and `bytes` now count what is left after this cleanup, not
+everything the count found. `removedDirs` and `removedBytes` count what it
+deleted. When a delete fails, a `warn` record
 comes before the snapshot, the directory stays, and the cleanup goes on with
 the next one.
 
