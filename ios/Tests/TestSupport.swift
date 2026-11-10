@@ -218,6 +218,14 @@ final class Harness {
     while runHeldSlice() {}
   }
 
+  /// Puts the held slices on the queue, in order, without running them.
+  /// The slices they queue are held again.
+  func requeueHeldSlices() {
+    let blocks = heldSlices
+    heldSlices = []
+    blocks.forEach { queue.async(execute: $0) }
+  }
+
   var map: TaskMap { coordinator.taskMap }
 
   /// Runs the relaunch reconcile to completion.

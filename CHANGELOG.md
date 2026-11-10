@@ -5,15 +5,18 @@ its parts. Since 11.0.0, a chunked `mutate()` copied every part out of the
 file and created every part task in one block on the queue, so the next
 `mutate()` waited for all of it. For a 2 GiB file on an older iPhone this
 could pass the 10 s enqueue timeout. The parts are now built in slices of
-about 32 MiB, and other calls run between two slices. Each slice writes the
-task map once; before, every part task wrote the whole task map. The parts
+about 32 MiB, and other calls run between two slices: a `mutate()` waits for
+at most one slice per chunked upload that is building its parts. Each slice
+writes the task map once; before, every part task wrote the whole task map.
+The part copy frees each 1 MiB read buffer before the next read. The parts
 still get their tasks right after `mutate()`, one slice after the other. A
 background wake keeps its completion handler until the last slice is built,
 or until less than 5 s of background time is left. Replacing the part tasks
 created in the background, when the app becomes active, is sliced the same
 way, and each part keeps its old task until its new one exists, unless
-that slice's build fails. Replacing stops when the app leaves the
-foreground again.
+that slice's build fails. Each slice checks again that an old task has not
+started sending; one that has is kept. Replacing stops when the app leaves
+the foreground again.
 
 iOS now resumes every task it adopts at launch. A crash between writing a
 task's task map entry and resuming it left a suspended task that held its

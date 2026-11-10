@@ -19,7 +19,8 @@ enum ChunkedEngine {
 
   /// The first parts of `indexes`, in order, until their bytes reach
   /// `budget`. Always at least one part. One slice is what one block on the
-  /// coordinator queue builds, so another call waits for one slice at most.
+  /// coordinator queue builds, so another call waits for at most one slice
+  /// per entry that is building.
   static func slice(_ indexes: [Int], budget: Int64, size: (Int) -> Int64) -> [Int] {
     var bytes: Int64 = 0
     var out: [Int] = []

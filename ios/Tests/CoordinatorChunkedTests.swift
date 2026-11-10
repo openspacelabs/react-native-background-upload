@@ -683,6 +683,104 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "parts 4 and 5 get their tasks")
   }
 
+  func testAnOldTaskThatStartsWhileWaitingForItsSliceIsKept() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    let old = h.transport.live
+    h.holdSlices = true
+    activate() // replaces 0 and 1; 2 to 5 wait for their slices
+    let sending = try XCTUnwrap(old.first { parts([$0]) == [2] })
+    sending.bytesSent = 4 // the daemon started it meanwhile
+    h.runHeldSlices()
+    XCTAssertFalse(sending.cancelled, "a task that sends is never replaced")
+    XCTAssertEqual(parts(old.filter(\.isLive)), [2])
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "one task per part")
+    XCTAssertEqual(h.transport.created.count, 11)
+  }
+
+  func testASameIdMutateDuringAReplaceChainLeavesTheChain() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    h.holdSlices = true
+    activate()
+    let created = h.transport.created.count
+    // The same body: a live resume, nothing changes.
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 60, parts: 6, source: h.root.appendingPathComponent("x"))).get()
+    // A different body while running rejects.
+    guard case .failure(let e) = h.enqueue(h.chunkedRaw(id: "cap", size: 60, parts: 6,
+                                                         urlPrefix: "https://other.test/")) else {
+      return XCTFail("a different body was accepted")
+    }
+    XCTAssertEqual(e.code, "E_RUNNING")
+    XCTAssertEqual(h.transport.created.count, created)
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "one task per part")
+    XCTAssertEqual(h.transport.created.count, 12, "the chain replaced every part once")
+  }
+
+  func testASliceThatFailsPartwayIsFinishedByTheBackoffRefill() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    var failed = false
+    h.transport.failUpload = { file in
+      guard !failed, file.lastPathComponent.hasPrefix("part-3.") else { return nil }
+      failed = true
+      return NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotOpenFile)
+    }
+    h.runHeldSlice()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2], "part 2 keeps its task")
+    XCTAssertTrue(h.heldSlices.isEmpty, "no slice is queued; the backoff timer refills")
+    h.advance(4 * 3_600_000)
+    h.runHeldSlices()
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "one task per part")
+    XCTAssertEqual(h.transport.created.count, 6)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  func testASmallRequestWaitsForOneSlicePerChunkedUpload() throws {
+    h.sliceBytes = 20
+    h.holdSlices = true
+    for id in ["a", "b", "c"] { _ = try h.enqueue(h.chunkedRaw(id: id, size: 60, parts: 6)).get() }
+    XCTAssertEqual(partTasks().count, 6, "slice 1 of each")
+    XCTAssertEqual(h.heldSlices.count, 3)
+    // The three next slices go on the queue, then the small request.
+    h.requeueHeldSlices()
+    var partTasksAtResolve: Int?
+    h.coordinator.enqueue(h.dataRaw(id: "meta"), resolve: { [unowned self] _ in
+      partTasksAtResolve = self.partTasks().count
+    }, reject: { _, _ in XCTFail("meta rejected") })
+    h.drain()
+    XCTAssertEqual(partTasksAtResolve, 12, "it waited for one slice of each upload, not for whole plans")
+    h.runHeldSlices()
+    XCTAssertEqual(partTasks().count, 18)
+    for id in ["a", "b", "c"] {
+      let mine = h.transport.live.filter { ChunkedEngine.parsePartDescription($0.taskDescription)?.id == id }
+      XCTAssertEqual(parts(mine), [0, 1, 2, 3, 4, 5])
+    }
+  }
+
+  func testAShortWakeNeverCutsAGraceWaitShort() throws {
+    h.holdSlices = true
+    try enqueueSixPartsInThreeSlices()
+    // Part 1's task finished while the app was dead: its key stays, the
+    // daemon no longer holds it, and its completion may still replay.
+    let survivor = try XCTUnwrap(partTask(0))
+    let fresh = Harness(root: h.root)
+    fresh.sliceBytes = 20
+    fresh.holdSlices = true
+    fresh.relaunch(daemonTasks: [FakeTask(key: survivor.key, description: survivor.taskDescription,
+                                          request: survivor.request)])
+    fresh.coordinator.wakeTimeRemaining = { 1 }
+    var released = false
+    fresh.coordinator.reconcileAll { released = true }
+    fresh.drain()
+    fresh.drain()
+    fresh.runHeldSlices()
+    XCTAssertFalse(released, "the grace wait holds the handler, short wake or not")
+    fresh.advance(Double(QueueCoordinator.graceMs))
+    XCTAssertTrue(released, "released when the grace ends; queued slices do not hold a short wake")
+  }
+
   func testReplaceStopsWhenTheAppResignsActive() throws {
     try enqueueSixPartsInThreeSlices()
     h.drainAll()

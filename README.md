@@ -60,8 +60,11 @@ relaunch reconcile, its grace waits, and every queued slice of chunked part
 tasks (see "Every part is queued at once"). A part slice can take long on an
 older device, so the library stops waiting for slices when less than 5 s of
 background time is left, and calls the handler then. The parts not built yet
-get their tasks at the next wake or launch. Every chunked upload already has
-the tasks of its first slice, so a next wake comes.
+get their tasks at the next wake or launch. Usually that wake comes, because
+the upload already has the tasks of its first slice and the system wakes the
+app when one of them finishes. It may not come when no slice of the upload
+could be built (a full disk, for example): then only an in-process timer
+retries the build, and the parts wait until the app next runs.
 
 # Usage
 
@@ -237,8 +240,8 @@ requests: over HTTP/2, every queued part can be in flight at once.
 **Every part is queued at once.** A chunked upload starts creating a task
 for every part at `mutate()`. It copies the parts and creates their tasks in
 slices of about 32 MiB, one slice at a time, and other calls run between two
-slices. So a `mutate()` right after a large chunked one waits for one slice,
-not for the whole file. Each part task reads its own part file, so a chunked
+slices. So a `mutate()` right after a large chunked one waits for at most one
+slice per chunked upload that is building its parts, not for whole files. Each part task reads its own part file, so a chunked
 upload needs the file's size again in free space until its parts are sent.
 
 **Instruments.** Each `enqueue`, each `issue` and each part slice is an

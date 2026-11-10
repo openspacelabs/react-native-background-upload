@@ -12,8 +12,8 @@ import Foundation
 ///
 /// refill builds the part tasks one slice at a time (about 32 MiB of parts),
 /// each slice in its own block on the queue. Another call (the next
-/// enqueue, a delegate callback) waits for one slice at most, not for the
-/// whole plan.
+/// enqueue, a delegate callback) waits for at most one slice per entry that
+/// is building, not for whole plans.
 ///
 /// The entry (QueueEntry) is the durable truth: parts, accepted flags,
 /// incarnation. Terminals go through QueueCoordinator.settle.
@@ -316,9 +316,12 @@ final class ChunkedCoordinator {
       replacing[id] = nil
       return
     }
+    // Checked again in every slice: an old task the daemon started while
+    // it waited for its slice is sending, so it is kept, not replaced.
     let stale = (replacing[id] ?? []).filter {
       $0.incarnation == e.incarnation && e.parts.indices.contains($0.part) && !e.parts[$0.part].accepted
         && inFlight[id]?[$0.part] == $0.key
+        && q.liveTasks[$0.key].map { $0.task.isLive && $0.task.bytesSent == 0 && !$0.task.hasResponse } == true
     }
     let slice = ChunkedEngine.slice(stale.map(\.part), budget: sliceBytes) { e.parts[$0].size }
     let now = Array(stale.prefix(slice.count))
@@ -406,8 +409,10 @@ final class ChunkedCoordinator {
       guard let self else { return }
       // Before the id leaves queuedSlices, this releases only when a
       // background wake is short on time: then the completion handler goes
-      // back to the system now. Every entry has at least its first slice's
-      // tasks, so a later wake comes.
+      // back to the system now. The rest is built at the next wake or
+      // launch, which usually comes because the entry's first slice has
+      // tasks. (A first slice that could not be built has only an
+      // in-process timer.)
       self.q.releaseIfIdle()
       self.queuedSlices.remove(id)
       if self.replacing[id] != nil {
