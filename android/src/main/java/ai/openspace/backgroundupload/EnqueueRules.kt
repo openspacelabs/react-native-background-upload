@@ -123,8 +123,9 @@ object EnqueueRules {
   /**
    * Same body. New headers, expiresAt, vars, accept, retry, wifiOnly,
    * priority, and notification flag replace the stored ones; the body and
-   * accepted parts stay. A settled entry reopens with a fresh generation and
-   * attempts 0 (attempts count the current generation). A running one stays
+   * accepted parts stay. A settled entry reopens with a fresh generation,
+   * attempts 0 (attempts count the current generation), and no transient
+   * counts; a live one keeps its counts, the parts' included. A running one stays
    * running (the worker reads the new headers before its next attempt).
    */
   fun resumed(
@@ -136,9 +137,9 @@ object EnqueueRules {
   ): QueueEntry {
     val stored = existing.descriptor!!
     val body = existing.body!!
-    val parts = stored.parts?.let { ChunkedParts.carryAccepted(it, p.descriptor.parts!!) }
     val running = existing.state == EntryState.RUNNING
     val reopen = existing.isSettled
+    val parts = stored.parts?.let { ChunkedParts.carryAccepted(it, p.descriptor.parts!!, keepHits = !reopen) }
     return existing.copy(
       key = p.key,
       varsJson = p.varsJson,
@@ -162,7 +163,7 @@ object EnqueueRules {
       parkedGeneration = null,
       generation = if (reopen) existing.generation + 1 else existing.generation,
       settledEventId = if (reopen) null else existing.settledEventId,
-      transientHits = if (reopen) null else existing.transientHits,
+      transientHitsByRule = if (reopen) null else existing.transientHitsByRule,
     )
   }
 

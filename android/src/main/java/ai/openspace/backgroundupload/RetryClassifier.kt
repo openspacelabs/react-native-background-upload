@@ -23,8 +23,8 @@ object RetryClassifier {
 
   sealed class Verdict {
     object Accepted : Verdict()
-    /** [ruleIndex] names the `transient` rule that excused the response; null for the standard table or `exempt`. */
-    data class Transient(val ruleIndex: Int? = null) : Verdict()
+    /** [rule] is the `transient` rule that excused the response; null for the standard table or `exempt`. */
+    data class Transient(val rule: UploadOutcome.TransientRule? = null) : Verdict()
     object Auth : Verdict()
     data class Terminal(val errorKind: String, val message: String) : Verdict()
   }
@@ -49,8 +49,9 @@ object RetryClassifier {
   )
 
   /**
-   * [hits] is the entry's count per `transient` rule so far. A matched rule
-   * decides even past its cap: `exempt` does not rescue it.
+   * [hits] is the count so far per rule [UploadOutcome.TransientRule.identity]:
+   * the entry's for a simple request, the part's for a chunked one. A matched
+   * rule decides even past its cap: `exempt` does not rescue it.
    */
   fun classifyResponse(
     code: Int,
@@ -58,17 +59,17 @@ object RetryClassifier {
     accept: List<UploadOutcome.AcceptRule>,
     exempt: List<Int>,
     transient: List<UploadOutcome.TransientRule> = emptyList(),
-    hits: List<Int> = emptyList(),
+    hits: Map<String, Int> = emptyMap(),
   ): Verdict = when {
     UploadOutcome.isAccepted(code, body, accept) -> Verdict.Accepted
     code == 401 || code == 403 -> Verdict.Auth
     code == 408 || code == 429 || code in 500..599 -> Verdict.Transient()
     code in 400..499 -> {
-      val index = UploadOutcome.matchesTransient(code, body, transient)
+      val rule = UploadOutcome.matchesTransient(code, body, transient)
       when {
-        index != null -> {
-          val cap = transient[index].maxRetries
-          if (cap == null || (hits.getOrNull(index) ?: 0) < cap) Verdict.Transient(index)
+        rule != null -> {
+          val cap = rule.maxRetries
+          if (cap == null || (hits[rule.identity] ?: 0) < cap) Verdict.Transient(rule)
           else Verdict.Terminal("http", "HTTP $code")
         }
         code in exempt -> Verdict.Transient()

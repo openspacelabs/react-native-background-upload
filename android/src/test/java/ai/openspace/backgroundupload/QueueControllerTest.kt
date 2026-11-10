@@ -186,12 +186,31 @@ class QueueControllerTest {
   @Test
   fun `a reopened error entry starts its transient hits at zero, a live one keeps them`() {
     controller.enqueue(parsed())
-    store.save(store.load("e1")!!.copy(state = EntryState.ERROR, transientHits = listOf(3), settledEventId = "ev"))
+    store.save(store.load("e1")!!.copy(state = EntryState.ERROR, transientHitsByRule = mapOf("404" to 3), settledEventId = "ev"))
     controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
-    assertEquals(null, store.load("e1")!!.transientHits)
-    store.save(store.load("e1")!!.copy(transientHits = listOf(1)))
+    assertEquals(null, store.load("e1")!!.transientHitsByRule)
+    store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 1)))
     controller.enqueue(parsed(expiresAt = FAR_FUTURE + 2))
-    assertEquals(listOf(1), store.load("e1")!!.transientHits)
+    assertEquals(mapOf("404" to 1), store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `a chunked entry's part counts follow the part on a live re-mutate and reset on a reopen`() {
+    val src = source("video.bin", 20)
+    val forward = desc(url = null, method = "PUT", file = src.path, parts = listOf(part(0, 10), part(10, 20)))
+    controller.enqueue(parsed(descriptor = forward))
+    val e = store.load("e1")!!
+    val counted = e.descriptor!!.parts!!.map { it.copy(transientHitsByRule = mapOf("400" to it.start.toInt() / 10 + 1)) }
+    store.save(e.copy(descriptor = e.descriptor!!.copy(parts = counted)))
+    // The same parts in the other order: each count follows its range start.
+    controller.enqueue(parsed(descriptor = forward.copy(parts = forward.parts!!.reversed()), expiresAt = FAR_FUTURE + 1))
+    val live = store.load("e1")!!.descriptor!!.parts!!
+    assertEquals(listOf(10L to mapOf("400" to 2), 0L to mapOf("400" to 1)), live.map { it.start to it.transientHitsByRule })
+    store.save(store.load("e1")!!.copy(state = EntryState.ERROR, settledEventId = "ev"))
+    controller.enqueue(parsed(descriptor = forward, expiresAt = FAR_FUTURE + 2))
+    val reopened = store.load("e1")!!
+    assertEquals(2, reopened.generation)
+    assertEquals(listOf(null, null), reopened.descriptor!!.parts!!.map { it.transientHitsByRule })
   }
 
   @Test

@@ -80,18 +80,41 @@ class QueueStoreTest {
     assertEquals("POST", e.descriptor!!.method)
     assertEquals(emptyMap<String, String>(), e.descriptor!!.headers)
     assertEquals(1, e.generation)
-    assertNull(e.transientHits)
+    assertNull(e.transientHitsByRule)
   }
 
   @Test
   fun `transient hits and rules round-trip across store instances`() {
     val dir = tmp.newFolder()
     val rules = listOf(UploadOutcome.TransientRule(400, "Bad Request", 24))
-    val e = entry(descriptor = desc(retry = RetryOverride(null, null, null, null, transient = rules))).copy(transientHits = listOf(0, 2))
+    val e = entry(descriptor = desc(retry = RetryOverride(null, null, null, null, transient = rules)))
+      .copy(transientHitsByRule = mapOf("404" to 2, "400|Bad Request" to 1))
     store(dir).save(e)
     val loaded = store(dir).load("e1")!!
-    assertEquals(listOf(0, 2), loaded.transientHits)
+    assertEquals(mapOf("404" to 2, "400|Bad Request" to 1), loaded.transientHitsByRule)
     assertEquals(rules, loaded.descriptor!!.retry!!.transient)
+  }
+
+  @Test
+  fun `part counts round-trip across store instances`() {
+    val dir = tmp.newFolder()
+    val parts = listOf(part(0, 10).copy(transientHitsByRule = mapOf("400" to 3)), part(10, 20))
+    store(dir).save(entry(descriptor = desc(url = null, parts = parts), body = StagedBody(StagedBody.CHUNKED, "blob", null, 20)))
+    val loaded = store(dir).load("e1")!!.descriptor!!.parts!!
+    assertEquals(listOf(mapOf("400" to 3), null), loaded.map { it.transientHitsByRule })
+  }
+
+  @Test
+  fun `a positional transientHits list from a pre-release build loads as no hits`() {
+    val dir = tmp.newFolder()
+    store(dir).save(entry())
+    val file = File(store(dir).entryDir("e1"), "entry.json")
+    val text = file.readText()
+    file.writeText(text.replaceFirst("{", """{"transientHits":[40,2],"""))
+    val loaded = store(dir).load("e1")
+    assertNotNull(loaded)
+    assertNull(loaded!!.transientHitsByRule)
+    assertEquals(EntryState.QUEUED, loaded.state)
   }
 
   @Test

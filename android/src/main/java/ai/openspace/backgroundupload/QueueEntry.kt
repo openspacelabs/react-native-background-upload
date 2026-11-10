@@ -122,10 +122,13 @@ data class QueueEntry(
   val lastRequestId: String? = null,
   val legacy: Boolean = false,
   /**
-   * How many responses each `retry.transient` rule has excused in this
-   * generation, by rule index. Null before the first. A reopen starts over.
+   * A simple entry's count of the responses each `retry.transient` rule has
+   * excused in this generation, by [UploadOutcome.TransientRule.identity]. A
+   * chunked entry counts on each [Part] instead. Null before the first; a
+   * reopen starts over. A pre-release build wrote a positional list under the
+   * name `transientHits`; Gson skips that unknown name, so it reads as no hits.
    */
-  val transientHits: List<Int>? = null,
+  val transientHitsByRule: Map<String, Int>? = null,
 ) {
   val isLive get() = state.isLive
   val isSettled get() = !state.isLive

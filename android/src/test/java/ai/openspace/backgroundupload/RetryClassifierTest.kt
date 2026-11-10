@@ -44,43 +44,74 @@ class RetryClassifierTest {
   }
 
   private val bodyStopped = UploadOutcome.TransientRule(400, "\"error\":\"Bad Request\"", maxRetries = 2)
-  private fun classifyWith(code: Int, body: String, rules: List<UploadOutcome.TransientRule>, hits: List<Int> = emptyList(), exempt: List<Int> = defaultExempt) =
+  private val bodyStoppedKey = "400|\"error\":\"Bad Request\""
+  private fun classifyWith(code: Int, body: String, rules: List<UploadOutcome.TransientRule>, hits: Map<String, Int> = emptyMap(), exempt: List<Int> = defaultExempt) =
     RetryClassifier.classifyResponse(code, body, emptyList(), exempt, rules, hits)
 
   @Test
   fun `a transient rule matches by status alone or by status and body`() {
-    assertEquals(Verdict.Transient(0), classifyWith(404, "", listOf(UploadOutcome.TransientRule(404)), exempt = emptyList()))
-    assertEquals(Verdict.Transient(0), classifyWith(400, """{"status":400,"error":"Bad Request"}""", listOf(bodyStopped)))
+    val notFound = UploadOutcome.TransientRule(404)
+    val any400 = UploadOutcome.TransientRule(400)
+    assertEquals(Verdict.Transient(notFound), classifyWith(404, "", listOf(notFound), exempt = emptyList()))
+    assertEquals(Verdict.Transient(bodyStopped), classifyWith(400, """{"status":400,"error":"Bad Request"}""", listOf(bodyStopped)))
     // A different body falls through: not exempt, so terminal.
     assertEquals(Verdict.Terminal("http", "HTTP 400"), classifyWith(400, """{"message":"doc.comment must not be blank"}""", listOf(bodyStopped)))
     // The first matching rule wins, in list order.
-    assertEquals(Verdict.Transient(1), classifyWith(400, "x", listOf(bodyStopped, UploadOutcome.TransientRule(400))))
-    assertEquals(Verdict.Transient(0), classifyWith(400, """{"error":"Bad Request"}""", listOf(UploadOutcome.TransientRule(400), bodyStopped)))
+    assertEquals(Verdict.Transient(any400), classifyWith(400, "x", listOf(bodyStopped, any400)))
+    assertEquals(Verdict.Transient(any400), classifyWith(400, """{"error":"Bad Request"}""", listOf(any400, bodyStopped)))
   }
 
   @Test
   fun `a rule excuses maxRetries responses and the next one settles`() {
     val body = """{"error":"Bad Request"}"""
-    assertEquals(Verdict.Transient(0), classifyWith(400, body, listOf(bodyStopped), hits = emptyList()))
-    assertEquals(Verdict.Transient(0), classifyWith(400, body, listOf(bodyStopped), hits = listOf(1)))
-    assertEquals(Verdict.Terminal("http", "HTTP 400"), classifyWith(400, body, listOf(bodyStopped), hits = listOf(2)))
+    assertEquals(Verdict.Transient(bodyStopped), classifyWith(400, body, listOf(bodyStopped), hits = emptyMap()))
+    assertEquals(Verdict.Transient(bodyStopped), classifyWith(400, body, listOf(bodyStopped), hits = mapOf(bodyStoppedKey to 1)))
+    assertEquals(Verdict.Terminal("http", "HTTP 400"), classifyWith(400, body, listOf(bodyStopped), hits = mapOf(bodyStoppedKey to 2)))
     // No cap: never settles on count.
-    assertEquals(Verdict.Transient(0), classifyWith(400, body, listOf(UploadOutcome.TransientRule(400)), hits = listOf(1_000)))
+    val any400 = UploadOutcome.TransientRule(400)
+    assertEquals(Verdict.Transient(any400), classifyWith(400, body, listOf(any400), hits = mapOf("400" to 1_000)))
+  }
+
+  @Test
+  fun `counts follow the rule identity, not its place in the list`() {
+    val notFound = UploadOutcome.TransientRule(404, maxRetries = 48)
+    val stopped = UploadOutcome.TransientRule(400, "X", maxRetries = 3)
+    // 40 hits under [{404, 48}]. An update puts a 400 rule in front.
+    val hits = mapOf("404" to 40)
+    val rules = listOf(stopped, notFound)
+    assertEquals(Verdict.Transient(stopped), classifyWith(400, "X", rules, hits))
+    assertEquals(Verdict.Transient(notFound), classifyWith(404, "", rules, hits))
+    // Reordered the other way: the same answers.
+    assertEquals(Verdict.Transient(stopped), classifyWith(400, "X", rules.reversed(), hits))
+    assertEquals(Verdict.Transient(notFound), classifyWith(404, "", rules.reversed(), hits))
+    // A list position from a pre-release build is not a key.
+    assertEquals(Verdict.Transient(stopped), classifyWith(400, "X", rules, mapOf("0" to 40)))
+  }
+
+  @Test
+  fun `a changed cap applies to the count so far`() {
+    val hits = mapOf("404" to 2)
+    assertEquals(Verdict.Terminal("http", "HTTP 404"), classifyWith(404, "", listOf(UploadOutcome.TransientRule(404, maxRetries = 2)), hits))
+    assertEquals(Verdict.Transient(UploadOutcome.TransientRule(404, maxRetries = 5)), classifyWith(404, "", listOf(UploadOutcome.TransientRule(404, maxRetries = 5)), hits))
+    assertEquals(Verdict.Terminal("http", "HTTP 404"), classifyWith(404, "", listOf(UploadOutcome.TransientRule(404, maxRetries = 1)), hits))
+    // A changed bodyIncludes is a new rule with its own count.
+    val other = UploadOutcome.TransientRule(404, "gone", maxRetries = 2)
+    assertEquals(Verdict.Transient(other), classifyWith(404, "gone", listOf(other), hits))
   }
 
   @Test
   fun `a matched rule past its cap is terminal even when exempt lists the status`() {
     val capped = UploadOutcome.TransientRule(404, maxRetries = 1)
-    assertEquals(Verdict.Transient(0), classifyWith(404, "", listOf(capped), hits = emptyList(), exempt = listOf(404)))
-    assertEquals(Verdict.Terminal("http", "HTTP 404"), classifyWith(404, "", listOf(capped), hits = listOf(1), exempt = listOf(404)))
-    // exempt alone is uncounted: no rule index.
-    assertEquals(Verdict.Transient(), classifyWith(404, "", emptyList(), hits = listOf(9), exempt = listOf(404)))
+    assertEquals(Verdict.Transient(capped), classifyWith(404, "", listOf(capped), hits = emptyMap(), exempt = listOf(404)))
+    assertEquals(Verdict.Terminal("http", "HTTP 404"), classifyWith(404, "", listOf(capped), hits = mapOf("404" to 1), exempt = listOf(404)))
+    // exempt alone is uncounted: no rule.
+    assertEquals(Verdict.Transient(), classifyWith(404, "", emptyList(), hits = mapOf("404" to 9), exempt = listOf(404)))
   }
 
   @Test
   fun `the standard table decides before any rule`() {
     val rule = UploadOutcome.TransientRule(429, maxRetries = 1)
-    assertEquals(Verdict.Transient(), classifyWith(429, "", listOf(rule), hits = listOf(5)))
+    assertEquals(Verdict.Transient(), classifyWith(429, "", listOf(rule), hits = mapOf("429" to 5)))
     assertEquals(Verdict.Auth, classifyWith(401, "", listOf(UploadOutcome.TransientRule(401))))
     assertEquals(Verdict.Accepted, RetryClassifier.classifyResponse(409, "dup", listOf(UploadOutcome.AcceptRule(409)), emptyList(), listOf(UploadOutcome.TransientRule(409))))
   }
