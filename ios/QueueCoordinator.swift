@@ -101,6 +101,7 @@ final class QueueCoordinator {
   /// entry still names them.
   var pendingJournal: [String: JournaledEvent] = [:]
   lazy var chunked = ChunkedCoordinator(self)
+  let diagnostics = BootDiagnostics()
 
   init(store: QueueStore, journal: EventJournal, taskMap: TaskMap, transport: Transport,
        sink: EventSink?, queue: DispatchQueue = DispatchQueue(label: QueueCoordinator.queueLabel),
@@ -124,9 +125,17 @@ final class QueueCoordinator {
     // the time JS can call it, legacy rows included.
     index.load(store.all())
     importLegacyIfNeeded()
+    // After the import, so its legacy rows count. Off this thread.
+    diagnostics.start(store: store, legacyIds: index.entries().filter(\.legacy).map(\.id), at: now())
   }
 
   // MARK: - Module methods
+
+  /// The boot snapshot and its warnings, then none. Waits for the boot
+  /// count, off the coordinator queue.
+  func takeDiagnostics(_ completion: @escaping ([[String: Any]]) -> Void) {
+    diagnostics.take(completion)
+  }
 
   func configure(_ options: [String: Any]) {
     queue.async {

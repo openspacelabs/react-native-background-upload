@@ -17,6 +17,7 @@ let package = Package(
                 "RNBGUCatchException.h", "RNBGUCatchException.m", ".gitignore"],
       sources: [
         "BodyStaging.swift",
+        "BootDiagnostics.swift",
         "ChunkedCoordinator.swift",
         "ChunkedEngine.swift",
         "ChunkedManifestV9.swift",

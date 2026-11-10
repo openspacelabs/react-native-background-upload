@@ -90,9 +90,69 @@ final class QueueStore {
     guard !id.isEmpty else { return }
     queue.sync {
       let d = dir(id)
-      guard FileIO.exists(d), !FileIO.exists(d.appendingPathComponent(Self.entryName)) else { return }
+      guard FileIO.exists(d), Self.isUnowned(d) else { return }
       _ = try? FileManager.default.removeItem(at: d)
     }
+  }
+
+  /// A directory that `removeUnowned` deletes: it holds no `entry.json`.
+  private static func isUnowned(_ d: URL) -> Bool {
+    !FileIO.exists(d.appendingPathComponent(entryName))
+  }
+
+  /// Counts the v9 work still on disk, for the boot snapshot. An upload is
+  /// an id directory that `removeUnowned` would delete, or the v9 manifest
+  /// and blob that a legacy row in `legacyIds` keeps: a same-id enqueue
+  /// falls back to that blob. An empty directory is not counted. The bytes
+  /// are the sizes of the files directly in the counted directories.
+  ///
+  /// Lists directories and reads file sizes only. It opens no file and
+  /// changes nothing. It does not run on `queue`, so store calls do not
+  /// wait; a directory that changes during the count can be counted either
+  /// way. An error goes in `warnings`, and the count goes on.
+  func countV9Leftovers(legacyIds: [String]) -> (V9Leftovers, warnings: [(message: String, error: String)]) {
+    var counts = V9Leftovers(legacyRows: legacyIds.count)
+    var warnings: [(message: String, error: String)] = []
+    let fm = FileManager.default
+    let dirs: [URL]
+    do {
+      dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                        options: [.skipsHiddenFiles])
+    } catch {
+      warnings.append(("v9 leftover count: could not list the queue directory", error.localizedDescription))
+      dirs = []
+    }
+    for d in dirs where (try? d.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && Self.isUnowned(d) {
+      let files: [URL]
+      do {
+        files = try fm.contentsOfDirectory(at: d, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+      } catch {
+        // Gone since the root listing (a cancel or a forget) is not an error.
+        if FileIO.exists(d) {
+          warnings.append(("v9 leftover count: could not list \(d.lastPathComponent)", error.localizedDescription))
+        }
+        continue
+      }
+      guard !files.isEmpty else { continue }
+      counts.unownedUploads += 1
+      counts.unownedBytes += files.reduce(0) { $0 + (Self.regularFileSize($1) ?? 0) }
+    }
+    // A legacy id with no entry file was counted above: each directory counts once.
+    for id in legacyIds where !Self.isUnowned(dir(id)) {
+      let v9 = [fileURL(id, Self.manifestName), fileURL(id, ChunkedManifestV9.blobName)]
+        .compactMap(Self.regularFileSize)
+      guard !v9.isEmpty else { continue }
+      counts.unownedUploads += 1
+      counts.unownedBytes += v9.reduce(0, +)
+    }
+    return (counts, warnings)
+  }
+
+  /// The size of a regular file, or nil for anything else or a failed read.
+  private static func regularFileSize(_ url: URL) -> Int64? {
+    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          values.isRegularFile == true else { return nil }
+    return Int64(values.fileSize ?? 0)
   }
 
   // MARK: - Forget in steps (cancel on a settled entry)
