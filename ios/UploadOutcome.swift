@@ -16,6 +16,46 @@ enum UploadOutcome {
     var bodyIncludes: String?
   }
 
+  /// A 4xx to retry instead of settling. `bodyIncludes` narrows the rule by
+  /// a response-body substring. `maxRetries` caps the retries the rule causes
+  /// for one entry: 3 retries three matching responses, the fourth settles.
+  /// Codable: persisted in the entry's retry override and in the settings.
+  struct TransientRule: Codable, Equatable {
+    let status: Int
+    var bodyIncludes: String?
+    var maxRetries: Int?
+
+    /// The key of this rule's count. Format, the same on Android: the status
+    /// in decimal; with bodyIncludes, then "|" and the bodyIncludes text
+    /// unchanged. So `{404}` is "404" and `{400, "Bad Request"}` is
+    /// "400|Bad Request". A status holds only digits, so the first "|" ends
+    /// it, and two rules share a key only when status and bodyIncludes are
+    /// both equal. No escaping is needed. maxRetries is not part of it: a
+    /// changed cap applies to the count so far. The list position is not part
+    /// of it: a reordered list keeps each count. The shared vector
+    /// test-vectors/transient-rule-identity.json pins the format on both
+    /// platforms. Computed, so Codable does not persist it.
+    var identity: String { bodyIncludes.map { "\(status)|\($0)" } ?? "\(status)" }
+  }
+
+  /// The first rule that matches, or nil.
+  static func matchesTransient(_ code: Int, body: String?, rules: [TransientRule]) -> TransientRule? {
+    rules.first { rule in
+      rule.status == code
+        && (rule.bodyIncludes == nil || body?.contains(rule.bodyIncludes!) == true)
+    }
+  }
+
+  /// A malformed rule is dropped, not guessed at. JS validates the shape.
+  static func parseTransientRules(_ raw: Any?) -> [TransientRule]? {
+    guard let rules = raw as? [[String: Any]] else { return nil }
+    return rules.compactMap { rule in
+      guard let status = (rule["status"] as? NSNumber)?.intValue else { return nil }
+      return TransientRule(status: status, bodyIncludes: rule["bodyIncludes"] as? String,
+                           maxRetries: (rule["maxRetries"] as? NSNumber)?.intValue)
+    }
+  }
+
   // Tells whether an HTTP response counts as a successful completion. A 2xx
   // always counts, plus any matching per-request accept rule. Anything else,
   // 4xx and 5xx included, is an http error, not a completion.
