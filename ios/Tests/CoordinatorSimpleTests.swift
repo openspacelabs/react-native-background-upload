@@ -588,6 +588,146 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.entry("b")?.state, .error)
   }
 
+  // MARK: - Transient rules
+
+  private let bodyStoppedRules: [String: Any] =
+    ["retry": ["transient": [["status": 400, "bodyIncludes": "Bad Request", "maxRetries": 2]]]]
+  private let bodyStopped = #"{"status":400,"error":"Bad Request"}"#
+
+  func testATransientRuleRetriesAMatching400AndCountsThenSettles() throws {
+    h.coordinator.configure(bodyStoppedRules)
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 1])
+    XCTAssertEqual(h.sink.attempts.last?["outcome"] as? String, "error")
+    XCTAssertEqual(h.sink.attempts.last?["httpCode"] as? Int, 400)
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 2])
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .error, "the third matching response is past the cap")
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "http")
+    XCTAssertEqual((error["response"] as? [String: Any])?["status"] as? Int, 400)
+    XCTAssertEqual(h.sink.settled.last?["attempts"] as? Int, 3)
+  }
+
+  func testA400WhoseBodyDoesNotMatchTheRuleIsTerminalAtOnce() throws {
+    h.coordinator.configure(bodyStoppedRules)
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 400, body: #"{"message":"doc.comment: must not be blank"}"#)
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertNil(h.entry("a")?.transientHitsByRule)
+  }
+
+  func testExemptAloneRetriesWithoutCounting() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertNil(h.entry("a")?.transientHitsByRule)
+  }
+
+  func testAMatchedRulePastItsCapSettlesEvenWhenExemptListsTheStatus() throws {
+    h.coordinator.configure(["retry": ["transient": [["status": 404, "maxRetries": 1]]]])
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["404": 1])
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .error, "exempt [404] does not rescue a rule past its cap")
+  }
+
+  func testADescriptorRuleOverridesTheDefaultsAndAReopenStartsOver() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: bodyStoppedRules)).get()
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "the descriptor's own rule applies with no defaults")
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .error)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 2])
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: bodyStoppedRules)).get()
+    XCTAssertEqual(h.entry("a")?.isLive, true, "reopened and issued again")
+    XCTAssertNil(h.entry("a")?.transientHitsByRule, "a same-id mutate on a settled entry resets the count")
+  }
+
+  /// Sets the stored and in-memory counts of a live entry, as an earlier run would have left them.
+  private func seedHits(_ id: String, _ hits: [String: Int]) throws {
+    try h.queue.sync {
+      var e = try XCTUnwrap(h.entry(id))
+      e.transientHitsByRule = hits
+      try h.store.save(e)
+      h.coordinator.index.upsert(e)
+    }
+  }
+
+  private let notFound48: [String: Any] = ["status": 404, "maxRetries": 48]
+  private let stopped3: [String: Any] = ["status": 400, "bodyIncludes": "Bad Request", "maxRetries": 3]
+
+  func testAnAppUpdateThatPutsARuleInFrontKeepsEachRulesCount() throws {
+    h.coordinator.configure(["retry": ["transient": [notFound48]]])
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    try seedHits("a", ["404": 40])
+    h.coordinator.configure(["retry": ["transient": [stopped3, notFound48]]])
+    h.drain()
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "the 400 rule has its own count, not the 404 rule's 40")
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["404": 41, "400|Bad Request": 1])
+  }
+
+  func testALiveSameIdMutateThatReordersItsRulesKeepsEachRulesCount() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["retry": ["transient": [notFound48]]])).get()
+    try seedHits("a", ["404": 40])
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["retry": ["transient": [stopped3, notFound48]]])).get()
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["404": 40], "a live re-mutate keeps the counts")
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["404": 40, "400|Bad Request": 1])
+  }
+
+  func testAChangedCapAppliesToTheCountSoFar() throws {
+    h.coordinator.configure(["retry": ["transient": [["status": 404, "maxRetries": 5]]]])
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    try seedHits("a", ["404": 2])
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "a raised cap retries again")
+    XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["404": 3])
+    h.coordinator.configure(["retry": ["transient": [["status": 404, "maxRetries": 2]]]])
+    h.drain()
+    h.complete(onlyTask(), status: 404)
+    XCTAssertEqual(h.entry("a")?.state, .error, "a lowered cap applies to the count so far")
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual((error["response"] as? [String: Any])?["status"] as? Int, 404)
+  }
+
+  func testTheCountSurvivesARelaunch() throws {
+    h.coordinator.configure(bodyStoppedRules)
+    h.drain()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 400, body: bodyStopped)
+    XCTAssertEqual(h.store.load("a")?.transientHitsByRule, ["400|Bad Request": 1], "persisted")
+    // A new process over the same disk, with no task left in the daemon.
+    let second = Harness(root: h.root)
+    second.boot()
+    second.advance(Double(QueueCoordinator.graceMs)) // a replay of the lost task may be pending
+    XCTAssertEqual(second.entry("a")?.transientHitsByRule, ["400|Bad Request": 1])
+    second.complete(try XCTUnwrap(second.transport.live.last), status: 400, body: bodyStopped)
+    XCTAssertEqual(second.entry("a")?.state, .queued)
+    let third = Harness(root: h.root)
+    third.boot()
+    third.advance(Double(QueueCoordinator.graceMs)) // a replay of the lost task may be pending
+    XCTAssertEqual(third.entry("a")?.transientHitsByRule, ["400|Bad Request": 2])
+    third.complete(try XCTUnwrap(third.transport.live.last), status: 400, body: bodyStopped)
+    XCTAssertEqual(third.entry("a")?.state, .error, "the third matching response is past the cap of 2")
+  }
+
   // MARK: - Auth
 
   func testAuthParksAndUpdateHeadersResumes() throws {

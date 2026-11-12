@@ -73,6 +73,7 @@ class EntryRunTest {
   @get:Rule
   val tmp = TemporaryFolder()
 
+  private lateinit var root: File
   private lateinit var store: QueueStore
   private lateinit var journal: EventJournal
   private lateinit var settings: QueueSettingsStore
@@ -84,7 +85,7 @@ class EntryRunTest {
 
   @Before
   fun setUp() {
-    val root = tmp.newFolder("queue")
+    root = tmp.newFolder("queue")
     store = QueueStore(root, RequestIndex())
     journal = EventJournal(tmp.newFolder("journal"), retryLater = { _, _ -> })
     settings = QueueSettingsStore(File(root, "settings.json"))
@@ -439,6 +440,171 @@ class EntryRunTest {
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
   }
 
+  // MARK: - transient rules
+
+  private val bodyStopped = UploadOutcome.TransientRule(400, "Bad Request", maxRetries = 2)
+
+  /** Answers [codes] in order; a 400 carries the server's body-stopped shape. */
+  private fun respondShaped(vararg codes: Int) {
+    val queue = ArrayDeque(codes.toList())
+    host.handler = { _, onProgress ->
+      onProgress(7)
+      val code = queue.removeFirst()
+      UploadResponse(code, if (code == 400) """{"status":400,"error":"Bad Request"}""" else "body", mapOf())
+    }
+  }
+
+  @Test
+  fun `a transient rule retries a matching 400 and counts the hit on the entry`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(bodyStopped)))
+    controller.enqueue(parsed())
+    respondShaped(400, 400, 200)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(3, e.attempts)
+    assertEquals(mapOf("400|Bad Request" to 2), e.transientHitsByRule)
+    assertEquals(listOf(1_000L, 2_000L), host.sleeps)
+    assertEquals(listOf("error", "error", "completed"), host.attempts.map { it.outcome })
+  }
+
+  @Test
+  fun `the response after maxRetries settles error http with the response`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(bodyStopped)))
+    controller.enqueue(parsed())
+    respondShaped(400, 400, 400)
+    run()
+    val r = outcome()
+    assertEquals(EventJournal.KIND_ERROR, r.kind)
+    assertEquals("http", r.errorKind)
+    assertEquals(400, r.response!!.status)
+    assertEquals(3, store.load("e1")!!.attempts)
+    assertEquals(mapOf("400|Bad Request" to 2), store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `a 400 whose body does not match the rule is terminal at once`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(bodyStopped)))
+    controller.enqueue(parsed())
+    respond(400) // body "body"
+    run()
+    assertEquals("http", outcome().errorKind)
+    assertEquals(1, store.load("e1")!!.attempts)
+    assertNull(store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `exempt alone retries without counting`() {
+    controller.enqueue(parsed()) // default exempt [404]
+    respond(404, 200)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertNull(store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `a matched rule past its cap settles even when exempt lists the status`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(404, maxRetries = 1))))
+    controller.enqueue(parsed())
+    respond(404, 404)
+    run()
+    assertEquals("http", outcome().errorKind)
+    assertEquals(404, outcome().response!!.status)
+    assertEquals(mapOf("404" to 1), store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `hits persist across runs and the descriptor's own rules override the defaults`() {
+    controller.configureRetry(RetryDefaults(baseMs = 60_000, jitter = 0.0))
+    val own = RetryOverride(null, null, null, null, transient = listOf(bodyStopped))
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = own)))
+    respondShaped(400, 400, 400)
+    run()
+    assertEquals(mapOf("400|Bad Request" to 1), store.load("e1")!!.transientHitsByRule) // released to a 60 s wake
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    host.clock += 60_000
+    run()
+    assertEquals(mapOf("400|Bad Request" to 2), store.load("e1")!!.transientHitsByRule)
+    host.clock += 120_000
+    run()
+    assertEquals("http", outcome().errorKind)
+    assertEquals(3, store.load("e1")!!.attempts)
+  }
+
+  /** A new process: a fresh store, settings, ops and controller over the same directories. */
+  private fun restart() {
+    store = QueueStore(root, RequestIndex())
+    settings = QueueSettingsStore(File(root, "settings.json"))
+    ops = WorkerOps(store, journal, settings, events, scheduler) { host.clock }
+    controller = QueueController(store, journal, settings, events, scheduler, { false }, { host.clock })
+  }
+
+  private val notFound48 = UploadOutcome.TransientRule(404, maxRetries = 48)
+
+  @Test
+  fun `an app update that puts a rule in front keeps each rule's count`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(notFound48)))
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 40)))
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(bodyStopped.copy(maxRetries = 3), notFound48)))
+    respondShaped(400, 404, 200)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(mapOf("404" to 41, "400|Bad Request" to 1), e.transientHitsByRule)
+  }
+
+  @Test
+  fun `a live same-id mutate that reorders its rules keeps each rule's count`() {
+    val before = RetryOverride(null, null, null, null, transient = listOf(notFound48))
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = before)))
+    store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 40)))
+    val after = RetryOverride(null, null, null, null, transient = listOf(bodyStopped.copy(maxRetries = 3), notFound48))
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = after), expiresAt = FAR_FUTURE + 1))
+    assertEquals(mapOf("404" to 40), store.load("e1")!!.transientHitsByRule)
+    respondShaped(400, 400, 200)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(mapOf("404" to 40, "400|Bad Request" to 2), store.load("e1")!!.transientHitsByRule)
+  }
+
+  @Test
+  fun `a raised cap lets a capped count retry again, a lowered one settles it`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(404, maxRetries = 5))))
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 2)))
+    respond(404, 200)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(mapOf("404" to 3), store.load("e1")!!.transientHitsByRule)
+
+    controller.enqueue(parsed(id = "e2"))
+    store.save(store.load("e2")!!.copy(transientHitsByRule = mapOf("404" to 3)))
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(404, maxRetries = 2))))
+    respond(404)
+    run("e2")
+    val r = journal.unacknowledged().single { it.id == "e2" }
+    assertEquals("http", r.errorKind)
+    assertEquals(404, r.response!!.status)
+  }
+
+  @Test
+  fun `a simple entry's count survives a process restart`() {
+    controller.configureRetry(RetryDefaults(baseMs = 60_000, jitter = 0.0, transient = listOf(bodyStopped)))
+    controller.enqueue(parsed())
+    respondShaped(400, 400, 400)
+    run()
+    restart()
+    assertEquals(mapOf("400|Bad Request" to 1), store.load("e1")!!.transientHitsByRule)
+    host.clock += 60_000
+    run()
+    restart()
+    assertEquals(mapOf("400|Bad Request" to 2), store.load("e1")!!.transientHitsByRule)
+    host.clock += 120_000
+    run()
+    assertEquals("http", outcome().errorKind)
+  }
+
   // MARK: - chunked
 
   private fun chunked(size: Int = 30) {
@@ -492,6 +658,62 @@ class EntryRunTest {
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
     assertEquals(4, host.requests.size)
     assertEquals(listOf(1_000L), host.sleeps)
+  }
+
+  /** Four 10-byte parts. [code] answers each request by its part index and how many times that part was sent. */
+  private fun fourParts(code: (part: Int, sent: Int) -> Int) {
+    val src = File(tmp.newFolder(), "video.bin").apply { writeBytes(ByteArray(40) { it.toByte() }) }
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = src.path,
+      parts = listOf(part(0, 10), part(10, 20), part(20, 30), part(30, 40)))))
+    val sends = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    host.handler = { r, _ ->
+      val index = r.url.substringAfter("start=").toInt() / 10
+      UploadResponse(code(index, sends.merge(index, 1, Int::plus)!!), "", mapOf())
+    }
+  }
+
+  @Test
+  fun `each part of a chunked entry gets the rule's full maxRetries`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(400, maxRetries = 3))))
+    // Every part answers 400 three times, then 200. One shared count would settle at the fourth 400.
+    fourParts { _, sent -> if (sent <= 3) 400 else 200 }
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(12, host.attempts.count { it.httpCode == 400 })
+    assertEquals(List(4) { mapOf("400" to 3) }, e.descriptor!!.parts!!.map { it.transientHitsByRule })
+    assertNull(e.transientHitsByRule) // a chunked entry counts on its parts
+  }
+
+  @Test
+  fun `one part past the cap settles the entry error http with that part's response`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(400, maxRetries = 3))))
+    fourParts { part, sent -> if (part == 2 || sent <= 3) 400 else 200 }
+    run()
+    val r = outcome()
+    assertEquals(EventJournal.KIND_ERROR, r.kind)
+    assertEquals("http", r.errorKind)
+    assertEquals(2, r.partIndex)
+    assertEquals(400, r.response!!.status)
+    assertEquals("HTTP 400 on part 2", r.message)
+    assertEquals(4, host.attempts.count { it.partIndex == 2 }) // three excused, the fourth settles
+    assertEquals(mapOf("400" to 3), store.load("e1")!!.descriptor!!.parts!![2].transientHitsByRule)
+  }
+
+  @Test
+  fun `a part's count survives a process restart`() {
+    controller.configureRetry(RetryDefaults(baseMs = 60_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(400, maxRetries = 2))))
+    fourParts { part, sent -> if (part == 1 && sent <= 2) 400 else 200 }
+    run() // part 1's first 400 releases the run to a 60 s wake
+    assertEquals(mapOf("400" to 1), store.load("e1")!!.descriptor!!.parts!![1].transientHitsByRule)
+    restart()
+    host.clock += 60_000
+    run()
+    assertEquals(mapOf("400" to 2), store.load("e1")!!.descriptor!!.parts!![1].transientHitsByRule)
+    restart()
+    host.clock += 120_000
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
   }
 
   @Test

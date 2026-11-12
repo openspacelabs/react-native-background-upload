@@ -280,7 +280,18 @@ internal class EntryRun(
       return Attempt(entry, url, policy, result)
     }
 
-    val verdict = RetryClassifier.classifyResponse(response.code, response.body, d.accept, policy.exempt)
+    // A part counts on its own, so each part gets a rule's full maxRetries.
+    val hits = (if (part != null) part.transientHitsByRule else entry.transientHitsByRule) ?: emptyMap()
+    var verdict = RetryClassifier.classifyResponse(
+      response.code, response.body, d.accept, policy.exempt, policy.transient, hits,
+    )
+    val rule = (verdict as? RetryClassifier.Verdict.Transient)?.rule
+    if (rule != null) {
+      // The snapshot above can be stale; the store decides the cap exactly.
+      if (!ops.recordTransientHit(entryId, generation, part?.start, rule)) {
+        verdict = RetryClassifier.Verdict.Terminal("http", "HTTP ${response.code}")
+      }
+    }
     host.attempt(
       AttemptEvent.ofResponse(
         entry, requestId, url, partIndex, response, verdict == RetryClassifier.Verdict.Accepted, host.now(),
@@ -290,7 +301,7 @@ internal class EntryRun(
       RetryClassifier.Verdict.Accepted -> AttemptResult.Accepted(response)
       RetryClassifier.Verdict.Auth ->
         AttemptResult.Auth(headerGeneration, ops.hasNewerHeaders(entryId, generation, headerGeneration))
-      RetryClassifier.Verdict.Transient -> AttemptResult.Transient
+      is RetryClassifier.Verdict.Transient -> AttemptResult.Transient
       is RetryClassifier.Verdict.Terminal -> AttemptResult.Terminal("http", verdict.message, response)
     }
     return Attempt(entry, url, policy, result)
