@@ -1,5 +1,20 @@
 ## Unreleased
 
+Added `retry.transient`: rules that make a 4xx response transient when its
+status, and optionally a body substring, match, with a per-rule `maxRetries`
+cap. A matching rule is checked before `terminalHttp.exempt`; `exempt` stays
+the uncapped fallback. Past the cap the response settles `error` with
+`errorKind: 'http'`. The count is kept per rule identity (`status` and
+`bodyIncludes`), so a reordered list or a changed `maxRetries` keeps it. A
+chunked request counts per part, and each part gets the full `maxRetries`. A
+same-id `mutate()` that reopens a settled entry starts the counts at 0; one on
+a live entry keeps them. A rule for 401, 403, 408 or 429 is rejected, because
+the standard table decides those first. The defaults are unchanged.
+`RetryPolicy.transient` is optional, so code that builds a full
+`RetryPolicy` for 11.1.0 still compiles; absent means no rules.
+`configure()` now checks every option, `retry` included the way `mutate()`
+does, before it changes any setting.
+
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
 hooks that return the queue rows for display, and
 `definition.useRequests()` and `definition.useRequestsWithProgress()`, which

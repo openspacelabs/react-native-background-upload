@@ -145,6 +145,52 @@ class WorkerOps(
     }
 
   /**
+   * A `transient` [rule] matched this response. The count, keyed by the
+   * rule's identity, is checked and raised under the store lock, so two
+   * writers cannot both pass the cap. [partStart] is null for a simple
+   * entry, which counts on the entry; a chunked entry counts on the part
+   * with that range start, so each part gets the full maxRetries.
+   *
+   * The start names the part, as in carryAccepted. Within one generation the
+   * parts keep their order: JS rejects a parts list that is not sorted
+   * ascending, and a live re-mutate keeps the generation only when
+   * ChunkedParts.sameParts matches, so the list has the same ranges in the
+   * same order. The index would work today. The start is a defensive choice:
+   * it stays right if either rule changes.
+   *
+   * Returns false when the count is already at the rule's maxRetries; the
+   * caller then settles the response as terminal. A lost write, another
+   * generation, or no part with that start allows the retry: one retry too
+   * many, never one too few.
+   */
+  fun recordTransientHit(id: String, generation: Int, partStart: Long?, rule: UploadOutcome.TransientRule): Boolean {
+    val key = rule.identity
+    val cap = rule.maxRetries
+    var within = true
+    store.update(id) { e ->
+      val parts = e.descriptor?.parts
+      val partIndex = partStart?.let { start -> parts?.indexOfFirst { it.start == start } }
+      val hits = when {
+        e.generation != generation -> return@update e
+        partStart == null -> e.transientHitsByRule
+        parts == null || partIndex == null || partIndex < 0 -> return@update e
+        else -> parts[partIndex].transientHitsByRule
+      }
+      if (cap != null && (hits?.get(key) ?: 0) >= cap) {
+        within = false
+        return@update e
+      }
+      if (partStart == null) {
+        val map = hits ?: emptyMap()
+        e.copy(transientHitsByRule = map + (key to (map[key] ?: 0) + 1))
+      } else {
+        e.copy(descriptor = e.descriptor!!.copy(parts = ChunkedParts.withTransientHit(parts!!, partIndex!!, key)))
+      }
+    }
+    return within
+  }
+
+  /**
    * Journal, then transition, then emit, all under the store lock, so a
    * cancel, pause, or replace lands either before (this run's outcome is
    * dropped) or after. Returns whether this run's outcome stands.

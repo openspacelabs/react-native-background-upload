@@ -47,6 +47,28 @@ export type CancelReason = 'user' | 'system';
 export type AcceptRule = { status: number; bodyIncludes?: string };
 
 /**
+ * A 4xx response to retry instead of settling. `bodyIncludes` narrows the
+ * rule by a response-body substring, so one status can mean "try again"
+ * with one body and "rejected" with another. `maxRetries` caps the retries
+ * the rule causes: `maxRetries: 3` retries three matching responses, and the
+ * fourth settles `error` with `errorKind: 'http'`. No `maxRetries` means no
+ * cap. The first matching rule in the list wins.
+ *
+ * The count is kept by `status` and `bodyIncludes`, not by list position:
+ * reordering the rules or changing `maxRetries` keeps it. A simple request
+ * has one count per rule. A chunked request has one per rule for each part,
+ * and each part gets the full `maxRetries`. A same-id `mutate()` that reopens
+ * a settled entry starts the counts at 0; one on a live entry keeps them.
+ * 401, 403, 408 and 429 are not allowed: the standard table handles them
+ * before any rule.
+ */
+export type TransientRule = {
+  status: number;
+  bodyIncludes?: string;
+  maxRetries?: number;
+};
+
+/**
  * One multipart/form-data field. A `path` part is a file. The library copies
  * the file into its own directory at `mutate()`.
  */
@@ -70,6 +92,14 @@ export type RetryPolicy = {
   backoff: { baseMs: number; maxMs: number; jitter: number };
   /** HTTP statuses in the 4xx range that retry instead of settling. */
   terminalHttp: { exempt: number[] };
+  /**
+   * 4xx responses that retry under a body match and a retry cap. Checked
+   * after `accept` and before `exempt`: a matching rule wins, and `exempt`
+   * is the blanket fallback for a status no rule matched. Optional, so a
+   * full `RetryPolicy` written for 11.1.0 still compiles. Absent means no
+   * rules. Default `[]`.
+   */
+  transient?: TransientRule[];
 };
 
 /** What `request(vars)` returns. Native persists it next to `vars`. */
@@ -359,7 +389,7 @@ export type ConfigureOptions = {
    * are capped, because native persists them next to every entry.
    */
   maxVarsBytes?: number;
-  /** Defaults: base 1 s, max 2 h, jitter 0.2, exempt [404]. */
+  /** Defaults: base 1 s, max 2 h, jitter 0.2, exempt [404], transient []. */
   retry?: Partial<RetryPolicy>;
   /** Called at `mutate()`. The descriptor's headers merge over the result. */
   headers?: () => Record<string, string>;

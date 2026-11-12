@@ -84,6 +84,10 @@ class EntryParsingTest {
       "retry", JavaOnlyMap.of(
         "backoff", JavaOnlyMap.of("baseMs", 50.0),
         "terminalHttp", JavaOnlyMap.of("exempt", JavaOnlyArray()),
+        "transient", JavaOnlyArray.of(
+          JavaOnlyMap.of("status", 400.0, "bodyIncludes", "Bad Request", "maxRetries", 24.0),
+          JavaOnlyMap.of("status", 404.0),
+        ),
       ),
       "android", JavaOnlyMap.of("noNotification", true),
     )
@@ -93,7 +97,13 @@ class EntryParsingTest {
     assertEquals(listOf(Part("https://s3/1", mapOf(), 0, 10), Part("https://s3/2", mapOf("Content-Range" to "10-19"), 10, 20)), parsed.parts)
     assertEquals(mapOf("Content-Type" to "video/mp4", "X-N" to "5"), parsed.headers)
     assertEquals(listOf(UploadOutcome.AcceptRule(409, "already completed")), parsed.accept)
-    assertEquals(RetryOverride(50, null, null, emptyList()), parsed.retry)
+    assertEquals(
+      RetryOverride(
+        50, null, null, emptyList(),
+        transient = listOf(UploadOutcome.TransientRule(400, "Bad Request", 24), UploadOutcome.TransientRule(404)),
+      ),
+      parsed.retry,
+    )
     assertEquals(true, parsed.noNotification)
     assertEquals("https://s3/2", parsed.reportUrl)
   }

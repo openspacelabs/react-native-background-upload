@@ -511,6 +511,14 @@ describe('mutate', () => {
         mutateWith({ ...base, accept: [{ statsu: 409 }] }).promise,
       ).rejects.toThrow(/unknown accept\[0\] field "statsu".*"status"/);
       await expect(
+        mutateWith({
+          ...base,
+          retry: { transient: [{ status: 400, maxRetrie: 3 }] },
+        }).promise,
+      ).rejects.toThrow(
+        /unknown retry\.transient\[0\] field "maxRetrie".*"maxRetries"/,
+      );
+      await expect(
         mutateWith({ ...base, android: { noNotifications: true } }).promise,
       ).rejects.toThrow(/unknown android field "noNotifications"/);
       await expect(
@@ -547,6 +555,76 @@ describe('mutate', () => {
       ).rejects.toThrow(/android\.noNotification must be a boolean/);
     });
 
+    it('rejects a transient rule that could never match or has a bad cap', async () => {
+      const base = { url: 'https://x', data: {} };
+      await expect(
+        mutateWith({ ...base, retry: { transient: {} } }).promise,
+      ).rejects.toThrow(/retry\.transient must be an array/);
+      await expect(
+        mutateWith({ ...base, retry: { transient: [{ status: 500 }] } })
+          .promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.status must be an integer from 400 to 499/,
+      );
+      await expect(
+        mutateWith({ ...base, retry: { transient: [{ status: '400' }] } })
+          .promise,
+      ).rejects.toThrow(/retry\.transient\[0\]\.status must be an integer/);
+      await expect(
+        mutateWith({
+          ...base,
+          retry: { transient: [{ status: 400, bodyIncludes: '' }] },
+        }).promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.bodyIncludes must be a non-empty string/,
+      );
+      await expect(
+        mutateWith({
+          ...base,
+          retry: { transient: [{ status: 400, maxRetries: 0 }] },
+        }).promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.maxRetries must be a positive integer/,
+      );
+      await expect(
+        mutateWith({
+          ...base,
+          retry: { transient: [{ status: 400, maxRetries: 2.5 }] },
+        }).promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.maxRetries must be a positive integer/,
+      );
+    });
+
+    it('rejects a rule for a status the standard table decides first', async () => {
+      const base = { url: 'https://x', data: {} };
+      await expect(
+        mutateWith({ ...base, retry: { transient: [{ status: 429, maxRetries: 5 }] } })
+          .promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.status 429 retries without a cap before any rule runs/,
+      );
+      await expect(
+        mutateWith({ ...base, retry: { transient: [{ status: 401 }] } }).promise,
+      ).rejects.toThrow(
+        /retry\.transient\[0\]\.status 401 parks as awaiting-auth before any rule runs/,
+      );
+    });
+
+    it('forwards transient rules to native as given', async () => {
+      const transient = [
+        { status: 400, bodyIncludes: '"error":"Bad Request"', maxRetries: 24 },
+        { status: 404 },
+      ];
+      const { promise, enqueue } = mutateWith({
+        url: 'https://x',
+        data: {},
+        retry: { transient },
+      });
+      await promise;
+      expect(enqueue.mock.calls[0][0].descriptor.retry).toEqual({ transient });
+    });
+
     it('accepts valid retry, accept and android shapes', async () => {
       await expect(
         mutateWith({
@@ -555,6 +633,10 @@ describe('mutate', () => {
           retry: {
             backoff: { baseMs: 1000, maxMs: 60_000, jitter: 0.2 },
             terminalHttp: { exempt: [] },
+            transient: [
+              { status: 400, bodyIncludes: 'Bad Request', maxRetries: 3 },
+              { status: 404 },
+            ],
           },
           accept: [{ status: 409 }, { status: 400, bodyIncludes: 'dup' }],
           android: { noNotification: true },

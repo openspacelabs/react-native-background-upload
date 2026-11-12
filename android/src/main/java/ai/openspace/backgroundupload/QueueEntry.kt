@@ -30,6 +30,8 @@ data class RetryOverride(
   val maxMs: Long?,
   val jitter: Double?,
   val exempt: List<Int>?,
+  /** Null follows the configure() defaults. An entry saved before the field reads null. */
+  val transient: List<UploadOutcome.TransientRule>? = null,
 )
 
 /** What request(vars) returned, as native needs it to run. */
@@ -119,6 +121,14 @@ data class QueueEntry(
   /** The X-Request-Id of the last attempt. */
   val lastRequestId: String? = null,
   val legacy: Boolean = false,
+  /**
+   * A simple entry's count of the responses each `retry.transient` rule has
+   * excused in this generation, by [UploadOutcome.TransientRule.identity]. A
+   * chunked entry counts on each [Part] instead. Null before the first; a
+   * reopen starts over. A pre-release build wrote a positional list under the
+   * name `transientHits`; Gson skips that unknown name, so it reads as no hits.
+   */
+  val transientHitsByRule: Map<String, Int>? = null,
 ) {
   val isLive get() = state.isLive
   val isSettled get() = !state.isLive
