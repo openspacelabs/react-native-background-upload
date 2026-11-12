@@ -1,0 +1,15 @@
+{
+  "about": "The identity of a retry.transient rule. Android and iOS key each transient count by it, and both test suites read this file, so the two cannot drift. Format: the status in decimal. With bodyIncludes, then '|' and the bodyIncludes text, unchanged. A status holds only digits, so the first '|' ends it and no escaping is needed. maxRetries is not part of the identity.",
+  "identities": [
+    { "rule": { "status": 404 }, "identity": "404" },
+    { "rule": { "status": 404, "maxRetries": 48 }, "identity": "404" },
+    { "rule": { "status": 400, "bodyIncludes": "Bad Request" }, "identity": "400|Bad Request" },
+    { "rule": { "status": 400, "bodyIncludes": "Bad Request", "maxRetries": 3 }, "identity": "400|Bad Request" },
+    { "rule": { "status": 400, "bodyIncludes": "a|b" }, "identity": "400|a|b" },
+    { "rule": { "status": 400, "bodyIncludes": "|" }, "identity": "400||" },
+    { "rule": { "status": 409, "bodyIncludes": "404" }, "identity": "409|404" },
+    { "rule": { "status": 400, "bodyIncludes": "\"error\":\"Bad Request\"" }, "identity": "400|\"error\":\"Bad Request\"" },
+    { "rule": { "status": 422, "bodyIncludes": "naïve 日本 ✓" }, "identity": "422|naïve 日本 ✓" },
+    { "rule": { "status": 400, "bodyIncludes": " x " }, "identity": "400| x " }
+  ]
+}
