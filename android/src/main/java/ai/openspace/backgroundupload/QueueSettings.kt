@@ -10,6 +10,7 @@ data class RetryDefaults(
   val maxMs: Long = 7_200_000,
   val jitter: Double = 0.2,
   val exempt: List<Int> = listOf(404),
+  val transient: List<UploadOutcome.TransientRule> = emptyList(),
 )
 
 /** Queue-wide settings. They live next to the entries, in `settings.json`. */
@@ -62,6 +63,18 @@ class QueueSettingsStore(private val file: File) {
         jitter = (backoff?.get("jitter") as? Number)?.toDouble() ?: d.jitter,
         exempt = (terminal?.get("exempt") as? List<*>)?.mapNotNull { (it as? Number)?.toInt() }
           ?: d.exempt,
+        transient = (retry["transient"] as? List<*>)?.let { transientRules(it) } ?: d.transient,
+      )
+    }
+
+    /** A malformed rule is dropped, not guessed at. JS validates the shape before it crosses. */
+    private fun transientRules(raw: List<*>): List<UploadOutcome.TransientRule> = raw.mapNotNull { item ->
+      val rule = item as? Map<*, *> ?: return@mapNotNull null
+      val status = (rule["status"] as? Number)?.toInt() ?: return@mapNotNull null
+      UploadOutcome.TransientRule(
+        status = status,
+        bodyIncludes = rule["bodyIncludes"] as? String,
+        maxRetries = (rule["maxRetries"] as? Number)?.toInt(),
       )
     }
   }
@@ -102,6 +115,7 @@ class QueueSettingsStore(private val file: File) {
         maxMs = if (r.maxMs > 0) r.maxMs else d.maxMs,
         jitter = r.jitter,
         exempt = r.exempt ?: d.exempt,
+        transient = r.transient ?: d.transient,
       ),
     )
   }

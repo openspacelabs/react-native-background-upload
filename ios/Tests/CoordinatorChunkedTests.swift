@@ -109,6 +109,64 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertTrue(FileIO.exists(h.store.fileURL("cap", blob)), "bytes survive a non-completed terminal")
   }
 
+  private let cap3: [String: Any] = ["retry": ["transient": [["status": 400, "maxRetries": 3]]]]
+
+  func testEachPartGetsTheRulesFullMaxRetries() throws {
+    h.coordinator.configure(cap3)
+    h.drain()
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 40, parts: 4)).get()
+    // Every part answers 400 three times. One shared count would settle at the fourth 400.
+    for round in 1...3 {
+      for p in 0..<4 { h.complete(try XCTUnwrap(partTask(p), "round \(round) part \(p)"), status: 400) }
+      XCTAssertEqual(h.entry("cap")?.state, .running, "round \(round)")
+    }
+    XCTAssertEqual(h.entry("cap")?.parts.map(\.transientHitsByRule), Array(repeating: ["400": 3], count: 4))
+    XCTAssertNil(h.entry("cap")?.transientHitsByRule, "a chunked entry counts on its parts")
+    for p in 0..<4 { h.complete(try XCTUnwrap(partTask(p))) }
+    XCTAssertEqual(h.entry("cap")?.state, .completed)
+  }
+
+  func testOnePartPastTheCapSettlesTheEntryWithThatPartsResponse() throws {
+    h.coordinator.configure(cap3)
+    h.drain()
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 40, parts: 4)).get()
+    for p in [0, 1, 3] { h.complete(try XCTUnwrap(partTask(p))) }
+    for _ in 1...3 { h.complete(try XCTUnwrap(partTask(2)), status: 400, body: "nope") }
+    XCTAssertEqual(h.entry("cap")?.state, .running, "three 400s are within the cap")
+    h.complete(try XCTUnwrap(partTask(2)), status: 400, body: "nope")
+    XCTAssertEqual(h.entry("cap")?.state, .error)
+    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "http")
+    XCTAssertEqual(error["partIndex"] as? Int, 2)
+    XCTAssertEqual((error["response"] as? [String: Any])?["status"] as? Int, 400)
+    XCTAssertEqual(h.entry("cap")?.parts[2].transientHitsByRule, ["400": 3])
+  }
+
+  func testAPartsCountSurvivesARelaunchAndALiveReMutateAndAReopenResetsIt() throws {
+    h.coordinator.configure(cap3)
+    h.drain()
+    let raw = h.chunkedRaw(id: "cap")
+    _ = try h.enqueue(raw).get()
+    h.complete(try XCTUnwrap(partTask(1)), status: 400)
+    XCTAssertEqual(h.store.load("cap")?.parts[1].transientHitsByRule, ["400": 1], "persisted with the part")
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    fresh.advance(Double(QueueCoordinator.graceMs)) // a replay of a lost part task may be pending
+    XCTAssertEqual(fresh.entry("cap")?.parts[1].transientHitsByRule, ["400": 1], "a new process reads it back")
+    h = fresh
+    var again = raw
+    var d = try XCTUnwrap(again["descriptor"] as? [String: Any])
+    d["expiresAt"] = h.expiresAt + 1
+    again["descriptor"] = d
+    _ = try h.enqueue(again).get()
+    XCTAssertEqual(h.entry("cap")?.parts[1].transientHitsByRule, ["400": 1], "a live re-mutate keeps it")
+    for _ in 1...3 { h.complete(try XCTUnwrap(partTask(1)), status: 400) }
+    XCTAssertEqual(h.entry("cap")?.state, .error, "1 + 3 = the fourth 400 is past the cap")
+    _ = try h.enqueue(raw).get()
+    XCTAssertEqual(h.entry("cap")?.isLive, true)
+    XCTAssertEqual(h.entry("cap")?.parts.map(\.transientHitsByRule), [nil, nil, nil], "a reopen starts every part at 0")
+  }
+
   // The part-404 recovery: a same-id enqueue with new parts over the moved bytes.
   func testRecreateOverKeptBlobWhenTheSourceIsGone() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["retry": ["terminalHttp": ["exempt": []]]])).get()

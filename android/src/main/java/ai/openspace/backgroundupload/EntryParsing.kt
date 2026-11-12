@@ -151,8 +151,16 @@ object EntryParsing {
       maxMs = backoff?.number("maxMs")?.toLong(),
       jitter = backoff?.number("jitter"),
       exempt = exempt,
+      transient = r.array("transient")?.let { parseTransientRules(it) },
     )
   }
+
+  internal fun parseTransientRules(arr: ReadableArray): List<UploadOutcome.TransientRule> =
+    (0 until arr.size()).mapNotNull { i ->
+      val rule = arr.getMap(i) ?: return@mapNotNull null
+      val status = rule.number("status") ?: return@mapNotNull null
+      UploadOutcome.TransientRule(status.toInt(), rule.string("bodyIncludes"), rule.number("maxRetries")?.toInt())
+    }
 
   internal fun parseAcceptRules(arr: ReadableArray?): List<UploadOutcome.AcceptRule> {
     if (arr == null) return listOf()
