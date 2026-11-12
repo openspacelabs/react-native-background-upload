@@ -120,6 +120,19 @@ final class EntrySaveDurabilityTests: XCTestCase {
     XCTAssertFalse(FileIO.exists(FileIO.tmpURL(for: target)))
   }
 
+  func testAFailedWriteSyncsItsDirectoryOnceAfterTheTmpIsGone() throws {
+    let target = h.root.appendingPathComponent("target")
+    let tmp = FileIO.tmpURL(for: target)
+    // A non-empty directory at the target makes the rename fail.
+    writeFile(target.appendingPathComponent("x"), "x")
+    var synced: [(url: URL, tmp: Bool)] = []
+    FileIO.syncDirectory = { synced.append(($0.standardizedFileURL, FileIO.exists(tmp))) }
+    XCTAssertThrowsError(try FileIO.writeAtomically(Data("{}".utf8), to: target))
+    XCTAssertFalse(FileIO.exists(tmp))
+    XCTAssertEqual(synced.map(\.url), [h.root.standardizedFileURL], "the parent, once")
+    XCTAssertEqual(synced.map(\.tmp), [false], "the tmp delete is what the sync makes durable")
+  }
+
   func testARejectedFirstSaveLeavesNoTmpForBootToPromote() throws {
     writeFile(entryURL("a").appendingPathComponent("x"), "x") // the rename onto entry.json fails
     guard case .failure(let error) = h.enqueue(h.dataRaw(id: "a")) else { return XCTFail("enqueue resolved") }
