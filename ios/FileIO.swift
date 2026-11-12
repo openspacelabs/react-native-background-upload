@@ -3,7 +3,9 @@ import Foundation
 // Small file helpers shared by the store, the journal, the task map and body
 // staging. Every durable write is tmp + fsync + rename, so a reader never sees
 // a half-written file: after a crash there is either the old file or the new
-// one, plus at most a stray `.tmp` that the next write replaces.
+// one, plus at most a stray `.tmp` that the next write replaces. The rename
+// itself survives a power loss only after its directory is synced
+// (`syncDirectory`). QueueStore does that for every entry.json.
 enum FileIO {
   struct IOError: LocalizedError {
     let message: String
@@ -15,10 +17,29 @@ enum FileIO {
   }
 
   /// Writes `data` to `url.tmp`, flushes it to disk, then renames it onto `url`.
+  /// A write that throws deletes its tmp, so only a crash leaves one.
   static func writeAtomically(_ data: Data, to url: URL) throws {
     let tmp = tmpURL(for: url)
-    try writeSynced(data, to: tmp)
-    try rename(tmp, onto: url)
+    do {
+      try writeSynced(data, to: tmp)
+      try rename(tmp, onto: url)
+    } catch {
+      try? FileManager.default.removeItem(at: tmp)
+      throw error
+    }
+  }
+
+  /// Flushes a directory, so the names that renames and new files put in it
+  /// survive a power loss. Plain fsync, as Android does.
+  static func syncDirectory(_ url: URL) throws {
+    let fd = open(url.path, O_RDONLY)
+    guard fd >= 0 else {
+      throw IOError(message: "cannot open \(url.lastPathComponent) to sync it: errno \(errno)")
+    }
+    defer { close(fd) }
+    guard fsync(fd) == 0 else {
+      throw IOError(message: "fsync \(url.lastPathComponent) failed: errno \(errno)")
+    }
   }
 
   /// Writes and fsyncs a file in place. Callers rename it afterwards.

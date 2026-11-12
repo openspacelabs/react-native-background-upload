@@ -21,6 +21,16 @@ caller's file into its queue, so this deleted the only copy. The file now
 stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
 uses it, as Android already did.
 
+iOS now keeps a new request through a power loss right after `mutate()`
+resolves. Before, the entry file's rename was not flushed to disk, so the
+request directory could come back holding only `entry.json.tmp`, which
+nothing read: the request was silently lost. Each entry save now syncs its
+directory, and the first save also syncs the queue root, as Android does. At
+startup, iOS turns a lone `entry.json.tmp` that reads as a valid entry into
+the entry, logs it, and runs the request as usual. A missing body then
+settles `error` with `errorKind: 'file'`. A tmp that does not read is left
+on disk. A failed directory sync is logged and does not fail the save.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent

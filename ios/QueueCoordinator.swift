@@ -119,6 +119,9 @@ final class QueueCoordinator {
       queue.asyncAfter(deadline: .now() + .milliseconds(ms), execute: block)
     }
     settings = store.loadSettings()
+    // First: a promoted entry must load below, and never count as a
+    // directory with no entry.
+    store.promoteInterruptedSaves()
     finishSetAsideForgets()
     // Synchronous, before any session exists, so getRequests() is warm by
     // the time JS can call it, legacy rows included.
