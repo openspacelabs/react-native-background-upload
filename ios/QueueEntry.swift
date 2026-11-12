@@ -24,6 +24,11 @@ struct QueueEntry: Codable, Equatable {
     /// Failed attempts of this part since its last success or resume. Drives
     /// the backoff exponent. Persisted, so a relaunch does not reset it.
     var rejections: Int
+    /// This part's count of the responses each `retry.transient` rule has
+    /// excused in this generation, by `TransientRule.identity`. Each part has
+    /// its own count, so each gets the rule's full maxRetries. nil before the
+    /// first; optional, so a part saved before the field decodes.
+    var transientHitsByRule: [String: Int]? = nil
 
     var size: Int64 { end - start }
   }
@@ -66,6 +71,13 @@ struct QueueEntry: Codable, Equatable {
   /// HTTP attempts issued, parts included. The current simple attempt's
   /// ordinal equals this value.
   var attempts: Int
+  /// A simple entry's count of the responses each `retry.transient` rule has
+  /// excused in this generation, by `TransientRule.identity`. A chunked entry
+  /// counts on each Part instead. nil before the first; a reopen starts over.
+  /// Optional, so an entry saved before the field decodes. A pre-release
+  /// build wrote a positional array under the key `transientHits`; Codable
+  /// ignores that unknown key, so it reads as no hits.
+  var transientHitsByRule: [String: Int]? = nil
   var bytesSent: Int64
   var totalBytes: Int64
   var expiresAt: Double // epoch ms
@@ -92,6 +104,24 @@ extension QueueEntry {
   var isChunked: Bool { bodyKind == .parts }
 
   var acceptedBytes: Int64 { parts.filter(\.accepted).reduce(0) { $0 + $1.size } }
+
+  /// The counts a response to `part` is classified against: the part's for a
+  /// chunked entry, the entry's for a simple one (`part` nil).
+  func transientHits(part: Int?) -> [String: Int] {
+    guard let part else { return transientHitsByRule ?? [:] }
+    return parts.indices.contains(part) ? parts[part].transientHitsByRule ?? [:] : [:]
+  }
+
+  /// One more response excused by `rule`, on `part` or (nil) on the entry.
+  mutating func recordTransientHit(_ rule: UploadOutcome.TransientRule, part: Int?) {
+    guard let part else {
+      transientHitsByRule = (transientHitsByRule ?? [:]).merging([rule.identity: 1], uniquingKeysWith: +)
+      return
+    }
+    guard parts.indices.contains(part) else { return }
+    parts[part].transientHitsByRule =
+      (parts[part].transientHitsByRule ?? [:]).merging([rule.identity: 1], uniquingKeysWith: +)
+  }
   var allAccepted: Bool { !parts.isEmpty && parts.allSatisfy(\.accepted) }
   func pendingIndexes() -> [Int] { parts.indices.filter { !parts[$0].accepted } }
 
@@ -144,7 +174,8 @@ extension QueueEntry {
   /// fields replace the stored ones. The body, url, method, accepted parts,
   /// generation and createdAt stay (a different url or method is a different
   /// body). `resetBudget` (a reopen, which starts a new generation) also
-  /// resets attempts and part rejections: attempts count one generation.
+  /// resets attempts, part rejections and every transient count: attempts
+  /// count one generation. A live entry keeps its counts, the parts' included.
   func resumed(with p: ParsedEnqueue, resetBudget: Bool, now: Double) -> QueueEntry {
     var next = self
     next.key = p.key
@@ -161,10 +192,14 @@ extension QueueEntry {
         var merged = part
         merged.accepted = parts[i].accepted
         merged.rejections = resetBudget ? 0 : parts[i].rejections
+        merged.transientHitsByRule = resetBudget ? nil : parts[i].transientHitsByRule
         return merged
       }
     }
-    if resetBudget { next.attempts = 0 }
+    if resetBudget {
+      next.attempts = 0
+      next.transientHitsByRule = nil
+    }
     next.updatedAt = now
     return next
   }
