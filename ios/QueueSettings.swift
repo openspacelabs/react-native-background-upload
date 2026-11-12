@@ -2,13 +2,17 @@ import Foundation
 
 /// The retry policy after every override is applied. Defaults are the spec's
 /// table: base 1 s, max 2 h, jitter 0.2, exempt [404].
-struct RetryPolicy: Codable, Equatable {
+/// Not Codable on purpose: only the overrides are persisted. The resolved
+/// policy is rebuilt from them, so its defaults can change between releases.
+struct RetryPolicy: Equatable {
   var baseMs: Double
   var maxMs: Double
   var jitter: Double
   var exempt: [Int]
+  /// Checked after `accept` and before `exempt`. A matched rule decides even past its cap.
+  var transient: [UploadOutcome.TransientRule] = []
 
-  static let defaults = RetryPolicy(baseMs: 1_000, maxMs: 7_200_000, jitter: 0.2, exempt: [404])
+  static let defaults = RetryPolicy(baseMs: 1_000, maxMs: 7_200_000, jitter: 0.2, exempt: [404], transient: [])
 
   /// Applies the overrides in order. A later override wins, field by field.
   static func resolve(_ overrides: [RetryOverride?]) -> RetryPolicy {
@@ -18,19 +22,23 @@ struct RetryPolicy: Codable, Equatable {
       if let v = o.maxMs { p.maxMs = v }
       if let v = o.jitter { p.jitter = v }
       if let v = o.exempt { p.exempt = v }
+      if let v = o.transient { p.transient = v }
     }
     return p
   }
 }
 
 /// A partial retry policy, as `configure({ retry })` or `descriptor.retry`
-/// sends it: `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`.
-/// Each field is optional, because JS checks names, not presence.
+/// sends it: `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt },
+/// transient?: [{ status, bodyIncludes?, maxRetries? }] }`. Each field is
+/// optional, because JS checks names, not presence. A value saved before
+/// `transient` existed decodes it as nil.
 struct RetryOverride: Codable, Equatable {
   var baseMs: Double?
   var maxMs: Double?
   var jitter: Double?
   var exempt: [Int]?
+  var transient: [UploadOutcome.TransientRule]?
 
   static func parse(_ raw: Any?) -> RetryOverride? {
     guard let r = raw as? [String: Any] else { return nil }
@@ -40,7 +48,8 @@ struct RetryOverride: Codable, Equatable {
       baseMs: (backoff?["baseMs"] as? NSNumber)?.doubleValue,
       maxMs: (backoff?["maxMs"] as? NSNumber)?.doubleValue,
       jitter: (backoff?["jitter"] as? NSNumber)?.doubleValue,
-      exempt: (terminal?["exempt"] as? [NSNumber])?.map(\.intValue))
+      exempt: (terminal?["exempt"] as? [NSNumber])?.map(\.intValue),
+      transient: UploadOutcome.parseTransientRules(r["transient"]))
     return o == RetryOverride() ? nil : o
   }
 }

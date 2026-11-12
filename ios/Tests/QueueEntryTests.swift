@@ -184,6 +184,15 @@ final class EnqueueParserTests: XCTestCase {
     XCTAssertEqual(p.retry, RetryOverride(exempt: []))
     XCTAssertEqual(RetryPolicy.resolve([nil, p.retry]).exempt, [])
     XCTAssertEqual(RetryPolicy.resolve([nil, p.retry]).baseMs, 1_000)
+    XCTAssertEqual(RetryPolicy.resolve([nil, p.retry]).transient, [])
+    let rules: [[String: Any]] = [["status": 400, "bodyIncludes": "Bad Request", "maxRetries": 24], ["status": 404], ["junk": 1]]
+    let withRules = try EnqueueParser.parse(raw(["url": "https://a.test", "retry": ["transient": rules]]))
+    XCTAssertEqual(withRules.retry?.transient,
+                   [.init(status: 400, bodyIncludes: "Bad Request", maxRetries: 24), .init(status: 404)])
+    XCTAssertEqual(RetryPolicy.resolve([RetryOverride(transient: [.init(status: 400)]), withRules.retry]).transient.count, 2,
+                   "a later override replaces the list")
+    XCTAssertEqual(RetryPolicy.resolve([RetryOverride(transient: [.init(status: 400)]), RetryOverride(exempt: [])]).transient,
+                   [.init(status: 400)], "an override without the field keeps the earlier list")
   }
 }
 

@@ -195,5 +195,18 @@ class QueueSettingsTest {
     val d = QueueSettingsStore.retryDefaults(mapOf("backoff" to mapOf("baseMs" to 500.0), "terminalHttp" to mapOf("exempt" to listOf<Any>())))
     assertEquals(RetryDefaults(baseMs = 500, exempt = emptyList()), d)
     assertEquals(RetryDefaults(), QueueSettingsStore.retryDefaults(null))
+    val withRules = QueueSettingsStore.retryDefaults(
+      mapOf("transient" to listOf(mapOf("status" to 400.0, "bodyIncludes" to "x", "maxRetries" to 3.0), mapOf("status" to 404.0), "junk")),
+    )
+    assertEquals(listOf(UploadOutcome.TransientRule(400, "x", 3), UploadOutcome.TransientRule(404)), withRules.transient)
+  }
+
+  @Test
+  fun `a settings file written before transient rules reads them as empty`() {
+    val file = File(tmp.newFolder(), "settings.json")
+    file.writeText("""{"wifiOnly":true,"paused":false,"pausedKeys":[],"headerGeneration":2,"retry":{"baseMs":1000,"maxMs":7200000,"jitter":0.2,"exempt":[404]}}""")
+    val s = QueueSettingsStore(file).load()
+    assertEquals(emptyList<UploadOutcome.TransientRule>(), s.retry.transient)
+    assertEquals(listOf(404), s.retry.exempt)
   }
 }
