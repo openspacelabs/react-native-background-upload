@@ -46,9 +46,17 @@ const DESCRIPTOR_KEYS = [
 const PART_KEYS = ['url', 'headers', 'range'];
 const RANGE_KEYS = ['start', 'end'];
 const FORM_PART_KEYS = ['name', 'contentType', 'string', 'path', 'fileName'];
-const RETRY_KEYS = ['backoff', 'terminalHttp'];
+const RETRY_KEYS = ['backoff', 'terminalHttp', 'transient'];
 const BACKOFF_KEYS = ['baseMs', 'maxMs', 'jitter'];
 const TERMINAL_HTTP_KEYS = ['exempt'];
+const TRANSIENT_RULE_KEYS = ['status', 'bodyIncludes', 'maxRetries'];
+// Statuses the standard table decides before any rule runs.
+const STANDARD_TABLE_STATUS: Record<number, string> = {
+  401: 'parks as awaiting-auth',
+  403: 'parks as awaiting-auth',
+  408: 'retries without a cap',
+  429: 'retries without a cap',
+};
 const ACCEPT_RULE_KEYS = ['status', 'bodyIncludes'];
 const ANDROID_KEYS = ['noNotification'];
 
@@ -368,6 +376,64 @@ const validateRetry = (retry: unknown): void => {
         'mutate: retry.terminalHttp.exempt must be an array of numbers',
       );
     }
+  }
+  if (r.transient !== undefined) {
+    validateTransient(r.transient);
+  }
+};
+
+// A rule names one 4xx status. The status is checked here so a rule that
+// could never fire (a 2xx, a 5xx, or a status the standard table decides
+// first) fails at the call, not in silence.
+const validateTransient = (transient: unknown): void => {
+  if (!Array.isArray(transient)) {
+    throw new Error('mutate: retry.transient must be an array');
+  }
+  transient.forEach((rule, i) => {
+    const where = `retry.transient[${i}]`;
+    const r = requireObject(rule, where);
+    rejectUnknownKeys(r, TRANSIENT_RULE_KEYS, where);
+    if (
+      !Number.isInteger(r.status) ||
+      (r.status as number) < 400 ||
+      (r.status as number) > 499
+    ) {
+      throw new Error(`mutate: ${where}.status must be an integer from 400 to 499`);
+    }
+    const decidedFirst = STANDARD_TABLE_STATUS[r.status as number];
+    if (decidedFirst !== undefined) {
+      throw new Error(
+        `mutate: ${where}.status ${r.status} ${decidedFirst} before any rule runs, so the rule can never fire`,
+      );
+    }
+    if (
+      r.bodyIncludes !== undefined &&
+      (typeof r.bodyIncludes !== 'string' || r.bodyIncludes.length === 0)
+    ) {
+      throw new Error(`mutate: ${where}.bodyIncludes must be a non-empty string`);
+    }
+    if (
+      r.maxRetries !== undefined &&
+      (!Number.isInteger(r.maxRetries) || (r.maxRetries as number) < 1)
+    ) {
+      throw new Error(`mutate: ${where}.maxRetries must be a positive integer`);
+    }
+  });
+};
+
+/**
+ * The retry shape check, for `mutate()` descriptors and `configure()`
+ * defaults alike. Messages name the caller.
+ */
+export const validateRetryPolicy = (
+  retry: unknown,
+  where: 'mutate' | 'configure',
+): void => {
+  try {
+    validateRetry(retry);
+  } catch (error) {
+    if (where === 'mutate' || !(error instanceof Error)) throw error;
+    throw new Error(error.message.replace(/^mutate:/, 'configure:'));
   }
 };
 

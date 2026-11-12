@@ -12,6 +12,13 @@ data class Part(
   val start: Long,
   val end: Long, // exclusive
   val accepted: Boolean = false,
+  /**
+   * This part's count of the responses each `retry.transient` rule has
+   * excused in this generation, by [UploadOutcome.TransientRule.identity].
+   * Each part has its own count, so each gets the rule's full maxRetries.
+   * Null before the first, and in a v9 manifest.
+   */
+  val transientHitsByRule: Map<String, Int>? = null,
 ) {
   val size get() = end - start
 }
@@ -43,11 +50,31 @@ object ChunkedParts {
     }
   }
 
-  /** The [incoming] parts with the accepted flags of [stored]. A flag follows the range start, not the index. */
-  fun carryAccepted(stored: List<Part>, incoming: List<Part>): List<Part> {
-    val acceptedStarts = stored.filter { it.accepted }.map { it.start }.toSet()
-    return incoming.map { it.copy(accepted = it.start in acceptedStarts) }
+  /**
+   * The [incoming] parts with the accepted flags of [stored]. A flag follows
+   * the range start, not the index. With [keepHits] the transient counts
+   * follow it too; a reopen passes false, and every part starts at 0.
+   */
+  fun carryAccepted(stored: List<Part>, incoming: List<Part>, keepHits: Boolean = false): List<Part> {
+    val byStart = stored.associateBy { it.start }
+    return incoming.map { part ->
+      val old = byStart[part.start]
+      part.copy(
+        accepted = old?.accepted == true,
+        transientHitsByRule = if (keepHits) old?.transientHitsByRule else null,
+      )
+    }
   }
+
+  /** [parts] with one more hit of [identity] on part [index]. */
+  fun withTransientHit(parts: List<Part>, index: Int, identity: String): List<Part> =
+    parts.mapIndexed { i, part ->
+      if (i != index) part
+      else {
+        val hits = part.transientHitsByRule ?: emptyMap()
+        part.copy(transientHitsByRule = hits + (identity to (hits[identity] ?: 0) + 1))
+      }
+    }
 
   fun totalBytes(parts: List<Part>): Long = parts.sumOf { it.size }
 

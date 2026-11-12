@@ -127,7 +127,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
 | `accept` | Non-2xx responses to treat as success: `[{ status, bodyIncludes? }]`. |
 | `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
-| `retry` | Per-request override of the `configure()` retry defaults. |
+| `retry` | Per-request override of the `configure()` retry defaults: `backoff`, `terminalHttp.exempt`, and `transient` rules. See "Reliable delivery". |
 | `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
 | `priority` | `'high'` or `'normal'` (default). On Android at most 4 requests transmit at once, and one of those slots is kept for `'high'`. Normal requests can use only the other 3, so a high-priority request, such as a small JSON POST that creates a session, gets a slot without waiting behind a backlog of file parts. It can still wait when other high-priority requests hold every slot. iOS ignores it for now. |
 | `android` | `{ noNotification?: boolean }`. See Silent uploads. |
@@ -319,11 +319,27 @@ Retry classes:
 | 2xx, or an `accept` rule matches | settle `completed` |
 | network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt` |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
-| other 4xx not in `retry.terminalHttp.exempt` | settle `error` with `errorKind: 'http'` |
-| 4xx in `exempt` (default `[404]`) | as transient |
+| other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
+| other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
+| other 4xx, or a rule past its `maxRetries` | settle `error` with `errorKind: 'http'`, response attached |
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
 | `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
+
+**Transient rule counts.** The library counts the responses each rule
+excuses. It keeps the count by the rule's `status` and `bodyIncludes`, not by
+its place in the list:
+
+- Reorder the rules, or add a rule in front, and each rule keeps its count.
+- Change a rule's `maxRetries`, and the new cap applies to the count so far.
+- Change a rule's `status` or `bodyIncludes`, and it is a new rule. Its count
+  starts at 0.
+- A simple request has one count per rule.
+- A chunked request has one count per rule for each part. Each part gets the
+  full `maxRetries`. The request settles `error` when one part goes past the
+  cap, with that part's response.
+- A same-id `mutate()` that reopens a settled entry starts every count at 0.
+  A same-id `mutate()` on a live entry keeps the counts.
 
 Every attempt sends an `X-Request-Id` header, minted per attempt. `Meta.requestId`
 carries the last one.
@@ -402,7 +418,7 @@ reached its key before it; see rule 5 of "Reliable delivery".
 | `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
-| `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt } }`. Each of the two objects is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`. |
+| `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
 | `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when native enqueue has not settled by then. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, so a large file takes longer. A timeout means native did not answer, not that the request failed. A watchdog for a native bug, not a tuning knob. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
