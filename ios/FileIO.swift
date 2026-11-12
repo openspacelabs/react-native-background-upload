@@ -4,8 +4,8 @@ import Foundation
 // staging. Every durable write is tmp + fsync + rename, so a reader never sees
 // a half-written file: after a crash there is either the old file or the new
 // one, plus at most a stray `.tmp` that the next write replaces. The rename
-// itself survives a power loss only after its directory is synced
-// (`syncDirectory`). QueueStore does that for every entry.json.
+// itself survives a power loss only after its directory is synced, so
+// `writeAtomically` syncs the directory after every rename, as Android does.
 enum FileIO {
   struct IOError: LocalizedError {
     let message: String
@@ -17,8 +17,12 @@ enum FileIO {
   }
 
   /// Writes `data` to `url.tmp`, flushes it to disk, then renames it onto `url`.
-  /// A write that throws deletes its tmp, so only a crash leaves one.
+  /// On a failure the tmp file is deleted, so a partly written file does not
+  /// hold space that a retry needs.
   static func writeAtomically(_ data: Data, to url: URL) throws {
+    // Runs last: after the rename, so the new name is what the sync makes
+    // durable. After a failure, it makes the tmp delete durable.
+    defer { syncDirectoryOrLog(url.deletingLastPathComponent()) }
     let tmp = tmpURL(for: url)
     do {
       try writeSynced(data, to: tmp)
@@ -26,19 +30,6 @@ enum FileIO {
     } catch {
       try? FileManager.default.removeItem(at: tmp)
       throw error
-    }
-  }
-
-  /// Flushes a directory, so the names that renames and new files put in it
-  /// survive a power loss. Plain fsync, as Android does.
-  static func syncDirectory(_ url: URL) throws {
-    let fd = open(url.path, O_RDONLY)
-    guard fd >= 0 else {
-      throw IOError(message: "cannot open \(url.lastPathComponent) to sync it: errno \(errno)")
-    }
-    defer { close(fd) }
-    guard fsync(fd) == 0 else {
-      throw IOError(message: "fsync \(url.lastPathComponent) failed: errno \(errno)")
     }
   }
 
@@ -68,6 +59,33 @@ enum FileIO {
 
   static func exists(_ url: URL) -> Bool {
     FileManager.default.fileExists(atPath: url.path)
+  }
+
+  /// Flushes a directory. Tests replace it to watch the syncs or fail them.
+  static var syncDirectory: (URL) throws -> Void = fsyncDirectory
+
+  /// Flushes a directory, so the names that renames and new files put in it
+  /// survive a power loss. Plain fsync, as Android does. On Apple platforms
+  /// fsync does not make the drive empty its cache; F_FULLFSYNC would.
+  static func fsyncDirectory(_ url: URL) throws {
+    let fd = open(url.path, O_RDONLY)
+    guard fd >= 0 else {
+      throw IOError(message: "cannot open \(url.lastPathComponent) to sync it: errno \(errno)")
+    }
+    defer { close(fd) }
+    guard fsync(fd) == 0 else {
+      throw IOError(message: "fsync \(url.lastPathComponent) failed: errno \(errno)")
+    }
+  }
+
+  /// A failed sync is logged, never thrown: the rename it follows already
+  /// happened, so the write still counts.
+  static func syncDirectoryOrLog(_ url: URL) {
+    do {
+      try syncDirectory(url)
+    } catch {
+      NSLog("[RNFileUploader] cannot sync \(url.lastPathComponent): \(error.localizedDescription)")
+    }
   }
 
   /// Creates a directory that holds device-local upload state and keeps it

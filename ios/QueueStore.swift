@@ -30,9 +30,6 @@ final class QueueStore {
   /// Id directory names are base64url, which never starts with ".".
   private static let asidePrefix = ".forget-"
 
-  /// Flushes a directory. A test seam; the default is FileIO.syncDirectory.
-  var syncDirectory: (URL) throws -> Void = FileIO.syncDirectory
-
   init(root: URL) {
     self.root = root
     FileIO.makeLocalDirectory(root)
@@ -65,12 +62,12 @@ final class QueueStore {
   /// Throws on a write failure. An entry that did not persist must fail the
   /// enqueue.
   ///
-  /// After the rename it syncs the entry directory, so a power loss cannot
-  /// undo the rename: the first save would leave only entry.json.tmp, and a
-  /// later save would bring back an older entry. The first save also syncs
-  /// the root, which holds the new directory's name. A failed sync is logged
-  /// and the save still counts, because the rename itself happened. If a
-  /// power loss then undoes a first save, boot promotes the lone tmp.
+  /// `writeAtomically` syncs the entry directory after the rename, so a
+  /// power loss cannot undo it: the first save would leave only
+  /// entry.json.tmp, and a later save would bring back an older entry. The
+  /// first save also syncs the root, which holds the new directory's name.
+  /// A failed sync is logged and the save still counts. If a power loss then
+  /// undoes a first save, boot promotes the lone tmp.
   func save(_ entry: QueueEntry) throws {
     try queue.sync {
       let d = dir(entry.id)
@@ -78,8 +75,7 @@ final class QueueStore {
       try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
       let first = !FileIO.exists(url)
       try FileIO.writeAtomically(Self.encode(entry), to: url)
-      syncLocked(d)
-      if first { syncLocked(root) }
+      if first { FileIO.syncDirectoryOrLog(root) }
     }
   }
 
@@ -102,7 +98,7 @@ final class QueueStore {
     queue.sync {
       let d = dir(id)
       let tmp = FileIO.tmpURL(for: d.appendingPathComponent(Self.entryName))
-      if (try? FileManager.default.removeItem(at: tmp)) != nil { syncLocked(d) }
+      if (try? FileManager.default.removeItem(at: tmp)) != nil { FileIO.syncDirectoryOrLog(d) }
       _ = try? FileManager.default.removeItem(at: d)
     }
   }
@@ -145,8 +141,8 @@ final class QueueStore {
           NSLog("[RNFileUploader] cannot recover entry \(e.id): \(error.localizedDescription)")
           continue
         }
-        syncLocked(d)
-        syncLocked(root)
+        FileIO.syncDirectoryOrLog(d)
+        FileIO.syncDirectoryOrLog(root)
         promoted.append(e.id)
         NSLog("[RNFileUploader] recovered entry \(e.id) from an entry save that did not finish")
       }
@@ -321,15 +317,6 @@ final class QueueStore {
   }
 
   // MARK: - Private (callers hold `queue`)
-
-  /// A failed sync is logged, never thrown: see `save`.
-  private func syncLocked(_ d: URL) {
-    do {
-      try syncDirectory(d)
-    } catch {
-      NSLog("[RNFileUploader] cannot sync \(d.lastPathComponent): \(error.localizedDescription)")
-    }
-  }
 
   // The "part-<i>." prefix cannot collide across indexes ("part-1." is not a
   // prefix of "part-12.").

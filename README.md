@@ -269,11 +269,14 @@ while the app was dead from being sent twice.
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
    attempt. `mutate()` resolves after the row and every staged body copy are
    durably on disk (temp file, rename, then a sync of the directory), so the
-   caller may delete its source file then. A native failure rejects with a
-   code: `E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`.
-   `E_INVALID` is malformed input native cannot send: a non-http(s) URL,
-   header names or values the platform HTTP client rejects, a GET with a
-   body, or parts that do not tile the moved file.
+   caller may delete its source file then. A failed directory sync is logged
+   and does not fail the call. The library uses `fsync`, which on iOS does not
+   force the drive to empty its cache. A native failure rejects with a code:
+   `E_INVALID`,
+   `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`. `E_INVALID` is malformed
+   input native cannot send: a non-http(s) URL, header names or values the
+   platform HTTP client rejects, a GET with a body, or parts that do not
+   tile the moved file.
 2. **Journal before emit, ack after the handler.** Every terminal outcome is
    journaled natively, then delivered. The library acknowledges after the
    handler's promise resolves. A rejection, or app death before the ack,

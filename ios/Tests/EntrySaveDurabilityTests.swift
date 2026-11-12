@@ -1,8 +1,8 @@
 import XCTest
 @testable import RNBGUCore
 
-/// The entry save survives a power loss: the directory sync after the
-/// rename, and the boot promotion of a lone entry.json.tmp.
+/// Writes survive a power loss: the directory sync after each rename, and
+/// the boot promotion of a lone entry.json.tmp.
 final class EntrySaveDurabilityTests: XCTestCase {
   private var h: Harness!
 
@@ -11,6 +11,7 @@ final class EntrySaveDurabilityTests: XCTestCase {
   }
 
   override func tearDown() {
+    FileIO.syncDirectory = FileIO.fsyncDirectory
     try? FileManager.default.removeItem(at: h.root)
   }
 
@@ -27,24 +28,72 @@ final class EntrySaveDurabilityTests: XCTestCase {
     (settled?["error"] as? [String: Any])?["errorKind"] as? String
   }
 
-  // MARK: - Directory sync on save
+  // MARK: - Directory sync after every atomic write
 
-  func testEverySaveSyncsTheEntryDirectoryAndTheFirstAlsoSyncsTheRoot() throws {
-    h.boot()
+  func testAnAtomicWriteSyncsItsDirectoryAfterTheRename() throws {
+    let target = h.root.appendingPathComponent("file.json")
     var synced: [URL] = []
-    h.store.syncDirectory = { synced.append($0.standardizedFileURL) }
-    let dir = h.store.dir("a").standardizedFileURL
-    let root = h.store.root.standardizedFileURL
-    _ = try h.enqueue(h.dataRaw(id: "a")).get()
-    XCTAssertEqual(h.entry("a")?.state, .running)
-    // The first save syncs the new entry.json and the new directory. The
-    // issue then saves again and syncs only the entry directory.
-    XCTAssertEqual(synced, [dir, root, dir])
+    FileIO.syncDirectory = { dir in
+      synced.append(dir.standardizedFileURL)
+      XCTAssertTrue(FileIO.exists(target), "the rename happened before the sync")
+      XCTAssertFalse(FileIO.exists(FileIO.tmpURL(for: target)))
+    }
+    try FileIO.writeAtomically(Data("{}".utf8), to: target)
+    XCTAssertEqual(synced, [h.root.standardizedFileURL])
   }
 
-  func testAFailedDirectorySyncDoesNotFailTheSave() throws {
+  func testEveryEntrySaveSyncsTheEntryDirectoryAfterTheRenameAndTheFirstAlsoSyncsTheRoot() throws {
+    h.boot()
+    let dir = h.store.dir("a").standardizedFileURL
+    let root = h.store.root.standardizedFileURL
+    // For each sync of the entry directory or the root: which one, and
+    // whether entry.json and entry.json.tmp were there.
+    var synced: [(url: URL, entry: Bool, tmp: Bool)] = []
+    FileIO.syncDirectory = { [unowned self] url in
+      let u = url.standardizedFileURL
+      guard u == dir || u == root else { return }
+      synced.append((u, FileIO.exists(self.entryURL("a")), FileIO.exists(self.tmpURL("a"))))
+    }
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    // The staged body (no entry yet), the first save (then the root, which
+    // holds the new directory's name), and the issue's save.
+    XCTAssertEqual(synced.map(\.url), [dir, dir, root, dir])
+    XCTAssertEqual(synced.map(\.entry), [false, true, true, true], "each entry sync follows its rename")
+    XCTAssertEqual(synced.map(\.tmp), [false, false, false, false])
+  }
+
+  func testAJournalWriteIsSyncedBeforeTheCompletedEntrySave() throws {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = try XCTUnwrap(h.transport.live.first)
+    let journalDir = h.root.appendingPathComponent("events").standardizedFileURL
+    let dir = h.store.dir("a").standardizedFileURL
+    // In order: each journal sync with the outcome files there, and each
+    // entry sync with the entry's state.
+    var synced: [String] = []
+    FileIO.syncDirectory = { [unowned self] url in
+      let u = url.standardizedFileURL
+      if u == journalDir {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: u.path)) ?? []
+        synced.append("journal:" + files.filter { $0.hasSuffix(".json") }.count.description)
+      } else if u == dir {
+        // Read the file directly: the sync runs inside the store's queue.
+        let saved = (try? Data(contentsOf: self.entryURL("a")))
+          .flatMap { try? JSONDecoder().decode(QueueEntry.self, from: $0) }
+        synced.append("entry:" + (saved?.state.rawValue ?? "none"))
+      }
+    }
+    h.complete(task)
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+    let journal = try XCTUnwrap(synced.firstIndex(of: "journal:1"), "the journal file is synced after its rename")
+    let completed = try XCTUnwrap(synced.firstIndex(of: "entry:completed"))
+    XCTAssertLessThan(journal, completed, "the outcome is durable before the completed row")
+  }
+
+  func testAFailedDirectorySyncFailsNeitherTheSaveNorTheSettle() throws {
     var failures = 0
-    h.store.syncDirectory = { _ in
+    FileIO.syncDirectory = { _ in
       failures += 1
       throw FileIO.IOError(message: "fsync failed")
     }
@@ -52,12 +101,15 @@ final class EntrySaveDurabilityTests: XCTestCase {
     XCTAssertGreaterThan(failures, 0)
     XCTAssertNotNil(QueueStore(root: h.store.root).load("a"), "the entry is on disk")
     h.boot()
-    XCTAssertEqual(h.transport.live.count, 1)
+    h.complete(try XCTUnwrap(h.transport.live.first))
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+    XCTAssertEqual(h.sink.settled.last?["kind"] as? String, "completed")
+    XCTAssertEqual(h.unacknowledged().count, 1, "the outcome is journaled")
   }
 
   func testTheRealDirectorySyncWorksAndAMissingDirectoryThrows() throws {
-    XCTAssertNoThrow(try FileIO.syncDirectory(h.store.root))
-    XCTAssertThrowsError(try FileIO.syncDirectory(h.root.appendingPathComponent("missing")))
+    XCTAssertNoThrow(try FileIO.fsyncDirectory(h.store.root))
+    XCTAssertThrowsError(try FileIO.fsyncDirectory(h.root.appendingPathComponent("missing")))
   }
 
   func testAFailedWriteDeletesItsTmp() throws {
@@ -101,7 +153,7 @@ final class EntrySaveDurabilityTests: XCTestCase {
     try undoRename("a")
     let store = QueueStore(root: h.store.root)
     var synced: [URL] = []
-    store.syncDirectory = { synced.append($0.standardizedFileURL) }
+    FileIO.syncDirectory = { synced.append($0.standardizedFileURL) }
     XCTAssertEqual(store.promoteInterruptedSaves(), ["a"])
     XCTAssertEqual(synced, [store.dir("a").standardizedFileURL, store.root.standardizedFileURL])
     XCTAssertEqual(store.promoteInterruptedSaves(), [], "a second boot finds nothing to do")
@@ -196,7 +248,7 @@ final class EntrySaveDurabilityTests: XCTestCase {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     try FileManager.default.copyItem(at: entryURL("a"), to: tmpURL("a"))
     var remainingAtSync: [String] = []
-    h.store.syncDirectory = { [unowned self] dir in
+    FileIO.syncDirectory = { [unowned self] dir in
       remainingAtSync = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
       XCTAssertEqual(dir.standardizedFileURL, self.h.store.dir("a").standardizedFileURL)
     }

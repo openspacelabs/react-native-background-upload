@@ -22,14 +22,16 @@ stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
 uses it, as Android already did.
 
 iOS now keeps a new request through a power loss right after `mutate()`
-resolves. Before, the entry file's rename was not flushed to disk, so the
-request directory could come back holding only `entry.json.tmp`, which
-nothing read: the request was silently lost. Each entry save now syncs its
-directory, and the first save also syncs the queue root, as Android does. At
+resolves. Before, no rename into place was flushed to disk, so the request
+directory could come back holding only `entry.json.tmp`, which nothing read:
+the request was silently lost. Every atomic write on iOS (entries, staged
+bodies, outcome journal, task map, settings) now syncs its directory after
+the rename, as Android does, and an entry's first save also syncs the queue
+root. A failed directory sync is logged and does not fail the write. At
 startup, iOS turns a lone `entry.json.tmp` that reads as a valid entry into
 the entry, logs it, and runs the request as usual. A missing body then
 settles `error` with `errorKind: 'file'`. A tmp that does not read is left
-on disk. A failed directory sync is logged and does not fail the save.
+on disk. A tmp next to a readable `entry.json` is deleted.
 
 ## 11.1.0
 
