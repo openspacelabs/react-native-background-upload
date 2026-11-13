@@ -417,6 +417,209 @@ describe('unknown key', () => {
   });
 });
 
+describe('release', () => {
+  it('routes a released outcome before a later outcome of its id that waited on mutate()', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, trackMutate, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'first', key: 'late', vars: { n: 1 } }));
+    await flush();
+    // The second outcome of the id waits on a same-id mutate() in its lane.
+    const enqueue = deferred<string>();
+    trackMutate('u1', enqueue.promise);
+    emit(completed({ eventId: 'second', key: 'late', vars: { n: 2 } }));
+    await flush();
+
+    const order: number[] = [];
+    definitions.late = {
+      key: 'late',
+      request: jest.fn(),
+      onSuccess: (_data: unknown, vars: { n: number }) => {
+        order.push(vars.n);
+      },
+    };
+    release('late');
+    enqueue.resolve('u1');
+    await tick();
+    await flush();
+
+    expect(order).toEqual([1, 2]);
+    expect(native.ackEvents.mock.calls).toEqual([[['first']], [['second']]]);
+  });
+
+  it('routes a held outcome before a newer outcome of its id and key when define() runs a few microtasks in', async () => {
+    // The newer outcome waits in the lane while the older one is held. A
+    // define() can run in any microtask of that wait. Try each depth.
+    for (let depth = 0; depth < 12; depth++) {
+      const definitions: Record<string, AnyDefinition> = {};
+      const { start, emit, release, native } = setup(definitions);
+      start();
+      await flush();
+      emit(completed({ eventId: 'old', key: 'late', vars: { n: 1 } }));
+      await flush();
+      emit(completed({ eventId: 'new', key: 'late', vars: { n: 2 } }));
+
+      const order: number[] = [];
+      let continuation = Promise.resolve();
+      for (let i = 0; i < depth; i++) {
+        continuation = continuation.then(() => undefined);
+      }
+      void continuation.then(() => {
+        definitions.late = {
+          key: 'late',
+          request: jest.fn(),
+          onSuccess: (_data: unknown, vars: { n: number }) => {
+            order.push(vars.n);
+          },
+        };
+        release('late');
+      });
+      await flush();
+
+      expect({ depth, order }).toEqual({ depth, order: [1, 2] });
+      expect(native.ackEvents.mock.calls).toEqual([[['old']], [['new']]]);
+    }
+  });
+
+  it('waits for a pending same-id mutate() before it routes a released outcome on an idle lane', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, trackMutate, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ key: 'late' }));
+    await flush();
+
+    const onSuccess = jest.fn();
+    definitions.late = { key: 'late', request: jest.fn(), onSuccess };
+    const enqueue = deferred<string>();
+    trackMutate('u1', enqueue.promise);
+    release('late');
+    await flush();
+    expect(onSuccess).not.toHaveBeenCalled();
+
+    enqueue.resolve('u1');
+    await tick();
+    await flush();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents.mock.calls).toEqual([[['e1']]]);
+  });
+
+  it('acks a cancelled outcome of an undefined key once, and does not route it again on release', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(
+      completed({
+        eventId: 'cancelled',
+        key: 'late',
+        kind: 'cancelled',
+        state: 'cancelled',
+        response: undefined,
+        cancelReason: 'user',
+      }),
+    );
+    await flush();
+    expect(native.ackEvents.mock.calls).toEqual([[['cancelled']]]);
+
+    definitions.late = { key: 'late', request: jest.fn() };
+    release('late');
+    await flush();
+    expect(native.ackEvents.mock.calls).toEqual([[['cancelled']]]);
+  });
+
+  it('drops the held outcomes of a forgotten id and keeps the others', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, release, forget, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'gone', id: 'u1', key: 'late' }));
+    emit(completed({ eventId: 'kept', id: 'u2', key: 'late' }));
+    await flush();
+
+    const onSuccess = jest.fn();
+    definitions.late = { key: 'late', request: jest.fn(), onSuccess };
+    forget('u1');
+    release('late');
+    await flush();
+
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSuccess.mock.calls[0]?.[2]).toMatchObject({ id: 'u2' });
+    expect(native.ackEvents.mock.calls).toEqual([[['kept']]]);
+  });
+
+  it('drops a released outcome of a forgotten id that still waits for its turn', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, trackMutate, release, forget, native } =
+      setup(definitions);
+    start();
+    await flush();
+    emit(completed({ key: 'late' }));
+    await flush();
+
+    const onSuccess = jest.fn();
+    definitions.late = { key: 'late', request: jest.fn(), onSuccess };
+    const enqueue = deferred<string>();
+    trackMutate('u1', enqueue.promise);
+    release('late');
+    forget('u1');
+    enqueue.resolve('u1');
+    await tick();
+    await flush();
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+  });
+
+  it('delivers the held outcomes of one id under two keys in define() order', async () => {
+    // A same-id mutate() from another definition gives one id outcomes
+    // under two keys. Order holds per key; the key defined first goes first.
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, release, native } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'older', key: 'a' }));
+    emit(completed({ eventId: 'newer', key: 'b' }));
+    await flush();
+
+    const order: string[] = [];
+    const define = (key: string): void => {
+      definitions[key] = {
+        key,
+        request: jest.fn(),
+        onSuccess: () => {
+          order.push(key);
+        },
+      };
+      release(key);
+    };
+    define('b');
+    await flush();
+    define('a');
+    await flush();
+
+    expect(order).toEqual(['b', 'a']);
+    expect(native.ackEvents.mock.calls).toEqual([[['newer']], [['older']]]);
+  });
+
+  it('does nothing for a key with no held outcomes', async () => {
+    const onSuccess = jest.fn();
+    const { start, emit, release, native } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess },
+    });
+    start();
+    await flush();
+    emit(completed());
+    await flush();
+    release('k');
+    release('never-seen');
+    await flush();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('completed', () => {
   it('passes the RawResponse to onSuccess when there is no parser, with vars and meta', async () => {
     const onSuccess = jest.fn();
