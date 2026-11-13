@@ -555,3 +555,100 @@ describe('reset', () => {
     }
   });
 });
+
+describe('holdNext', () => {
+  const peek = (promise: Promise<unknown>): Promise<unknown> =>
+    Promise.race([promise, Promise.resolve('pending')]);
+
+  it('holds the next enqueue until released, then stores, emits and resolves', async () => {
+    const fake = createFakeNative();
+    const states = jest.fn();
+    fake.onState(states);
+    const release = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    await flush();
+    expect(await peek(pending)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    expect(states).not.toHaveBeenCalled();
+    release();
+    await expect(pending).resolves.toBe('a');
+    expect(fake.entries).toHaveLength(1);
+    expect(states).toHaveBeenCalledTimes(1);
+    // Only the next call is held.
+    await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
+  });
+
+  it('makes later calls wait behind a held call, as native runs enqueue one at a time', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    const first = fake.enqueue(entry({ id: 'a' }));
+    const second = fake.enqueue(entry({ id: 'b' }));
+    fake.failNext('enqueue', 'E_STORAGE');
+    const third = fake.enqueue(entry({ id: 'c' }));
+    await flush();
+    expect(await peek(second)).toBe('pending');
+    expect(await peek(third)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    release();
+    // The held call runs first, so it takes the queued failure.
+    await expect(first).rejects.toMatchObject({ code: 'E_STORAGE' });
+    await expect(second).resolves.toBe('b');
+    await expect(third).resolves.toBe('c');
+    expect(fake.entries.map((e) => e.id)).toEqual(['b', 'c']);
+    await expect(fake.enqueue(entry({ id: 'd' }))).resolves.toBe('d');
+  });
+
+  it('applies a failNext failure when the held call is released', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    fake.failNext('enqueue', 'E_STORAGE', 'disk full');
+    release();
+    await expect(pending).rejects.toMatchObject({
+      code: 'E_STORAGE',
+      message: 'disk full',
+    });
+    expect(fake.entries).toEqual([]);
+  });
+
+  it('uses holds in order, keeps call order, and ignores a second release', async () => {
+    const fake = createFakeNative();
+    const releaseFirst = fake.holdNext('enqueue');
+    const releaseSecond = fake.holdNext('enqueue');
+    const first = fake.enqueue(entry({ id: 'a' }));
+    const second = fake.enqueue(entry({ id: 'b' }));
+    // The second call is released but still waits behind the first.
+    releaseSecond();
+    await flush();
+    expect(await peek(second)).toBe('pending');
+    expect(await peek(first)).toBe('pending');
+    releaseFirst();
+    releaseFirst();
+    await expect(first).resolves.toBe('a');
+    await expect(second).resolves.toBe('b');
+    expect(fake.entries.map((e) => e.id)).toEqual(['a', 'b']);
+  });
+
+  it('cancels the hold when released before the call is made', async () => {
+    const fake = createFakeNative();
+    const release = fake.holdNext('enqueue');
+    release();
+    await expect(fake.enqueue(entry())).resolves.toBe('a');
+  });
+
+  it('drops held calls, the calls behind them, and unused holds on reset()', async () => {
+    const fake = createFakeNative();
+    const releaseHeld = fake.holdNext('enqueue');
+    const pending = fake.enqueue(entry());
+    const behind = fake.enqueue(entry({ id: 'behind' }));
+    const releaseUnused = fake.holdNext('enqueue');
+    fake.reset();
+    releaseHeld();
+    releaseUnused();
+    await flush();
+    expect(await peek(pending)).toBe('pending');
+    expect(await peek(behind)).toBe('pending');
+    expect(fake.entries).toEqual([]);
+    await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
+  });
+});

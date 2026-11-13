@@ -19,7 +19,8 @@
  * E_RUNNING, re-emit). A second enqueue() on an id only overwrites its row.
  * It also does not model the header merge of updateHeaders(). It records the
  * patch and merges nothing. Script those cases with failNext() and
- * seedUnacknowledged().
+ * seedUnacknowledged(). holdNext('enqueue') models a native that is slow to
+ * answer.
  */
 import type { SettledEvent } from './delivery';
 import type { Spec } from './NativeRNFileUploader';
@@ -90,6 +91,9 @@ export type FailableMethod =
   | 'getUnacknowledgedEvents'
   | 'ackEvents'
   | 'takeDiagnostics';
+
+/** The methods whose next call can be held open with holdNext(). */
+export type HoldableMethod = 'enqueue';
 
 export type FakeNativeOptions = {
   /**
@@ -173,8 +177,21 @@ export type FakeNative = Spec & {
    */
   failNext: (method: FailableMethod, code: string, message?: string) => void;
   /**
-   * Clears entries, rows, journal, diagnostics, calls, acks, the pause state and queued
-   * failures. A
+   * The next call of `method` stays pending, as when native is slow to
+   * answer. Native runs enqueue calls one at a time, so later calls wait
+   * behind a held one. Call the returned function to release it: the held
+   * call and the calls behind it then run in order, as usual. Each records
+   * its entry, emits its row and resolves, or rejects with a failure queued
+   * by failNext(). A failure is taken when the call runs, not when it is
+   * made. Releasing before the call is made cancels the hold. A second
+   * release does nothing. Holds are used in order.
+   */
+  holdNext: (method: HoldableMethod) => () => void;
+  /**
+   * Clears entries, rows, journal, diagnostics, calls, acks, the pause state, queued
+   * failures and holds. A held call that was not released, and every call
+   * behind it, stays pending forever, and the release function does
+   * nothing. A
    * settle() that still waits for its ack resolves now, so it cannot reject
    * later inside another test. Keeps the subscriptions, because a client subscribes one time, at its first
    * configure(). New eventIds never repeat old ones, so delivery's dedupe
@@ -279,6 +296,18 @@ export const createFakeNative = (
   const isPaused = (key: string): boolean =>
     pausedAll || pausedKeys.has(key);
   const failures = new Map<FailableMethod, Error[]>();
+  // Native runs enqueue calls one at a time. A hold waits for its call in
+  // `holds`. Calls wait in `waiting`, in order, while a held call at the
+  // head has not been released.
+  type Hold = { released: boolean; dropped: boolean };
+  type WaitingCall = {
+    input: object;
+    hold?: Hold;
+    resolve: (id: string) => void;
+    reject: (reason: unknown) => void;
+  };
+  const holds: Hold[] = [];
+  const waiting: WaitingCall[] = [];
   const ackWaiters = new Map<string, () => void>();
 
   const state = makeEmitter<RequestRow>();
@@ -414,6 +443,43 @@ export const createFakeNative = (
     return acked;
   };
 
+  const enqueueBody = (input: object): Promise<string> =>
+    run('enqueue', () => {
+      const raw = input as EnqueueEntry;
+      const vars = JSON.parse(raw.varsJson) as Json;
+      entries.push({
+        id: raw.id,
+        key: raw.key,
+        vars,
+        descriptor: toDescriptor(raw.descriptor),
+        raw,
+      });
+      const prior = rows.get(raw.id);
+      setRow({
+        id: raw.id,
+        key: raw.key,
+        vars,
+        state: isPaused(raw.key) ? 'paused' : 'queued',
+        bytesSent: 0,
+        totalBytes: prior?.totalBytes ?? 0,
+        attempts: 0,
+        updatedAt: Date.now(),
+      });
+      return raw.id;
+    });
+
+  /** Runs waiting calls in order, up to a held call not yet released. */
+  const drainWaiting = (): void => {
+    for (;;) {
+      const next = waiting[0];
+      if (!next || (next.hold && !next.hold.released)) {
+        return;
+      }
+      waiting.shift();
+      enqueueBody(next.input).then(next.resolve, next.reject);
+    }
+  };
+
   const fake: FakeNative = {
     entries,
     calls,
@@ -423,30 +489,16 @@ export const createFakeNative = (
       calls.configure.push(config);
     },
 
-    enqueue: (input) =>
-      run('enqueue', () => {
-        const raw = input as EnqueueEntry;
-        const vars = JSON.parse(raw.varsJson) as Json;
-        entries.push({
-          id: raw.id,
-          key: raw.key,
-          vars,
-          descriptor: toDescriptor(raw.descriptor),
-          raw,
-        });
-        const prior = rows.get(raw.id);
-        setRow({
-          id: raw.id,
-          key: raw.key,
-          vars,
-          state: isPaused(raw.key) ? 'paused' : 'queued',
-          bytesSent: 0,
-          totalBytes: prior?.totalBytes ?? 0,
-          attempts: 0,
-          updatedAt: Date.now(),
-        });
-        return raw.id;
-      }),
+    enqueue: (input) => {
+      const hold = holds.shift();
+      if (!hold && waiting.length === 0) {
+        return enqueueBody(input);
+      }
+      return new Promise<string>((resolve, reject) => {
+        waiting.push({ input, hold, resolve, reject });
+        drainWaiting();
+      });
+    },
 
     pause: (input) =>
       run('pause', () => {
@@ -637,6 +689,25 @@ export const createFakeNative = (
       failures.set(method, queue);
     },
 
+    holdNext: (method) => {
+      if (method !== 'enqueue') {
+        throw new Error(`holdNext: cannot hold ${String(method)}`);
+      }
+      const hold: Hold = { released: false, dropped: false };
+      holds.push(hold);
+      return () => {
+        if (hold.released || hold.dropped) {
+          return;
+        }
+        hold.released = true;
+        const unused = holds.indexOf(hold);
+        if (unused >= 0) {
+          holds.splice(unused, 1);
+        }
+        drainWaiting();
+      };
+    },
+
     reset: () => {
       entries.length = 0;
       rows.clear();
@@ -652,6 +723,16 @@ export const createFakeNative = (
       calls.setWifiOnly.length = 0;
       calls.updateHeaders.length = 0;
       failures.clear();
+      holds.forEach((hold) => {
+        hold.dropped = true;
+      });
+      waiting.forEach(({ hold }) => {
+        if (hold) {
+          hold.dropped = true;
+        }
+      });
+      holds.length = 0;
+      waiting.length = 0;
       // Each waiter clears its own timer and resolves its settle().
       ackWaiters.forEach((waiter) => waiter());
       ackWaiters.clear();
