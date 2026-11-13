@@ -20,6 +20,7 @@ let package = Package(
         "ChunkedCoordinator.swift",
         "ChunkedEngine.swift",
         "ChunkedManifestV9.swift",
+        "DiagnosticLog.swift",
         "EnqueueParser.swift",
         "EventJournal.swift",
         "Events.swift",

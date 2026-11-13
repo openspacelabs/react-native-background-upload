@@ -78,6 +78,7 @@ extension QueueCoordinator {
     }
     disarmExpiry(id)
     throttle.reset(id)
+    attemptStarts[id] = nil
     return true
   }
 
@@ -130,6 +131,7 @@ extension QueueCoordinator {
     }
     disarmExpiry(id)
     throttle.reset(id)
+    attemptStarts[id] = nil
   }
 
   /// cancel() on a settled or legacy entry: the row, its bytes and its
@@ -158,6 +160,7 @@ extension QueueCoordinator {
     index.remove(id)
     disarmExpiry(id)
     throttle.reset(id)
+    attemptStarts[id] = nil
     if let aside { store.discard(aside) }
   }
 
