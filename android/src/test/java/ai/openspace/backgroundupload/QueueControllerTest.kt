@@ -835,18 +835,137 @@ class QueueControllerTest {
     }
   }
 
-  @Test
-  fun `a failed settings write rejects with the cause in the message`() {
+  /** Runs [block] while the settings file cannot be written. Entry directories that already exist stay writable. */
+  private fun withSettingsUnwritable(block: () -> Unit) {
     root.setWritable(false)
-    val e = try {
-      assertThrows(java.io.IOException::class.java) { controller.setWifiOnly(true) }
+    try {
+      block()
     } finally {
       root.setWritable(true)
     }
-    // UploaderModule.onQueue rejects E_STORAGE with this message.
-    val message = StorageCause.rejectMessage(e)
-    assertTrue(message, message.startsWith(e.message!!))
-    assertTrue(message, message.endsWith(" (cause: java.io.FileNotFoundException)"))
+  }
+
+  private fun savedSettings() = QueueSettingsStore(File(root, "settings.json")).load()
+
+  @Test
+  fun `setWifiOnly does not throw when the settings can not be written, and this session uses the value`() {
+    withSettingsUnwritable { controller.setWifiOnly(true) }
+    assertTrue(settings.load().wifiOnly)
+    assertFalse("the saved copy is behind", savedSettings().wifiOnly)
+  }
+
+  @Test
+  fun `updateHeaders patches and requeues when the settings can not be written`() {
+    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    withSettingsUnwritable { controller.updateHeaders(mapOf("Authorization" to "Bearer new")) }
+    assertEquals(1, settings.load().headerGeneration)
+    val p = store.load("p")!!
+    assertEquals(EntryState.QUEUED, p.state)
+    assertEquals("Bearer new", p.descriptor!!.headers["Authorization"])
+    assertEquals(1, p.headerGeneration)
+    assertEquals(listOf("p"), scheduler.scheduled)
+    assertEquals(0, savedSettings().headerGeneration)
+  }
+
+  @Test
+  fun `pause and resume move rows when the settings can not be written`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    withSettingsUnwritable { controller.pause() }
+    assertEquals(EntryState.PAUSED, store.load("q")!!.state)
+    assertTrue(settings.load().paused)
+    withSettingsUnwritable { controller.resume() }
+    assertEquals(EntryState.QUEUED, store.load("q")!!.state)
+    assertFalse(settings.load().paused)
+  }
+
+  /** Runs [block] while the entry file of [id] cannot be written. */
+  private fun <T> withEntryUnwritable(id: String, block: () -> T): T {
+    val dir = store.entryDir(id)
+    dir.setWritable(false)
+    try {
+      return block()
+    } finally {
+      dir.setWritable(true)
+    }
+  }
+
+  @Test
+  fun `updateHeaders with an entry that can not be saved patches and schedules the rest, then rejects`() {
+    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    store.save(entry(id = "x", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    val e = withEntryUnwritable("x") {
+      assertThrows(QueueException::class.java) { controller.updateHeaders(mapOf("Authorization" to "Bearer new")) }
+    }
+    assertEquals(QueueException.E_STORAGE, e.code)
+    assertTrue(e.message, e.message!!.startsWith("updateHeaders: could not save 1 entries: "))
+    assertEquals(EntryState.QUEUED, store.load("p")!!.state)
+    assertEquals("Bearer new", store.load("p")!!.descriptor!!.headers["Authorization"])
+    assertEquals(listOf("p"), scheduler.scheduled)
+    assertEquals(EntryState.AWAITING_AUTH, store.load("x")!!.state)
+    assertEquals(1, settings.load().headerGeneration)
+  }
+
+  @Test
+  fun `resume with an entry that can not be saved resumes and schedules the rest, then rejects`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    store.save(entry(id = "x", state = EntryState.QUEUED))
+    controller.pause()
+    val e = withEntryUnwritable("x") {
+      assertThrows(QueueException::class.java) { controller.resume() }
+    }
+    assertEquals(QueueException.E_STORAGE, e.code)
+    assertEquals(EntryState.QUEUED, store.load("q")!!.state)
+    assertTrue("q" in scheduler.scheduled)
+    assertEquals(EntryState.PAUSED, store.load("x")!!.state)
+    assertFalse(settings.load().paused)
+  }
+
+  @Test
+  fun `pause with an entry that can not be saved pauses and stops the rest, then rejects`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    store.save(entry(id = "x", state = EntryState.QUEUED))
+    val e = withEntryUnwritable("x") {
+      assertThrows(QueueException::class.java) { controller.pause() }
+    }
+    assertEquals(QueueException.E_STORAGE, e.code)
+    assertEquals(EntryState.PAUSED, store.load("q")!!.state)
+    assertTrue("q" in scheduler.cancelled)
+    assertEquals(EntryState.QUEUED, store.load("x")!!.state)
+    assertTrue("the gate is on, so the worker stops before its next attempt", settings.load().paused)
+  }
+
+  @Test
+  fun `a paused parked entry with newer headers resumes to queued after a relaunch that read an older settings file`() {
+    store.save(entry(id = "a", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    controller.pause()
+    withSettingsUnwritable { controller.updateHeaders(mapOf("Authorization" to "Bearer new")) }
+    assertEquals(1, store.load("a")!!.headerGeneration)
+    assertEquals(0, savedSettings().headerGeneration)
+    // A new process reads settings.json, which still holds generation 0.
+    val relaunched = QueueSettingsStore(File(root, "settings.json"))
+    QueueController(store, journal, relaunched, events, scheduler, { it in running }, { now }).resume()
+    assertEquals("it holds new headers it never tried", EntryState.QUEUED, store.load("a")!!.state)
+  }
+
+  @Test
+  fun `the next settings call saves a value that is behind`() {
+    withSettingsUnwritable { controller.setWifiOnly(true) }
+    controller.setWifiOnly(true) // the same value
+    assertTrue(savedSettings().wifiOnly)
+  }
+
+  @Test
+  fun `the header generation does not go back after a relaunch that read an older settings file`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    withSettingsUnwritable { controller.updateHeaders(mapOf("Authorization" to "t1")) }
+    assertEquals(1, store.load("q")!!.headerGeneration)
+    // A new process reads settings.json, which still holds 0.
+    val relaunched = QueueSettingsStore(File(root, "settings.json"))
+    val c = QueueController(store, journal, relaunched, events, scheduler, { it in running }, { now })
+    c.updateHeaders(mapOf("Authorization" to "t2"))
+    // A worker that sent t1 under generation 1 and gets a 401 must see newer headers.
+    assertEquals(2, relaunched.load().headerGeneration)
+    assertEquals(2, store.load("q")!!.headerGeneration)
   }
 
   @Test

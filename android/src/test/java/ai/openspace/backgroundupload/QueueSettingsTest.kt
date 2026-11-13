@@ -86,12 +86,108 @@ class QueueSettingsTest {
   }
 
   @Test
-  fun `a failed write keeps the old value`() {
-    // A regular file where the directory should be: the write fails.
-    val notADir = tmp.newFile()
-    val store = QueueSettingsStore(File(notADir, "settings.json"))
-    runCatching { store.update { it.copy(paused = true) } }
+  fun `a failed write keeps the new value in memory and the old one on disk`() {
+    val dir = tmp.newFolder()
+    val file = File(dir, "settings.json")
+    val store = QueueSettingsStore(file)
+    dir.setWritable(false)
+    try {
+      assertTrue(store.update { it.copy(paused = true) }.paused)
+    } finally {
+      dir.setWritable(true)
+    }
+    assertTrue(store.load().paused)
+    assertTrue(store.isBehind)
+    assertFalse(QueueSettingsStore(file).load().paused)
+  }
+
+  @Test
+  fun `a failed write records a warning with the cause`() {
+    val dir = tmp.newFolder()
+    Diag.log = DiagnosticLog(File(tmp.newFolder(), "diagnostics.json"))
+    val store = QueueSettingsStore(File(dir, "settings.json"))
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(wifiOnly = true) }
+    } finally {
+      dir.setWritable(true)
+      val records = Diag.log!!.drain()
+      Diag.log = null
+      assertEquals(listOf(DiagnosticLog.WARN), records.map { it.level })
+      val message = records.single().message
+      assertTrue(message, message.startsWith("could not save the queue settings; this session uses the new value"))
+      assertTrue(message, message.contains(" (cause: java.io.FileNotFoundException"))
+    }
+  }
+
+  @Test
+  fun `a second failure in a row is not persisted to the diagnostic log`() {
+    val dir = tmp.newFolder()
+    Diag.log = DiagnosticLog(File(tmp.newFolder(), "diagnostics.json"))
+    val store = QueueSettingsStore(File(dir, "settings.json"))
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(wifiOnly = true) }
+      store.update { it.copy(paused = true) }
+      store.saveIfBehind()
+    } finally {
+      dir.setWritable(true)
+      val records = Diag.log!!.drain()
+      Diag.log = null
+      assertEquals("only the first failure", 1, records.size)
+    }
+    // After a write lands, the next failure is persisted again.
+    store.saveIfBehind()
+    Diag.log = DiagnosticLog(File(tmp.newFolder(), "diagnostics.json"))
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(paused = false) }
+    } finally {
+      dir.setWritable(true)
+      val records = Diag.log!!.drain()
+      Diag.log = null
+      assertEquals(1, records.size)
+    }
+  }
+
+  @Test
+  fun `the next update saves a value that is behind, even when it changes nothing`() {
+    val dir = tmp.newFolder()
+    val file = File(dir, "settings.json")
+    val store = QueueSettingsStore(file)
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(wifiOnly = true) }
+    } finally {
+      dir.setWritable(true)
+    }
+    store.update { it.copy(wifiOnly = true) } // the same value
+    assertTrue(QueueSettingsStore(file).load().wifiOnly)
+    assertFalse(store.isBehind)
+  }
+
+  @Test
+  fun `saveIfBehind writes only after a failed save`() {
+    val dir = tmp.newFolder()
+    val file = File(dir, "settings.json")
+    val store = QueueSettingsStore(file)
+    store.update { it.copy(paused = true) }
+    file.delete()
+    store.saveIfBehind()
+    assertFalse("nothing was behind, so nothing is written", file.exists())
+
+    dir.setWritable(false)
+    try {
+      store.update { it.copy(paused = false) }
+      store.saveIfBehind() // fails again and keeps the value
+    } finally {
+      dir.setWritable(true)
+    }
     assertFalse(store.load().paused)
+    assertTrue(store.isBehind)
+    store.saveIfBehind()
+    assertFalse(store.isBehind)
+    assertFalse(QueueSettingsStore(file).load().paused)
   }
 
   @Test

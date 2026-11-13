@@ -58,9 +58,14 @@ object EntryTransitions {
   fun toPaused(e: QueueEntry, now: Long) =
     e.copy(state = EntryState.PAUSED, nextAttemptAt = null, updatedAt = now)
 
-  /** resume(): back to awaiting-auth only when no updateHeaders() came in between. */
-  fun toResumed(e: QueueEntry, headerGeneration: Int, now: Long): QueueEntry =
-    if (e.parkedGeneration != null && e.parkedGeneration == headerGeneration) {
+  /**
+   * resume(): back to awaiting-auth only when no updateHeaders() came in
+   * between. It compares the entry's own headerGeneration, which
+   * updateHeaders() saves with the new headers. The settings value can be
+   * older after a settings write that never landed.
+   */
+  fun toResumed(e: QueueEntry, now: Long): QueueEntry =
+    if (e.parkedGeneration != null && e.parkedGeneration == e.headerGeneration) {
       e.copy(state = EntryState.AWAITING_AUTH, updatedAt = now)
     } else {
       e.copy(state = EntryState.QUEUED, parkedGeneration = null, updatedAt = now)

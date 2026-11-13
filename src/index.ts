@@ -226,7 +226,8 @@ export const createUploadClient = ({
 
   /**
    * Persisted natively. Applies to queued and future entries whose
-   * descriptor does not set `wifiOnly`.
+   * descriptor does not set `wifiOnly`. Does not reject: a failed save
+   * still applies the value for this session.
    */
   const setWifiOnly = (enabled: boolean): Promise<void> =>
     native.setWifiOnly(enabled);
@@ -237,7 +238,10 @@ export const createUploadClient = ({
    * same-named headers a part carries. This is how a fresh token
    * reaches requests that stalled on 401. Native bumps a header generation, so
    * a 401 from an attempt issued under the old headers re-issues at once
-   * instead of parking.
+   * instead of parking. Rejects `E_INVALID` for a header native cannot
+   * send. A failed settings save does not reject. On Android, an entry file
+   * that cannot be saved rejects `E_STORAGE` after the other entries are
+   * patched.
    */
   const updateHeaders = (patch: Record<string, string>): Promise<void> =>
     native.updateHeaders(patch);

@@ -436,6 +436,10 @@ event (`paused`, then `queued`). No outcome is produced and the bytes are
 kept. A paused entry past `expiresAt` settles `error` with
 `errorKind: 'expired'` when it is resumed.
 
+Neither call rejects because the settings cannot be saved. On Android,
+either call can still reject `E_STORAGE` when an entry file cannot be saved.
+See [Settings on a full disk](#settings-on-a-full-disk).
+
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
@@ -458,6 +462,9 @@ its own value. Both are checked before each attempt, so a toggle moves the
 queued entries that follow the setting. A call with the current value
 resolves without a write.
 
+It does not reject. The new value applies at once, also when the disk is
+full. See [Settings on a full disk](#settings-on-a-full-disk).
+
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and
 resumes the entries parked on `awaiting-auth`. The patch also replaces
@@ -465,7 +472,51 @@ same-named headers a part carries. This is how a fresh token
 reaches requests that stalled on 401. Each call bumps a header generation: a
 401 or 403 from an attempt issued under an older generation re-issues at once
 instead of parking. Parking emits one `state` event per entry. A header name
-or value the platform HTTP client cannot send rejects with `E_INVALID`.
+or value the platform HTTP client cannot send rejects with `E_INVALID` and
+changes nothing. A settings file that cannot be saved does not reject. On
+Android, an entry file that cannot be saved does reject `E_STORAGE`. See
+[Settings on a full disk](#settings-on-a-full-disk).
+
+### Settings on a full disk
+`setWifiOnly()`, `updateHeaders()`, `pause()`, `resume()` and `configure()`
+change queue settings that native saves to a file. They apply the new value
+in memory first, so this session uses it at once. Then they save the file.
+If the save fails, for example on a full disk, the call still resolves.
+
+The library records a warning. On Android, `takeDiagnostics()` returns it.
+On iOS, the warning goes to the device log only for now. It will go to
+`takeDiagnostics()` when iOS has a diagnostics list.
+
+The library tries the save again at the next one of these calls, when the
+app becomes active, and when the app leaves the foreground. These retries
+happen only while the process lives. A new process, for example a relaunch
+in the background with no JS, uses the last value that reached the disk:
+
+- `setWifiOnly()`: the earlier Wi-Fi setting applies.
+- `pause()` and `resume()`: the earlier pause state applies. At launch,
+  native moves the entries to match it. So an entry that was paused can run,
+  and an entry that was resumed can wait.
+- `updateHeaders()`: the headers are saved with each entry, not in the
+  settings file, so they are not lost. Only a counter of header updates is.
+  Native raises that counter again above the entries' values, so a 401 still
+  re-issues as described above.
+
+So send your settings again at each app start: call `setWifiOnly()`, and
+`pause()` or `resume()`, with the values you want. A call with the value
+native already has writes nothing.
+
+`updateHeaders()`, `pause()` and `resume()` also save each entry they
+change. On iOS, a failed entry save is logged, the entry changes in memory,
+and the next save of that entry writes it. On Android, the entries are read
+from disk, so they cannot change in memory only. There, the call changes and
+schedules every entry it can save, then rejects `E_STORAGE` when one or more
+entries could not be saved. Each entry that failed keeps its old state:
+
+- `updateHeaders()`: it keeps its old headers and stays in `awaiting-auth`
+  if it was there. Call `updateHeaders()` again.
+- `pause()`: it keeps its state, but its worker sees the pause before its
+  next attempt.
+- `resume()`: it stays `paused`. Call `resume()` again.
 
 ### `getRequests(filter?): RequestRow[]`
 Synchronous, from native's in-memory index, so it works offline. Returns

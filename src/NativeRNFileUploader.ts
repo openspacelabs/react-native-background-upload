@@ -65,6 +65,13 @@ export interface Spec extends TurboModule {
   // entry. A running attempt stops. No outcome is produced and no attempt
   // event is emitted. A paused entry past expiresAt settles error/expired
   // when it stops being paused.
+  //
+  // pause, resume, setWifiOnly, updateHeaders and configure apply the new
+  // settings in memory, then save them best-effort. A failed settings save
+  // does not reject (on Android, a failed entry save in pause, resume or
+  // updateHeaders still rejects E_STORAGE): native logs it and saves again at the next settings call and
+  // when the app becomes active or leaves the foreground, while the process
+  // lives. A new process reads the last value that reached the disk.
   pause(scope: CodegenTypes.UnsafeObject): Promise<void>;
   resume(scope: CodegenTypes.UnsafeObject): Promise<void>;
   // Live entry: journal 'cancelled' (user), forget after its ack. The
@@ -79,11 +86,14 @@ export interface Spec extends TurboModule {
   // future entries whose descriptor has no wifiOnly. An entry with
   // descriptor.wifiOnly set (true or false) ignores it. Both are evaluated
   // per attempt, so a toggle moves queued entries that follow the setting.
+  // Never rejects.
   setWifiOnly(enabled: boolean): Promise<void>;
   // Merges the patch into every entry not yet forgotten and bumps a header
   // generation. The patch also replaces same-named headers a part carries. A 401/403 from an attempt issued under an older generation
   // re-issues at once instead of parking. Parking emits one 'state' event per
-  // entry.
+  // entry. Rejects E_INVALID for a header native cannot send. On Android,
+  // also rejects E_STORAGE when an entry file cannot be saved, after every
+  // other entry is patched and scheduled.
   updateHeaders(patch: CodegenTypes.UnsafeObject): Promise<void>;
   // Synchronous. Serialized from the in-memory index that native keeps
   // current on every state change, never from disk. Returns every entry not
