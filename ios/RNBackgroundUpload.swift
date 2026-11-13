@@ -283,7 +283,7 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
       key: key, description: task.taskDescription,
       url: task.originalRequest?.url?.absoluteString, statusCode: http?.statusCode,
       headers: headers, body: http == nil ? nil : body, bodyTruncated: truncated,
-      error: error as NSError?))
+      error: error as NSError?, bytesSent: task.countOfBytesSent))
   }
 
   public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

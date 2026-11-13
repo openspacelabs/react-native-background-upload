@@ -89,6 +89,9 @@ final class QueueCoordinator {
   /// Every task this process created or adopted, by TaskMap key.
   var liveTasks: [String: (id: String, task: UploadTask)] = [:]
   var expiryTokens: [String: UUID] = [:]
+  /// When each simple entry's latest task begins (its begin date, or when it
+  /// was made), by id. In memory only: the floor in scheduleRetry.
+  var attemptStarts: [String: Double] = [:]
   /// Bumped by scheduleReplace: only the latest scheduled replace runs.
   var replaceGeneration = 0
   /// Open grace waits (a completion that may still replay), by name. While

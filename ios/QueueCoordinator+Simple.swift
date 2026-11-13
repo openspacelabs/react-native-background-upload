@@ -106,6 +106,7 @@ extension QueueCoordinator {
       return
     }
     liveTasks[task.key] = (id, task)
+    attemptStarts[id] = beginAt ?? t
     throttle.reset(id)
   }
 
@@ -121,6 +122,20 @@ extension QueueCoordinator {
       guard let self, let current = self.index.entry(e.id), current.generation == generation,
             current.attempts == attempts else { return }
       self.issue(e.id)
+    }
+  }
+
+  /// A delayed task that never reached the daemon (see taskCompletedLocked).
+  /// Waits out the rest of its delay in this process, then issues the same
+  /// attempt again, unless something else moved the entry first.
+  private func waitOutNeverStarted(_ e: QueueEntry, beginAt: Double) {
+    let generation = e.generation
+    let attempts = e.attempts
+    schedule(Int((beginAt - now()).rounded(.up))) { [weak self] in
+      guard let self, let current = self.index.entry(e.id), current.generation == generation,
+            current.attempts == attempts, current.nextAttemptAt == beginAt,
+            !self.liveTasks.values.contains(where: { $0.id == e.id }) else { return }
+      self.issue(e.id, advanceAttempt: false)
     }
   }
 
@@ -161,6 +176,20 @@ extension QueueCoordinator {
     // is live. The server has the body then, so the entry completes, even
     // when the replacement failed and the entry moved to a later attempt.
     if meta?.purpose == .superseded && (!accepted || !e.isLive) { return }
+    // A delayed task that ended before its begin date, with no response and
+    // no body byte sent, never reached the daemon: nsurlsessiond refused the
+    // connection (a simulator build with no entitlements does this). It is
+    // not an attempt: no event, and it keeps its ordinal and request id.
+    // Retrying now would make another delayed task that fails at once, in a
+    // tight loop, so wait out the rest of the delay here. All three tests,
+    // not the time alone: a clock that moved during the wait must not turn a
+    // real failure into this. Not the error code: -1 comes with real
+    // failures too.
+    if e.state == .queued, let beginAt = e.nextAttemptAt, now() < beginAt, c.statusCode == nil,
+       c.bytesSent == 0 {
+      waitOutNeverStarted(e, beginAt: beginAt)
+      return
+    }
     // A cancel the library did not ask for (the system, a force-quit) is not
     // an attempt: no event. It retries below.
     if !cancelled {
@@ -277,16 +306,45 @@ extension QueueCoordinator {
 
   /// Backoff from the attempt count. A wait that would pass expiresAt
   /// settles 'expired' now instead of scheduling.
+  ///
+  /// A floor under the backoff, as a safety net: the next attempt never
+  /// begins within baseMs of the previous one's start, however that one
+  /// ended. One that ended before its own start (the daemon dropped a
+  /// delayed task at once, in a way taskCompletedLocked did not catch) gets
+  /// no task for baseMs, so such failures cannot spin. That wait is in this
+  /// process, and bounded, so a clock that moved cannot stall the retry.
+  /// The floor is in memory only: a relaunch starts without it.
   func scheduleRetry(_ e: QueueEntry) {
-    let delay = RetryClassifier.backoffMs(attempt: max(e.attempts, 1), policy: policy(e), random: random)
+    let base = policy(e).baseMs
+    var delay = RetryClassifier.backoffMs(attempt: max(e.attempts, 1), policy: policy(e), random: random)
+    let start = attemptStarts[e.id]
+    let endedBeforeStart = start.map { now() < $0 } ?? false
+    if let start {
+      delay = max(delay, endedBeforeStart ? Int(base) : Int((start + base - now()).rounded(.up)))
+    }
     if now() + Double(delay) >= e.expiresAt {
       settle(e.id, .expired)
       return
     }
     var n = e
     n.state = .queued
+    guard endedBeforeStart else {
+      index.upsert(n)
+      issue(n.id, delayMs: delay)
+      return
+    }
+    // The entry waits in memory with no task, as in deferIssue.
+    n.nextAttemptAt = nil
     index.upsert(n)
-    issue(n.id, delayMs: delay)
+    let beginAt = now() + Double(delay)
+    let generation = e.generation
+    let attempts = e.attempts
+    schedule(Int(base)) { [weak self] in
+      guard let self, let current = self.index.entry(e.id), current.generation == generation,
+            current.attempts == attempts, !self.liveTasks.values.contains(where: { $0.id == e.id }) else { return }
+      let remaining = Int((beginAt - self.now()).rounded(.up))
+      self.issue(e.id, delayMs: remaining > 0 ? remaining : nil)
+    }
   }
 
   /// awaiting-auth: no task, one `state` event. updateHeaders() resumes it.
