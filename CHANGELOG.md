@@ -1,5 +1,46 @@
 ## Unreleased
 
+At each start the library now deletes orphan directories that it can prove
+are safe to delete. An orphan is a directory with no entry file that is not
+v9, left by a crash between staging a body and saving its entry, or by an
+enqueue whose entry save failed. The library deletes one only when every
+file in it is a request body it copied or wrote (or the temporary file of
+that write), and its newest file and the directory are more than 24 hours
+old. It never deletes a v9 directory, a chunked file it moved in from the
+caller (that can be the only copy, and a same-id `mutate()` still uses it),
+a directory with `entry.json.tmp` (after a crash it can hold a request whose
+save did not reach the disk), or a directory with any other file, a
+symbolic link or a subdirectory. The cleanup runs after
+queued work is scheduled, in the same serial order as enqueue, and checks for
+the entry file again just before each delete.
+
+The boot record's `data.orphans` now has `removedDirs` and `removedBytes`:
+what the cleanup deleted. `dirs` and `bytes` now mean what is left after
+it, not everything the count found. A failed delete is a `warn` record; the cleanup goes on with the next
+directory. The fake native module's `seedBootSnapshot()` fills the new
+fields with 0.
+
+`takeDiagnostics()` now reports how much v9 work is still on the device. The
+boot record (`info`, message `boot sweep`) has `data.v9Leftovers` with
+`legacyRows`, `legacyBytes`, `unownedUploads` and `unownedBytes`. The counts
+do not overlap, so `legacyRows + unownedUploads` is the number of v9 ids
+left. `unownedIds` lists the ids of the v9 uploads with no row, at most 100,
+so the app can cancel the ones it will not send again. It also has `data.orphans` (`{ dirs, bytes }`): directories with no
+entry file that are not v9. The library counts these when the module
+starts, after queued work is scheduled, from a directory listing and file
+sizes.
+
+On Android the boot record is now written at every module start, even an
+idle one, so zero is reported. Before, it was skipped when nothing was
+queued. A new boot record replaces one that JS has not taken, so it never
+pushes warnings and errors out of the 50-record log. The replaced record's
+WorkManager-run detail is dropped with it.
+
+iOS used to return an empty list. It now keeps up to 50 records in memory:
+one boot record per process, with `v9Leftovers` and `orphans` only, the
+warnings of its count and of the orphan cleanup, and a warning when `cancel(id)` cannot delete an
+unowned directory. The fake native module has `seedBootSnapshot()`.
+
 Added `retry.transient`: rules that make a 4xx response transient when its
 status, and optionally a body substring, match, with a per-rule `maxRetries`
 cap. A matching rule is checked before `terminalHttp.exempt`; `exempt` stays
@@ -15,27 +56,37 @@ the standard table decides those first. The defaults are unchanged.
 `configure()` now checks every option, `retry` included the way `mutate()`
 does, before it changes any setting.
 
-Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
-hooks that return the queue rows for display, and
-`definition.useRequests()` and `definition.useRequestsWithProgress()`, which
-return one definition's rows with typed `vars`. The client keeps one copy of
-the rows in memory, read from native when the first hook mounts and updated
-by each `state` event. It also removes a row when native forgets it with no
-event: after the ack of a `completed` or `cancelled` outcome, and after
-`cancel()` on a settled entry. A `state` event that arrives after the copy
-removed its row is checked against native, so it does not add a finished row
-back. The filter takes `includeCancelled`; cancelled rows are left out by
-default. `addRequestsListener()` and `getCachedRequests()` give the same rows
-outside React. Completed rows are included until their outcome is
-acknowledged. An app that keeps its own copy of `getRequests()` for display,
-and wraps `cancel()` to update it, can remove that code. Delivery, acks and
-cancel are unchanged. `define()` now returns the two hooks with `key` and
-`mutate`. The `Defined` and `UploadClient` types gained the new functions as
-required members, so a test double built by hand with one of those types no
-longer compiles until it adds them.
+`cancel(id)` on an id with no row now deletes the id's directory when it
+holds no entry file. A v9 chunked upload that was still running at the
+upgrade got no legacy row, so its manifest and blob could never be released.
+Before, `cancel()` on such an id did nothing. The same cancel also discards
+a chunked file the library kept after an enqueue that rejected `E_STORAGE`.
+A delete that fails is reported as a warning through `takeDiagnostics()`.
 
-`createFakeNative().settle()` now resolves one promise turn later, after the
-client has handled the ack, so the row hooks are up to date when it resolves.
+A same-id `mutate()` over a legacy row whose v9 manifest could not be read
+now runs over the kept v9 blob. Before, it ignored the blob and failed with
+`E_FILE_MISSING` once the caller's source was gone. A caller file that exists
+still wins. A plan that does not tile the blob rejects `E_INVALID`, as for
+any chunked body; before, that case was `E_FILE_MISSING` too. Fixed on
+Android and iOS.
+
+iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
+entry, for example on a full disk. The library had already moved the
+caller's file into its queue, so this deleted the only copy. The file now
+stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
+uses it, as Android already did.
+
+iOS now waits out a retry's backoff when the system refuses the retry
+before it starts. A retry is a background task with a begin date, so when
+`nsurlsessiond` refused the app's connection, the task failed at once, the
+next retry was created at once, and that one failed too: hundreds of
+attempts a second, until the app used all its CPU and gigabytes of memory.
+A delayed task that ends before its begin date with no response and no
+bytes sent never reached the server. It no longer counts as an attempt or
+emits an event; the rest of the delay is waited out in the app and the
+attempt is sent again under the same id. A chunked part does the same. As a
+backstop, a retry of a simple request never starts sooner than the base
+backoff after the previous attempt started.
 
 Behavior change: `mutate()` no longer rejects when native is slow to answer. Before, it
 rejected after `enqueueTimeoutMs` (default 10 s) even though native could
@@ -65,11 +116,27 @@ pending until the returned function is called, so a test can model a native
 that is slow to answer. Later enqueues wait behind it, as they do on a
 device.
 
-iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
-entry, for example on a full disk. The library had already moved the
-caller's file into its queue, so this deleted the only copy. The file now
-stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
-uses it, as Android already did.
+Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
+hooks that return the queue rows for display, and
+`definition.useRequests()` and `definition.useRequestsWithProgress()`, which
+return one definition's rows with typed `vars`. The client keeps one copy of
+the rows in memory, read from native when the first hook mounts and updated
+by each `state` event. It also removes a row when native forgets it with no
+event: after the ack of a `completed` or `cancelled` outcome, and after
+`cancel()` on a settled entry. A `state` event that arrives after the copy
+removed its row is checked against native, so it does not add a finished row
+back. The filter takes `includeCancelled`; cancelled rows are left out by
+default. `addRequestsListener()` and `getCachedRequests()` give the same rows
+outside React. Completed rows are included until their outcome is
+acknowledged. An app that keeps its own copy of `getRequests()` for display,
+and wraps `cancel()` to update it, can remove that code. Delivery, acks and
+cancel are unchanged. `define()` now returns the two hooks with `key` and
+`mutate`. The `Defined` and `UploadClient` types gained the new functions as
+required members, so a test double built by hand with one of those types no
+longer compiles until it adds them.
+
+`createFakeNative().settle()` now resolves one promise turn later, after the
+client has handled the ack, so the row hooks are up to date when it resolves.
 
 ## 11.1.0
 
