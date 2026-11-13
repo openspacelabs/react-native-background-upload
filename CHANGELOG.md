@@ -22,7 +22,9 @@ return one definition's rows with typed `vars`. The client keeps one copy of
 the rows in memory, read from native when the first hook mounts and updated
 by each `state` event. It also removes a row when native forgets it with no
 event: after the ack of a `completed` or `cancelled` outcome, and after
-`cancel()` on a settled entry. The filter takes `includeCancelled`; cancelled
+`cancel()` on a settled entry. A `state` event that arrives after the copy
+removed its row is checked against native, so it does not add a finished row
+back. The filter takes `includeCancelled`; cancelled
 rows are left out by default. `addRequestsListener()` and
 `getCachedRequests()` give the same rows outside React. Completed rows are
 included until their outcome is acknowledged. An app that keeps its

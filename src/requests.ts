@@ -6,6 +6,12 @@
  * row with no event, because its own JS makes those calls: the ack of a
  * completed or cancelled outcome, and cancel() on a settled entry.
  *
+ * Events are asynchronous, so a state event can arrive after the cache
+ * removed its row: Android emits a run's outcome before its last state event,
+ * and the ack of that outcome can forget the row in between. The ids the
+ * cache removed this way are kept, and their state events are checked
+ * against native instead of being applied.
+ *
  * Nothing here sends, acknowledges, or cancels anything. A failure here can
  * only make a row show late or stay longer.
  */
@@ -27,6 +33,13 @@ const LIVE_STATES: readonly RequestState[] = [
   'awaiting-auth',
   'paused',
 ];
+
+/**
+ * The most ids the cache keeps as forgotten. A late state event comes within
+ * moments of the ack, so only the newest ids matter; a burst of acks at
+ * launch can be a few hundred.
+ */
+export const MAX_FORGOTTEN = 256;
 
 /**
  * Deep equality for JSON values, as `vars` and rows hold them. A field set to
@@ -266,9 +279,35 @@ export const createRequestCache = ({
   let stateSubscription: { remove: () => void } | undefined;
   // Native progress is listened to only while a progress view is mounted.
   let progressSubscription: { remove: () => void } | undefined;
+  // Ids whose row native forgot, or may have forgotten, with no event. A
+  // state event for one of them can be late, so it is checked against
+  // native. Oldest first; an id leaves when native shows a row for it again.
+  const forgotten = new Set<string>();
 
   const notify = (listeners: Set<Listener>): void => {
     listeners.forEach((listener) => listener());
+  };
+
+  const markForgotten = (id: string): void => {
+    // Delete first, so a repeated id moves to the newest place.
+    forgotten.delete(id);
+    forgotten.add(id);
+    if (forgotten.size > MAX_FORGOTTEN) {
+      const oldest = forgotten.values().next();
+      if (!oldest.done) {
+        forgotten.delete(oldest.value);
+      }
+    }
+  };
+
+  /** After a read of every native row: an id native shows is not forgotten. */
+  const unforgetShown = (current: readonly RequestRow[]): void => {
+    if (forgotten.size === 0) {
+      return;
+    }
+    for (const row of current) {
+      forgotten.delete(row.id);
+    }
   };
 
   /** True when the row had progress to forget. */
@@ -299,7 +338,9 @@ export const createRequestCache = ({
   /** Native's rows, or undefined when the read throws. */
   const readSafely = (): RequestRow[] | undefined => {
     try {
-      return readNative();
+      const current = readNative();
+      unforgetShown(current);
+      return current;
     } catch (e) {
       warn(
         'requests: getRequests failed, so the cached rows were not checked against native',
@@ -352,6 +393,12 @@ export const createRequestCache = ({
     }
   };
 
+  /** Removes a row that native forgot, and keeps its id for late events. */
+  const forget = (id: string): void => {
+    markForgotten(id);
+    remove(id);
+  };
+
   /** Puts `row` in the cache, in place of the row with its id. */
   const upsert = (row: RequestRow): void => {
     const hadProgress = forgetProgress(row.id);
@@ -384,16 +431,18 @@ export const createRequestCache = ({
     if (row) {
       upsert(row);
     } else {
-      remove(id);
+      forget(id);
     }
   };
 
   // A state event carries the full row, so it replaces the cached one. Its
   // bytes are the row's own, so the progress seen before it is out of date.
   const onState = (event: StateEvent): void => {
-    if (event.reason === 'unhandled-key') {
-      // JS builds this row from the journaled outcome, not from the entry.
-      // A same-id mutate() may have reopened the entry since, so ask native.
+    // An unhandled-key row: JS builds it from the journaled outcome, not
+    // from the entry, and a same-id mutate() may have reopened the entry
+    // since. A forgotten id: the event may be older than the forget, or be
+    // the first event of a same-id mutate(). Ask native in both cases.
+    if (event.reason === 'unhandled-key' || forgotten.has(event.id)) {
       if (rows) {
         refreshId(event.id);
       }
@@ -529,45 +578,57 @@ export const createRequestCache = ({
   };
 
   const acked = ({ id, kind }: { id: string; kind: string }): void => {
+    // Native forgets a row at the ack of its completed or cancelled outcome.
+    const forgets = kind === 'completed' || kind === 'cancelled';
     if (dropWhenIdle()) {
+      // A state event queued before the next subscribe still reaches it.
+      if (forgets) {
+        markForgotten(id);
+      }
       return;
     }
     const row = rows ? indexById(rows).get(id) : undefined;
-    if (!row) {
-      return;
-    }
     if (kind === 'error') {
       // Native keeps an error row. iOS can move a live row to its outcome
       // during the ack with no event, so a row not shown as an error is
       // checked.
-      if (row.state !== 'error') {
+      if (row && row.state !== 'error') {
         refreshId(id);
       }
       return;
     }
-    if (kind !== 'completed' && kind !== 'cancelled') {
+    if (!forgets) {
       return;
     }
-    // Native forgets a row at the ack of its completed or cancelled outcome.
-    if (row.state === kind) {
-      remove(id);
+    if (!row || row.state === kind) {
+      forget(id);
       return;
     }
     // The row moved on, for example a cancelled entry that a same-id
     // mutate() reopened, whose old ack does not forget it; or a live row that
-    // native settled and forgot during the ack. Ask native.
+    // native settled and forgot during the ack, whose last state event is
+    // still on its way. Ask native.
     refreshId(id);
   };
 
   const cancelled = (id: string): void => {
     if (dropWhenIdle()) {
+      markForgotten(id);
       return;
     }
     // A settled entry is forgotten at once, with no event. A live one
-    // settles 'cancelled' with an event, and its ack forgets it.
+    // settles 'cancelled' with an event, and its ack forgets it. A row still
+    // shown live may already be settled in native, with its state event on
+    // the way, and then cancel() forgot it: ask native.
     const row = rows ? indexById(rows).get(id) : undefined;
-    if (row && !LIVE_STATES.includes(row.state)) {
-      remove(id);
+    if (!row) {
+      markForgotten(id);
+      return;
+    }
+    if (LIVE_STATES.includes(row.state)) {
+      refreshId(id);
+    } else {
+      forget(id);
     }
   };
 
