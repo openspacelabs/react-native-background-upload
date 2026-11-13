@@ -73,6 +73,21 @@ class DiagnosticLog(private val file: File) {
     }
   }
 
+  /**
+   * Appends [record] after removing the records of the same level and
+   * message that no drain has taken. A report written at every start then
+   * holds one slot, however many starts pass without a drain.
+   */
+  @Synchronized
+  fun replace(record: Record) {
+    runCatching {
+      val kept = records().filterNot { it.level == record.level && it.message == record.message }
+      val next = (kept + record).takeLast(MAX_RECORDS)
+      cached = next
+      AtomicFiles.writeText(file, gson.toJson(next))
+    }
+  }
+
   /** Every record, oldest first, then an empty log. */
   @Synchronized
   fun drain(): List<Record> {
