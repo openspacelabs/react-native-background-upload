@@ -49,7 +49,7 @@ type DeliveryDeps = {
   lookup: (key: string) => AnyDefinition | undefined;
   /** Feeds the client's `state` listeners. */
   emitState: (event: StateEvent) => void;
-  warn?: (message: string, ...rest: unknown[]) => void;
+  warn?: (message: string, detail?: unknown) => void;
   handlerWarningMs?: number;
 };
 

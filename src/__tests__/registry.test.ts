@@ -894,30 +894,81 @@ describe('uuidV4', () => {
   });
 });
 
-describe('enqueue watchdog', () => {
+describe('slow native enqueue', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  it('rejects and warns when native enqueue never settles', async () => {
-    const { define, enqueue, warn } = setup({ enqueueTimeoutMs: 10_000 });
-    enqueue.mockImplementation(() => new Promise<string>(() => undefined));
+  const deferred = () => {
+    let resolve!: (id: string) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<string>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  /** Settles to 'pending' while `promise` has not settled. */
+  const peek = async (promise: Promise<unknown>): Promise<unknown> =>
+    Promise.race([promise, Promise.resolve('pending')]);
+
+  it('warns once at enqueueTimeoutMs, keeps waiting, then resolves with native\'s answer', async () => {
+    const { define, enqueue, warn, lastEntry } = setup({
+      enqueueTimeoutMs: 10_000,
+    });
+    const answer = deferred();
+    enqueue.mockImplementation(() => answer.promise);
     const defined = define({ key: 'item.create', request: jsonPost });
     const promise = defined.mutate({ n: 1 });
-    // Attach the handler before the clock moves, so the rejection is observed.
     const outcome = promise.then(
-      () => 'resolved',
+      (value) => value,
       (e: Error) => e.message,
     );
     await jest.advanceTimersByTimeAsync(9_999);
     expect(warn).not.toHaveBeenCalled();
     await jest.advanceTimersByTimeAsync(1);
-    expect(await outcome).toMatch(
-      /native enqueue for "item.create" \(id [^)]+\) did not settle within 10000 ms\. Native did not answer; the entry may still be persisted\.$/,
+    expect(warn).toHaveBeenCalledTimes(1);
+    const { id } = lastEntry();
+    expect(warn.mock.calls[0][0]).toBe(
+      `mutate: native enqueue for "item.create" (id ${id}) has not answered after 10000 ms. mutate() keeps waiting for the answer, and outcomes for this id wait with it.`,
     );
+    expect(await peek(outcome)).toBe('pending');
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(await peek(outcome)).toBe('pending');
+    expect(warn).toHaveBeenCalledTimes(1);
+    answer.resolve(id);
+    expect(await outcome).toEqual({ id });
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the watchdog when native settles in time', async () => {
+  it("rejects with native's own error when native rejects after the warning", async () => {
+    const { define, enqueue, warn } = setup({ enqueueTimeoutMs: 1_000 });
+    const answer = deferred();
+    enqueue.mockImplementation(() => answer.promise);
+    const defined = define({ key: 'item.create', request: jsonPost });
+    const outcome = defined.mutate({ n: 1 }).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    );
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const storage = Object.assign(new Error('disk full'), { code: 'E_STORAGE' });
+    answer.reject(storage);
+    expect(await outcome).toBe(storage);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects with native's own error and does not warn when native rejects in time", async () => {
+    const { define, enqueue, warn } = setup({ enqueueTimeoutMs: 10_000 });
+    const invalid = Object.assign(new Error('bad url'), { code: 'E_INVALID' });
+    enqueue.mockRejectedValue(invalid);
+    const defined = define({ key: 'item.create', request: jsonPost });
+    await expect(defined.mutate({ n: 1 })).rejects.toBe(invalid);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not warn when native settles in time', async () => {
     const { define, warn } = setup({ enqueueTimeoutMs: 10_000 });
     const defined = define({ key: 'item.create', request: jsonPost });
     await expect(defined.mutate({ n: 1 })).resolves.toEqual({
@@ -927,14 +978,20 @@ describe('enqueue watchdog', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('hands delivery the raced promise, so a timed-out id does not block delivery', async () => {
+  it("hands delivery a promise that settles only with native's answer", async () => {
     const { define, enqueue, trackMutate } = setup({ enqueueTimeoutMs: 1_000 });
-    enqueue.mockImplementation(() => new Promise<string>(() => undefined));
+    const answer = deferred();
+    enqueue.mockImplementation(() => answer.promise);
     const defined = define({ key: 'item.create', request: jsonPost });
-    const promise = defined.mutate({ n: 1 }).catch(() => 'timed out');
-    await jest.advanceTimersByTimeAsync(1_000);
-    expect(await promise).toBe('timed out');
-    const tracked = trackMutate.mock.calls[0]![1] as Promise<unknown>;
-    await expect(tracked).rejects.toThrow(/did not settle/);
+    const promise = defined.mutate({ n: 1 });
+    const [trackedId, tracked] = trackMutate.mock.calls[0]! as [
+      string,
+      Promise<unknown>,
+    ];
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(await peek(tracked)).toBe('pending');
+    answer.resolve(trackedId);
+    await expect(tracked).resolves.toBe(trackedId);
+    await expect(promise).resolves.toEqual({ id: trackedId });
   });
 });

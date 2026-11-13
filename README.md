@@ -289,7 +289,9 @@ while the app was dead from being sent twice.
    `error` with `errorKind: 'expired'` when it is resumed. A same-id
    `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
-   caller's promise.
+   caller's promise. While native has not answered `enqueue`, the id's
+   outcomes wait too. They stay journaled and unacknowledged, so none is
+   lost.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
    deliver then. Call every `define()` first. A bundler that loads modules
    lazily, such as Metro with `inlineRequires`, can run a `define()` later.
@@ -402,7 +404,9 @@ copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
 field, a GET with a body, input native cannot send (`E_INVALID`), a missing
 file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running entry
 with a different body (`E_RUNNING`), or `vars` over
-`maxVarsBytes` (1 MB by default). Only `vars` are capped. `id` defaults to a UUID. For a definition
+`maxVarsBytes` (1 MB by default). Only `vars` are capped. `mutate()` has no
+timeout: it settles only with native's answer, and warns one time when that
+takes longer than `enqueueTimeoutMs`. `id` defaults to a UUID. For a definition
 whose `request` takes no vars, call `mutate()` with no arguments; native stores
 `null`.
 
@@ -420,7 +424,8 @@ reached its key before it; see rule 5 of "Reliable delivery".
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
-| `enqueueTimeoutMs` | Default 10 s. `mutate()` rejects and warns when native enqueue has not settled by then. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, so a large file takes longer. A timeout means native did not answer, not that the request failed. A watchdog for a native bug, not a tuning knob. |
+| `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and it waits behind earlier enqueues, so a large file takes longer. |
+| `onWarning` | `(message, detail?) => void`. Receives every warning that the library's JavaScript raises, instead of `console.warn`: a slow enqueue, a slow or rejected handler, a failed ack, and the rest. Native warnings do not come here; read them with `takeDiagnostics()`. `detail` is the error or event, when there is one. Warnings raised before `configure()` go to `console.warn`. If the sink throws, the warning and the throw go to `console.warn`. |
 | `android` | Notification text and identity: `notificationId/Title/TitleNoWifi/TitleNoInternet/Channel`. Persisted natively. |
 
 ### `pause(scope?): Promise<void>` and `resume(scope?): Promise<void>`
@@ -719,7 +724,12 @@ re-emit) or the header merge of `updateHeaders()`; script those with
 
 `native.entries` holds every enqueue as `mutate()` sent it, with `vars` and
 `data` parsed back from JSON. `failNext()` makes the next native call reject
-with a code such as `E_STORAGE`. `seedUnacknowledged()` and `seedRows()`
+with a code such as `E_STORAGE`. `holdNext('enqueue')` keeps the next enqueue
+pending, as when native is slow to answer, and returns a function that
+releases it. Native runs enqueue calls one at a time, so later enqueues wait
+behind a held one, as they do on a device. On release they all run in order,
+as usual, and a failure that `failNext()` queued goes to the first call that
+runs. `reset()` drops held calls and the calls behind them. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
 them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
 `seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record

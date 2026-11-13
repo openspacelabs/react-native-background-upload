@@ -95,6 +95,27 @@ export const createUploadClient = ({
   // registered twice is removed one subscription at a time.
   const stateListeners = new Set<{ listener: (event: StateEvent) => void }>();
 
+  // Every warning the JS layer raises goes through here. The registry and
+  // delivery capture this function when the client is built, before
+  // configure(), so it reads the sink at each call: a sink set later is used
+  // from then on. Native warnings go to takeDiagnostics() instead.
+  const warn = (message: string, detail?: unknown): void => {
+    const sink = settings.onWarning;
+    if (sink) {
+      try {
+        sink(message, detail);
+        return;
+      } catch (e) {
+        console.warn('configure: onWarning threw', e);
+      }
+    }
+    if (detail === undefined) {
+      console.warn(message);
+    } else {
+      console.warn(message, detail);
+    }
+  };
+
   // A listener that throws must not stop the others or fail the delivery
   // that produced the row.
   const emitState = (event: StateEvent): void => {
@@ -102,7 +123,7 @@ export const createUploadClient = ({
       try {
         listener(event);
       } catch (e) {
-        console.warn('addListener: a state listener threw', e);
+        warn('addListener: a state listener threw', e);
       }
     });
   };
@@ -111,6 +132,7 @@ export const createUploadClient = ({
     native,
     lookup: (key) => definitions.get(key),
     emitState,
+    warn,
   });
   // The keys of the last configure({ definitions }), and the unlisted keys
   // already warned about.
@@ -125,7 +147,7 @@ export const createUploadClient = ({
       isDev()
     ) {
       warnedKeys.add(key);
-      console.warn(
+      warn(
         `define: "${key}" is not in configure({ definitions }). It still receives its outcomes, but list it so that its module loads before configure().`,
       );
     }
@@ -138,11 +160,13 @@ export const createUploadClient = ({
     getSettings: () => settings,
     trackMutate: delivery.trackMutate,
     onDefine,
+    warn,
   });
 
   /**
    * One-time setup. Call it at boot, after every define() call. Stores the
-   * lifetime, the vars cap, the headers provider and the retry defaults, forwards the
+   * lifetime, the vars cap, the headers provider, the warning sink and the
+   * retry defaults, forwards the
    * lifetime, retry and Android notification settings to native, then starts
    * replaying journaled outcomes. A second call updates the settings and does
    * not replay again. Each call replaces the full configuration.
@@ -186,11 +210,20 @@ export const createUploadClient = ({
         `configure: maxVarsBytes must be a positive number, got ${options.maxVarsBytes}`,
       );
     }
+    if (
+      options.onWarning !== undefined &&
+      typeof options.onWarning !== 'function'
+    ) {
+      throw new Error(
+        `configure: onWarning must be a function when given, got ${typeof options.onWarning}`,
+      );
+    }
     settings.lifetimeMs = lifetimeMs;
     settings.enqueueTimeoutMs = enqueueTimeoutMs;
     settings.maxVarsBytes = maxVarsBytes;
     settings.headers = options.headers;
     settings.retry = options.retry;
+    settings.onWarning = options.onWarning;
     const forwarded: Record<string, unknown> = {
       lifetimeMs,
       ...options.android,

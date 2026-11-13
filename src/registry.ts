@@ -13,11 +13,11 @@ import type {
 
 export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 /**
- * How long mutate() waits for native enqueue() before it rejects. Enqueue
- * includes the time to stage a copy of a `file` body and of form `path`
- * parts, so a large file takes longer. A timeout means native did not
- * answer, not that the request failed. This is a watchdog for a native path
- * that never settles, not a tuning knob.
+ * How long mutate() waits for native enqueue() before it warns. mutate()
+ * keeps waiting after the warning and settles only with native's answer.
+ * Enqueue includes the time to stage a copy of a `file` body and of form
+ * `path` parts, and it waits behind earlier enqueues, so a large file takes
+ * longer.
  */
 export const DEFAULT_ENQUEUE_TIMEOUT_MS = 10_000;
 /**
@@ -67,27 +67,22 @@ export type Settings = {
   maxVarsBytes: number;
   headers?: () => Record<string, string>;
   retry?: Partial<RetryPolicy>;
+  onWarning?: (message: string, detail?: unknown) => void;
 };
 
-/** Rejects with `makeError()` when `promise` has not settled after `ms`. */
-export const withTimeout = <T>(
-  promise: Promise<T>,
+/**
+ * Calls `onSlow` one time when `promise` has not settled after `ms`. Does not
+ * change how `promise` settles.
+ */
+export const warnIfSlow = (
+  promise: Promise<unknown>,
   ms: number,
-  makeError: () => Error,
-): Promise<T> =>
-  new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(makeError()), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
+  onSlow: () => void,
+): void => {
+  const timer = setTimeout(onSlow, ms);
+  const clear = () => clearTimeout(timer);
+  promise.then(clear, clear);
+};
 
 /**
  * The descriptor as it crosses to native. `dataJson` is `JSON.stringify(data)`
@@ -643,21 +638,17 @@ export const createRegistry = ({
           expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
         },
       };
-      // Watchdog. Turn a native enqueue() that never settles into a rejection
-      // with a name, and let delivery for this id proceed instead of waiting
-      // forever. Enqueue includes the time to stage a copy of a `file` body
-      // and of form `path` parts, so a large file takes longer. A timeout
-      // means native did not answer, not that the request failed. If native
-      // did persist the entry, its outcome still reaches the handlers, and a
-      // same-id retry resumes instead of duplicating.
-      const pending = withTimeout(
-        native.enqueue(entry),
-        settings.enqueueTimeoutMs,
-        () => {
-          const message = `mutate: native enqueue for "${key}" (id ${entry.id}) did not settle within ${settings.enqueueTimeoutMs} ms. Native did not answer; the entry may still be persisted.`;
-          warn(message);
-          return new Error(message);
-        },
+      // mutate() settles only with native's answer. A late answer is not a
+      // failure: native may store the entry after any wait, and a rejection
+      // here would report a failure for a request that then uploads. So a
+      // slow answer gets one warning, and mutate() keeps waiting. Delivery
+      // for this id waits on the same promise, so no handler runs before the
+      // caller has the id.
+      const pending = native.enqueue(entry);
+      warnIfSlow(pending, settings.enqueueTimeoutMs, () =>
+        warn(
+          `mutate: native enqueue for "${key}" (id ${entry.id}) has not answered after ${settings.enqueueTimeoutMs} ms. mutate() keeps waiting for the answer, and outcomes for this id wait with it.`,
+        ),
       );
       trackMutate(entry.id, pending);
       // The JS id is the one the caller may have chosen and the one the

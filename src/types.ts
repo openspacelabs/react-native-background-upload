@@ -375,12 +375,23 @@ export type ConfigureOptions = {
   headers?: () => Record<string, string>;
   /**
    * Default 10 s. How long `mutate()` waits for native enqueue before it
-   * rejects. Enqueue includes the time to stage a copy of a `file` body and
-   * of form `path` parts, so a large file takes longer. A timeout means
-   * native did not answer, not that the request failed. A watchdog for a
-   * native bug, not a tuning knob.
+   * warns one time. `mutate()` keeps waiting after the warning: it resolves
+   * when native stored the entry and rejects only with native's own error.
+   * Enqueue includes the time to stage a copy of a `file` body and of form
+   * `path` parts, and it waits behind earlier enqueues, so a large file
+   * takes longer.
    */
   enqueueTimeoutMs?: number;
+  /**
+   * Receives every warning that the library's JavaScript raises, instead of
+   * `console.warn`: a slow native enqueue, a slow or rejected handler, a
+   * failed ack, and the rest. Native warnings do not come here; read them
+   * with `takeDiagnostics()`. `detail` is the error or event the warning is
+   * about, when there is one.
+   * Warnings raised before `configure()` go to `console.warn`. If the sink
+   * throws, the warning and the throw go to `console.warn`.
+   */
+  onWarning?: (message: string, detail?: unknown) => void;
   android?: Partial<AndroidNotificationConfig>;
 };
 

@@ -260,6 +260,38 @@ describe('configure', () => {
     );
   });
 
+  it('leaves the earlier settings whole when a later option is invalid', async () => {
+    const client = createUploadClient();
+    const send = client.define({
+      key: 'k',
+      request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
+    });
+    client.configure({
+      lifetimeMs: 1000,
+      maxVarsBytes: 16,
+      headers: () => ({ A: '1' }),
+    });
+    expect(() =>
+      client.configure({
+        lifetimeMs: 2000,
+        enqueueTimeoutMs: 50,
+        maxVarsBytes: 64,
+        headers: () => ({ B: '2' }),
+        onWarning: 'log' as unknown as () => void,
+      }),
+    ).toThrow(/onWarning/);
+    expect(native.configure).toHaveBeenCalledTimes(1);
+    const before = Date.now();
+    await send.mutate({ s: 'a'.repeat(8) });
+    const entry = native.enqueue.mock.calls.at(-1)![0];
+    expect(entry.descriptor.headers).toEqual({ A: '1' });
+    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
+    expect(entry.descriptor.expiresAt).toBeLessThan(before + 2000);
+    await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
+      /the limit is 16/,
+    );
+  });
+
   it('applies maxVarsBytes to later mutates', async () => {
     const client = createUploadClient();
     const send = client.define({
@@ -701,6 +733,173 @@ describe('end to end', () => {
     expect(order).toEqual([`caller ${id}`, `handler ${id}`]);
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
   });
+
+  it('waits past enqueueTimeoutMs for a slow native, warns once, and still runs the handler after the caller', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const order: string[] = [];
+    const onWarning = jest.fn();
+    const create = client.define({
+      key: 'item.create',
+      request: ({ n }: { n: number }) => ({
+        url: `https://x/${n}`,
+        data: { n },
+      }),
+      onSuccess: (_data, _vars, meta) => {
+        order.push(`handler ${meta.id}`);
+      },
+    });
+    client.configure({ enqueueTimeoutMs: 30, onWarning });
+    await flush();
+    const release = fake.holdNext('enqueue');
+    const pending = create.mutate({ n: 1 }, { id: 'u1' }).then(
+      ({ id }) => order.push(`caller ${id}`),
+      (e: Error) => order.push(`rejected ${e.message}`),
+    );
+    // Native stored the entry and settled it, but its enqueue answer is
+    // late, as when the native queue is busy with another chunked file.
+    fake.emit.settled({
+      eventId: 'e1',
+      id: 'u1',
+      key: 'item.create',
+      vars: { n: 1 },
+      at: 10,
+      attempts: 1,
+      url: 'https://x/1',
+      method: 'POST',
+      kind: 'completed',
+      response: { status: 200, bodyTruncated: false },
+      state: 'completed',
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(order).toEqual([]);
+    expect(fake.ackedEventIds).toEqual([]);
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0]![0]).toMatch(
+      'native enqueue for "item.create" (id u1) has not answered after 30 ms',
+    );
+    release();
+    await pending;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(order).toEqual(['caller u1', 'handler u1']);
+    expect(fake.ackedEventIds).toEqual(['e1']);
+    expect(onWarning).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('onWarning', () => {
+  const setupClient = (onWarning?: (m: string, d?: unknown) => void) => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const failing = client.define({
+      key: 'k',
+      request: (_vars: null) => ({ url: 'https://x' }),
+      onSuccess: () => {
+        throw new Error('handler failed');
+      },
+    });
+    client.configure({ onWarning });
+    return { fake, client, failing };
+  };
+
+  let consoleWarn: jest.SpyInstance;
+  beforeEach(() => {
+    consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => consoleWarn.mockRestore());
+
+  it('receives every JS warning, with its detail, instead of console.warn', async () => {
+    const onWarning = jest.fn();
+    const { fake, client, failing } = setupClient(onWarning);
+    await flush();
+    const { id } = await failing.mutate();
+    fake.emit.settled(fake.buildSettled(id, { kind: 'completed' }));
+    await flush();
+    const subscription = client.addListener('state', () => {
+      throw new Error('listener failed');
+    });
+    fake.emit.settled({
+      ...fake.buildSettled(id, { kind: 'completed' }),
+      key: 'nobody',
+    });
+    await flush();
+    subscription.remove();
+    expect(onWarning.mock.calls).toEqual([
+      [
+        `delivery: the "k" handler for ${id} rejected. The outcome stays unacknowledged and redelivers at the next launch.`,
+        expect.objectContaining({ message: 'handler failed' }),
+      ],
+      [
+        `delivery: no definition for key "nobody" (id ${id}). The outcome stays unacknowledged until define() registers the key, or until the next launch.`,
+        undefined,
+      ],
+      [
+        'addListener: a state listener threw',
+        expect.objectContaining({ message: 'listener failed' }),
+      ],
+    ]);
+    expect(consoleWarn).not.toHaveBeenCalled();
+  });
+
+  it('leaves warnings on console.warn before configure() and when not set', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const onWarning = jest.fn();
+    const request = (_vars: null) => ({ url: 'https://x' });
+    client.define({ key: 'dup', request });
+    client.define({ key: 'dup', request });
+    expect(consoleWarn).toHaveBeenCalledWith(
+      'define: "dup" is already defined. The new definition replaces it.',
+    );
+    const failing = client.define({
+      key: 'k',
+      request,
+      onSuccess: () => {
+        throw new Error('handler failed');
+      },
+    });
+    // Each configure() replaces the full configuration, so the second call
+    // removes the sink.
+    client.configure({ onWarning });
+    client.configure({});
+    await flush();
+    const { id } = await failing.mutate();
+    fake.emit.settled(fake.buildSettled(id, { kind: 'completed' }));
+    await flush();
+    expect(onWarning).not.toHaveBeenCalled();
+    expect(consoleWarn).toHaveBeenLastCalledWith(
+      `delivery: the "k" handler for ${id} rejected. The outcome stays unacknowledged and redelivers at the next launch.`,
+      expect.objectContaining({ message: 'handler failed' }),
+    );
+  });
+
+  it('falls back to console.warn when the sink throws, and keeps delivering', async () => {
+    const thrown = new Error('sink failed');
+    const onWarning = jest.fn(() => {
+      throw thrown;
+    });
+    const { fake, failing } = setupClient(onWarning);
+    await flush();
+    const { id } = await failing.mutate();
+    fake.emit.settled(fake.buildSettled(id, { kind: 'completed' }));
+    await flush();
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(consoleWarn.mock.calls).toEqual([
+      ['configure: onWarning threw', thrown],
+      [
+        `delivery: the "k" handler for ${id} rejected. The outcome stays unacknowledged and redelivers at the next launch.`,
+        expect.objectContaining({ message: 'handler failed' }),
+      ],
+    ]);
+    expect(fake.ackedEventIds).toEqual([]);
+  });
+
+  it('rejects a value that is not a function', () => {
+    const client = createUploadClient({ native: createFakeNative() });
+    expect(() =>
+      client.configure({ onWarning: 'log' as unknown as () => void }),
+    ).toThrow('configure: onWarning must be a function when given, got string');
+  });
 });
 
 describe('with a fake native', () => {
@@ -1090,5 +1289,29 @@ describe('a definition that arrives after configure()', () => {
     }
 
     expect(notListedWarnings()).toEqual([]);
+  });
+});
+
+describe('late definitions with onWarning', () => {
+  const request = (_v: null) => ({ url: 'https://x' });
+  let consoleWarn: jest.SpyInstance;
+  beforeEach(() => {
+    consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => consoleWarn.mockRestore());
+
+  it('sends the warning for an unlisted late define() to onWarning', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const onWarning = jest.fn();
+    const listed = client.define({ key: 'listed', request });
+    client.configure({ definitions: [listed], onWarning });
+    await flush();
+    client.define({ key: 'late', request });
+    expect(onWarning).toHaveBeenCalledWith(
+      'define: "late" is not in configure({ definitions }). It still receives its outcomes, but list it so that its module loads before configure().',
+      undefined,
+    );
+    expect(consoleWarn).not.toHaveBeenCalled();
   });
 });

@@ -315,6 +315,19 @@ client.configure({
 // @ts-expect-error a key alone is not a handle
 client.configure({ definitions: [{ key: 'bare' }] });
 
+// onWarning takes a message and an optional detail.
+client.configure({
+  onWarning: (_message, _detail) => {
+    assertEqual<typeof _message, string>(true);
+    assertEqual<typeof _detail, unknown>(true);
+  },
+});
+client.configure({ onWarning: (_message: string) => undefined });
+// @ts-expect-error onWarning is a function
+client.configure({ onWarning: 'console' });
+// @ts-expect-error the message is a string
+client.configure({ onWarning: (_message: number) => undefined });
+
 // takeDiagnostics(): the boot snapshot's v9Leftovers and orphans are typed;
 // other data fields stay unknown.
 declare const record: Diagnostic;
