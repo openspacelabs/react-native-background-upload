@@ -410,6 +410,8 @@ final class CoordinatorSimpleTests: XCTestCase {
     let retry = onlyTask()
     XCTAssertEqual(retry.beginAt, Date(timeIntervalSince1970: (h.clock + 1_000) / 1000))
     XCTAssertEqual(e.attempts, 2)
+    // The daemon begins the retry once its delay has passed.
+    h.advance(1_000)
     h.complete(retry, status: 503)
     XCTAssertEqual(h.entry("a")?.nextAttemptAt, h.clock + 2_000, "backoff doubles")
     h.complete(onlyTask(), status: 200)
@@ -455,6 +457,95 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertTrue(h.sink.settled.isEmpty, "never a cancelled outcome")
     XCTAssertEqual(h.entry("a")?.state, .queued)
     XCTAssertNotNil(onlyTask().beginAt)
+  }
+
+  // MARK: - Delayed tasks that never reach the daemon
+
+  /// NSURLErrorDomain -1, as nsurlsessiond reports a connection it refused.
+  private let refused = NSError(domain: NSURLErrorDomain, code: NSURLErrorUnknown)
+
+  /// What a simulator build with no entitlements sees: nsurlsessiond refuses
+  /// the app's connection, so every task ends at once with -1, no response
+  /// and no byte sent. Fails when one refusal makes another task at once,
+  /// over and over.
+  private func refuseEveryTask(file: StaticString = #filePath, line: UInt = #line) {
+    var count = 0
+    while let task = h.transport.live.first {
+      h.complete(task, error: refused)
+      count += 1
+      if count > 10 { return XCTFail("refused tasks retry in a tight loop", file: file, line: line) }
+    }
+  }
+
+  func testRefusedTasksRetryAtTheBackoffRateNotInATightLoop() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    for _ in 0..<100 { // 10 s in steps of 100 ms
+      refuseEveryTask()
+      h.advance(100)
+    }
+    // Attempts at 0, 1, 3 and 7 s (backoff 1, 2 and 4 s). The fifth waits for 15 s.
+    XCTAssertEqual(h.sink.attempts.count, 4)
+    XCTAssertEqual(h.entry("a")?.attempts, 5)
+    XCTAssertEqual(h.transport.created.count, 8, "each retry: the refused delayed task, then its re-issue")
+  }
+
+  func testARefusedDelayedTaskIsNoAttemptAndKeepsItsOrdinal() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 503)
+    let delayed = onlyTask()
+    let beginAt = h.clock + 1_000
+    h.complete(delayed, error: refused)
+    XCTAssertEqual(h.sink.attempts.count, 1, "no attempt event")
+    XCTAssertEqual(h.entry("a")?.attempts, 2)
+    XCTAssertEqual(h.store.load("a")?.attempts, 2)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.nextAttemptAt, beginAt, "the wait stands")
+    h.advance(999)
+    XCTAssertTrue(h.transport.live.isEmpty, "no task before the begin date")
+    h.advance(1)
+    let again = onlyTask()
+    XCTAssertNil(again.beginAt)
+    XCTAssertEqual(again.header("X-Request-Id"), delayed.header("X-Request-Id"))
+    XCTAssertEqual(h.entry("a")?.attempts, 2)
+    XCTAssertEqual(h.entry("a")?.state, .running)
+  }
+
+  func testADelayedTaskThatFailsAfterItsBeginDateCounts() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 503)
+    h.advance(1_000)
+    h.complete(onlyTask(), error: refused)
+    XCTAssertEqual(h.sink.attempts.count, 2)
+    XCTAssertEqual(h.entry("a")?.attempts, 3)
+    XCTAssertEqual(h.entry("a")?.nextAttemptAt, h.clock + 2_000, "backoff doubles")
+    XCTAssertEqual(onlyTask().beginAt, Date(timeIntervalSince1970: (h.clock + 2_000) / 1000))
+  }
+
+  /// A task that sent bytes or got a response reached the daemon, even if
+  /// it ended before its begin date (a clock that moved). It counts. The
+  /// floor holds its successor's task back for baseMs; the begin date keeps
+  /// the backoff.
+  func testADelayedTaskThatRanCountsEvenBeforeItsBeginDate() throws {
+    for ran in ["bytes", "response"] {
+      h = Harness()
+      h.boot()
+      _ = try h.enqueue(h.dataRaw(id: "a")).get()
+      h.complete(onlyTask(), status: 503)
+      let delayed = onlyTask()
+      let start = h.clock
+      if ran == "bytes" {
+        delayed.bytesSent = 3
+        h.complete(delayed, error: refused)
+      } else {
+        h.complete(delayed, status: 503)
+      }
+      XCTAssertEqual(h.sink.attempts.count, 2, ran)
+      XCTAssertEqual(h.entry("a")?.state, .queued, ran)
+      XCTAssertTrue(h.transport.live.isEmpty, "\(ran): the floor")
+      h.advance(1_000)
+      XCTAssertEqual(h.entry("a")?.attempts, 3, ran)
+      XCTAssertEqual(onlyTask().beginAt, Date(timeIntervalSince1970: (start + 2_000) / 1000), ran)
+    }
   }
 
   func testBackoffPastExpiresAtSettlesExpired() throws {
@@ -603,9 +694,11 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 1])
     XCTAssertEqual(h.sink.attempts.last?["outcome"] as? String, "error")
     XCTAssertEqual(h.sink.attempts.last?["httpCode"] as? Int, 400)
+    h.advance(1_000)
     h.complete(onlyTask(), status: 400, body: bodyStopped)
     XCTAssertEqual(h.entry("a")?.state, .queued)
     XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 2])
+    h.advance(2_000)
     h.complete(onlyTask(), status: 400, body: bodyStopped)
     XCTAssertEqual(h.entry("a")?.state, .error, "the third matching response is past the cap")
     let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
@@ -645,7 +738,9 @@ final class CoordinatorSimpleTests: XCTestCase {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: bodyStoppedRules)).get()
     h.complete(onlyTask(), status: 400, body: bodyStopped)
     XCTAssertEqual(h.entry("a")?.state, .queued, "the descriptor's own rule applies with no defaults")
+    h.advance(1_000)
     h.complete(onlyTask(), status: 400, body: bodyStopped)
+    h.advance(2_000)
     h.complete(onlyTask(), status: 400, body: bodyStopped)
     XCTAssertEqual(h.entry("a")?.state, .error)
     XCTAssertEqual(h.entry("a")?.transientHitsByRule, ["400|Bad Request": 2])
@@ -836,6 +931,7 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.attempts, 2, "no HTTP attempt ran")
     XCTAssertEqual(h.store.load("a")?.attempts, 2)
     XCTAssertEqual(onlyTask().header("X-Request-Id"), waiting.header("X-Request-Id"))
+    h.advance(1_000)
     h.complete(onlyTask(), status: 503)
     XCTAssertEqual(h.entry("a")?.nextAttemptAt, h.clock + 2_000, "the exponent follows real attempts")
   }

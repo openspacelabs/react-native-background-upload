@@ -279,7 +279,7 @@ final class Harness {
     coordinator.taskCompleted(TaskCompletion(
       key: task.key, description: task.taskDescription, url: task.request.url?.absoluteString,
       statusCode: error == nil ? status : nil, headers: headers, body: error == nil ? body : nil,
-      bodyTruncated: false, error: error))
+      bodyTruncated: false, error: error, bytesSent: task.bytesSent))
   }
 
   /// Delivers the NSURLErrorCancelled callback of a task the test cancelled.
