@@ -49,6 +49,12 @@ type DeliveryDeps = {
   lookup: (key: string) => AnyDefinition | undefined;
   /** Feeds the client's `state` listeners. */
   emitState: (event: StateEvent) => void;
+  /**
+   * Called after the ack of an outcome resolved, so the client's row cache
+   * can drop a row that native forgot with no event. Not called when the ack
+   * failed. A throw is a warning and changes nothing in delivery.
+   */
+  onAcked?: (event: SettledEvent) => void;
   warn?: (message: string, detail?: unknown) => void;
   handlerWarningMs?: number;
 };
@@ -76,6 +82,7 @@ export const createDelivery = ({
   native,
   lookup,
   emitState,
+  onAcked,
   warn = console.warn,
   handlerWarningMs = HANDLER_WARNING_MS,
 }: DeliveryDeps): Delivery => {
@@ -105,11 +112,26 @@ export const createDelivery = ({
     });
   };
 
-  const ack = async (eventId: string): Promise<void> => {
+  const ack = async (event: SettledEvent): Promise<void> => {
+    const { eventId } = event;
     try {
       await native.ackEvents([eventId]);
     } catch (e) {
       warn(`delivery: ackEvents failed for ${eventId}`, e);
+      return;
+    }
+    // Display only: the ack has already landed, and a throw here is caught.
+    // This runs one promise turn after ackEvents() resolves, with no other
+    // await before it. createFakeNative().settle() counts on that order to
+    // resolve after the row cache dropped the row; an await added above
+    // breaks that test helper (requests.test.ts "drops a completed row").
+    try {
+      onAcked?.(event);
+    } catch (e) {
+      warn(
+        `delivery: updating the request rows after the ack of ${eventId} threw`,
+        e,
+      );
     }
   };
 
@@ -247,7 +269,7 @@ export const createDelivery = ({
     // A cancelled outcome has no handler, so it acks whether or not the key
     // is still defined.
     if (event.kind === 'cancelled') {
-      await ack(event.eventId);
+      await ack(event);
       return;
     }
     const definition = lookup(event.key);
@@ -259,7 +281,7 @@ export const createDelivery = ({
       return;
     }
     if (await runHandler(event, definition)) {
-      await ack(event.eventId);
+      await ack(event);
     }
   };
 
