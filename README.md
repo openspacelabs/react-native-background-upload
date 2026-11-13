@@ -534,12 +534,14 @@ on a settled entry. An `error` row stays until `cancel()` or a same-id
 needs nothing extra. iOS can settle a live row during an ack with no event;
 after any ack whose row the copy does not show in the outcome's state, the
 library reads that row from native. It does the same after `cancel(id)` on a
-row the copy shows live. Events are asynchronous, so a `state` event can
-arrive after the library removed its row (Android emits a run's outcome
-before its last `state` event). The library keeps the last 256 ids it removed
-this way, and checks a `state` event for one of them against native instead
-of adding the row back. A same-id `mutate()` of such an id costs one native
-read.
+row the copy shows live or `cancelled`. Events and call results can reach JS
+in either order, so a `state` event can arrive after the library removed its
+row (Android emits a run's outcome before its last `state` event). The
+library keeps the last 256 ids it removed this way, and checks a `state`
+event for one of them against native instead of adding the row back. Past
+256 ids the result is the same: a settled `state` event for a row the copy
+does not hold is also checked, at the cost of one native read. A same-id
+`mutate()` of a kept id costs one native read.
 
 Limits. While no hook or listener is mounted, the copy is not updated. Each
 time the first hook or listener subscribes, the library checks the copy

@@ -24,16 +24,15 @@ by each `state` event. It also removes a row when native forgets it with no
 event: after the ack of a `completed` or `cancelled` outcome, and after
 `cancel()` on a settled entry. A `state` event that arrives after the copy
 removed its row is checked against native, so it does not add a finished row
-back. The filter takes `includeCancelled`; cancelled
-rows are left out by default. `addRequestsListener()` and
-`getCachedRequests()` give the same rows outside React. Completed rows are
-included until their outcome is acknowledged. An app that keeps its
-own copy of `getRequests()` for display, and wraps `cancel()` to update it,
-can remove that code. Delivery, acks and cancel are unchanged. `define()`
-now returns the two hooks with `key` and `mutate`. The `Defined` and
-`UploadClient` types gained the new functions as required members, so a
-test double built by hand with one of those types no longer compiles until
-it adds them.
+back. The filter takes `includeCancelled`; cancelled rows are left out by
+default. `addRequestsListener()` and `getCachedRequests()` give the same rows
+outside React. Completed rows are included until their outcome is
+acknowledged. An app that keeps its own copy of `getRequests()` for display,
+and wraps `cancel()` to update it, can remove that code. Delivery, acks and
+cancel are unchanged. `define()` now returns the two hooks with `key` and
+`mutate`. The `Defined` and `UploadClient` types gained the new functions as
+required members, so a test double built by hand with one of those types no
+longer compiles until it adds them.
 
 `createFakeNative().settle()` now resolves one promise turn later, after the
 client has handled the ack, so the row hooks are up to date when it resolves.

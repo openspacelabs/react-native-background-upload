@@ -35,9 +35,10 @@ const LIVE_STATES: readonly RequestState[] = [
 ];
 
 /**
- * The most ids the cache keeps as forgotten. A late state event comes within
- * moments of the ack, so only the newest ids matter; a burst of acks at
- * launch can be a few hundred.
+ * The most ids the cache keeps as forgotten. Ids acked earlier have no state
+ * event on the way, so only the ids acked in the last moments matter, and a
+ * burst of a few hundred acks at launch does not need a larger bound. An id
+ * pushed out is still covered for settled states: see onState().
  */
 export const MAX_FORGOTTEN = 256;
 
@@ -282,6 +283,10 @@ export const createRequestCache = ({
   // Ids whose row native forgot, or may have forgotten, with no event. A
   // state event for one of them can be late, so it is checked against
   // native. Oldest first; an id leaves when native shows a row for it again.
+  // This relies on native events reaching JS in the order native sent them:
+  // a read can show a same-id mutate()'s new row while the old life's last
+  // event is still on the way, and that event then replaces the row until
+  // the new life's own next event corrects it.
   const forgotten = new Set<string>();
 
   const notify = (listeners: Set<Listener>): void => {
@@ -422,10 +427,11 @@ export const createRequestCache = ({
   };
 
   /** Asks native for one row: replaces it, or drops it when native has none. */
-  const refreshId = (id: string): void => {
+  /** False when the native read failed and nothing changed. */
+  const refreshId = (id: string): boolean => {
     const current = readSafely();
     if (!current) {
-      return;
+      return false;
     }
     const row = current.find((candidate) => candidate.id === id);
     if (row) {
@@ -433,20 +439,39 @@ export const createRequestCache = ({
     } else {
       forget(id);
     }
+    return true;
   };
 
   // A state event carries the full row, so it replaces the cached one. Its
   // bytes are the row's own, so the progress seen before it is out of date.
   const onState = (event: StateEvent): void => {
-    // An unhandled-key row: JS builds it from the journaled outcome, not
-    // from the entry, and a same-id mutate() may have reopened the entry
-    // since. A forgotten id: the event may be older than the forget, or be
-    // the first event of a same-id mutate(). Ask native in both cases.
-    if (event.reason === 'unhandled-key' || forgotten.has(event.id)) {
-      if (rows) {
-        refreshId(event.id);
-      }
+    if (!rows) {
       return;
+    }
+    if (event.reason === 'unhandled-key') {
+      // JS builds this row from the journaled outcome, not from the entry.
+      // A same-id mutate() may have reopened the entry since, so ask native.
+      refreshId(event.id);
+      return;
+    }
+    const held = indexById(rows).has(event.id);
+    // A forgotten id: the event may be older than the forget, or be the
+    // first event of a same-id mutate(). A settled state for an id the cache
+    // does not hold: a new life starts live, so this is a late event too,
+    // for example of an id pushed out of `forgotten`. Ask native.
+    if (
+      forgotten.has(event.id) ||
+      (!held && !LIVE_STATES.includes(event.state))
+    ) {
+      if (refreshId(event.id)) {
+        return;
+      }
+      // The read failed. A live state, or a row already shown, is most
+      // likely the new life of a reused id: show it rather than hide that
+      // life until the next read.
+      if (!held && !LIVE_STATES.includes(event.state)) {
+        return;
+      }
     }
     upsert(event);
   };
@@ -616,16 +641,18 @@ export const createRequestCache = ({
       markForgotten(id);
       return;
     }
-    // A settled entry is forgotten at once, with no event. A live one
-    // settles 'cancelled' with an event, and its ack forgets it. A row still
-    // shown live may already be settled in native, with its state event on
-    // the way, and then cancel() forgot it: ask native.
+    // Native forgets a completed or error entry at once, with no event. It
+    // moves a live entry to 'cancelled', usually with the event already
+    // here, and keeps it until the ack. So a 'cancelled' row may be one
+    // native keeps or one this cancel forgot (an entry cancelled before). A
+    // row still shown live may already be settled in native, with its state
+    // event on the way, and this cancel forgot it. Ask native for both.
     const row = rows ? indexById(rows).get(id) : undefined;
     if (!row) {
       markForgotten(id);
       return;
     }
-    if (LIVE_STATES.includes(row.state)) {
+    if (row.state === 'cancelled' || LIVE_STATES.includes(row.state)) {
       refreshId(id);
     } else {
       forget(id);

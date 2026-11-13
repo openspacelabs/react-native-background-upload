@@ -253,10 +253,61 @@ describe('rows native forgets with no event', () => {
     const { native, client, ping } = setup();
     listen(client);
     const { id } = await ping.mutate({ n: 1 });
+    // The fake, as Android, emits the cancelled state before cancel()
+    // resolves. cancel() itself does not drop the row.
     await client.cancel(id);
+    expect(client.getCachedRequests({ includeCancelled: true })).toEqual([
+      expect.objectContaining({ id, state: 'cancelled' }),
+    ]);
     await flush();
+    expect(native.ackedEventIds).toHaveLength(1);
     expect(native.getRequests()).toEqual([]);
     expect(client.getCachedRequests({ includeCancelled: true })).toEqual([]);
+  });
+
+  it('keeps a cancelled live row whose ack failed, as native does', async () => {
+    const { native, client, ping, warnings } = setup();
+    listen(client);
+    const { id } = await ping.mutate({ n: 1 });
+    native.failNext('ackEvents', 'E_STORAGE');
+    await client.cancel(id);
+    await flush();
+    expect(native.getRequests()).toEqual([
+      expect.objectContaining({ id, state: 'cancelled' }),
+    ]);
+    expect(client.getCachedRequests({ includeCancelled: true })).toEqual([
+      expect.objectContaining({ id, state: 'cancelled' }),
+    ]);
+    expect(warnings).toEqual([expect.stringMatching(/ackEvents failed/)]);
+  });
+
+  it('drops a row whose outcome was acked before its last state event', async () => {
+    // Android's order: the outcome, then the last state event. Here the
+    // client gets the outcome and acks it before that state event arrives.
+    const fake = createFakeNative();
+    let release: (() => void) | undefined;
+    const native: FakeNative = {
+      ...fake,
+      onState: (handler) =>
+        fake.onState((row) => {
+          if ((row as RequestRow).state === 'completed') {
+            release = () => void handler(row);
+            return;
+          }
+          return handler(row);
+        }),
+    };
+    const { client, ping } = setup(native);
+    const { calls } = listen(client);
+    const { id } = await ping.mutate({ n: 1 });
+    fake.emit.state(row({ id, key: 'ping', state: 'running', updatedAt: 2 }));
+    await fake.settle(id, { kind: 'completed' });
+    expect(fake.getRequests()).toEqual([]);
+    expect(client.getCachedRequests()).toEqual([]);
+    const seen = calls.length;
+    release?.();
+    expect(client.getCachedRequests()).toEqual([]);
+    expect(calls).toHaveLength(seen);
   });
 
   it('drops a settled row when cancel() resolves', async () => {
@@ -369,7 +420,13 @@ describe('a state event that arrives after the cache removed its row', () => {
   // JS. This stub drives the events by hand to get that order.
   const stub = (nativeRows: RequestRow[]) => {
     let onState: ((e: unknown) => void) | undefined;
-    const readNative = jest.fn(() => nativeRows.map((r) => ({ ...r })));
+    let failReads = false;
+    const readNative = jest.fn(() => {
+      if (failReads) {
+        throw new Error('E_BOOM');
+      }
+      return nativeRows.map((r) => ({ ...r }));
+    });
     const cache = createRequestCache({
       readNative,
       addListener: ((event: string, listener: (e: never) => void) => {
@@ -387,7 +444,10 @@ describe('a state event that arrives after the cache removed its row', () => {
       warn: jest.fn(),
     });
     const emitState = (r: RequestRow) => onState?.(r);
-    return { cache, readNative, emitState };
+    const setFailReads = (fail: boolean) => {
+      failReads = fail;
+    };
+    return { cache, readNative, emitState, setFailReads };
   };
 
   /** Ack while the row is running and native has forgotten it. */
@@ -460,13 +520,52 @@ describe('a state event that arrives after the cache removed its row', () => {
       cache.acked({ id: `r${i}`, kind: 'completed' });
     }
     readNative.mockClear();
-    // r0 was pushed out by the last ack, so its event applies as a new row.
-    emitState(row({ id: 'r0', state: 'completed' }));
+    // r0 was pushed out by the last ack, so a live event applies as a new
+    // row with no read.
+    emitState(row({ id: 'r0', state: 'running' }));
     expect(readNative).not.toHaveBeenCalled();
     // r1 is still kept, so its late event is checked and dropped.
-    emitState(row({ id: 'r1', state: 'completed' }));
+    emitState(row({ id: 'r1', state: 'running' }));
     expect(readNative).toHaveBeenCalledTimes(1);
     expect(cache.rows().map((r) => r.id)).toEqual(['r0']);
+  });
+
+  it('does not bring back an id pushed out of the set on a late settled event', () => {
+    const { cache, emitState, listener, readNative } = ackedWhileRunning();
+    for (let i = 0; i < MAX_FORGOTTEN; i++) {
+      cache.acked({ id: `o${i}`, kind: 'completed' });
+    }
+    listener.mockClear();
+    readNative.mockClear();
+    // 'a' is out of the set, but a settled state for an id the cache does
+    // not hold is checked too.
+    emitState(row({ id: 'a', state: 'completed', updatedAt: 3 }));
+    expect(readNative).toHaveBeenCalledTimes(1);
+    expect(cache.rows()).toEqual([]);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('shows the live events of a reused id when the native read fails', () => {
+    const { cache, emitState, nativeRows, setFailReads } = ackedWhileRunning();
+    setFailReads(true);
+    nativeRows.push(row({ id: 'a', state: 'queued', updatedAt: 9 }));
+    emitState(row({ id: 'a', state: 'queued', updatedAt: 9 }));
+    expect(cache.rows()).toEqual([
+      row({ id: 'a', state: 'queued', updatedAt: 9 }),
+    ]);
+    emitState(row({ id: 'a', state: 'running', updatedAt: 10 }));
+    // The row is shown now, so its settled state applies too.
+    emitState(row({ id: 'a', state: 'error', updatedAt: 11 }));
+    expect(cache.rows()).toEqual([
+      row({ id: 'a', state: 'error', updatedAt: 11 }),
+    ]);
+  });
+
+  it('drops a late settled event of a forgotten id when the native read fails', () => {
+    const { cache, emitState, setFailReads } = ackedWhileRunning();
+    setFailReads(true);
+    emitState(row({ id: 'a', state: 'completed', updatedAt: 3 }));
+    expect(cache.rows()).toEqual([]);
   });
 
   it('on a full read, stops checking ids native shows and keeps the others', () => {
@@ -517,16 +616,41 @@ describe('a state event that arrives after the cache removed its row', () => {
   });
 
   it('keeps a live row that cancel() moved to cancelled until its ack', () => {
+    // Android's order: the cancelled state event arrives before cancel()
+    // resolves, and native keeps the row until the ack.
+    const cancelledRow = row({ id: 'a', state: 'cancelled', updatedAt: 3 });
     const nativeRows = [row({ id: 'a', state: 'running' })];
     const { cache, emitState } = stub(nativeRows);
     cache.subscribe(() => {});
-    nativeRows[0] = row({ id: 'a', state: 'cancelled', updatedAt: 3 });
+    nativeRows[0] = cancelledRow;
+    emitState(cancelledRow);
     cache.cancelled('a');
-    expect(cache.rows()).toEqual([nativeRows[0]]);
-    emitState(row({ id: 'a', state: 'cancelled', updatedAt: 3 }));
+    expect(cache.rows()).toEqual([cancelledRow]);
     nativeRows.length = 0;
     cache.acked({ id: 'a', kind: 'cancelled' });
     expect(cache.rows()).toEqual([]);
+  });
+
+  it('drops a cancelled row that a second cancel() forgot', () => {
+    const nativeRows = [row({ id: 'a', state: 'cancelled', updatedAt: 3 })];
+    const { cache } = stub(nativeRows);
+    cache.subscribe(() => {});
+    nativeRows.length = 0;
+    cache.cancelled('a');
+    expect(cache.rows()).toEqual([]);
+  });
+
+  it('shows a same-id mutate() after cancel() of an id it did not hold', () => {
+    const nativeRows: RequestRow[] = [];
+    const { cache, emitState, readNative } = stub(nativeRows);
+    cache.subscribe(() => {});
+    cache.cancelled('a');
+    const reopened = row({ id: 'a', state: 'queued', updatedAt: 9 });
+    nativeRows.push(reopened);
+    readNative.mockClear();
+    emitState(reopened);
+    expect(readNative).toHaveBeenCalledTimes(1);
+    expect(cache.rows()).toEqual([reopened]);
   });
 });
 
