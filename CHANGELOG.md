@@ -88,6 +88,34 @@ attempt is sent again under the same id. A chunked part does the same. As a
 backstop, a retry of a simple request never starts sooner than the base
 backoff after the previous attempt started.
 
+Behavior change: `mutate()` no longer rejects when native is slow to answer. Before, it
+rejected after `enqueueTimeoutMs` (default 10 s) even though native could
+still store the entry and upload it. On iOS a large chunked file can hold
+the native queue while its part tasks are built, so the next `mutate()`
+timed out, the app recorded a failure, and the request uploaded anyway.
+Now `mutate()` warns one time at `enqueueTimeoutMs` and keeps waiting. It
+resolves when native stored the entry. After it reaches native, it rejects
+only with native's own error (`E_INVALID`, `E_RUNNING`, `E_FILE_MISSING`,
+`E_STORAGE`). An app that
+treated the timeout rejection as a failure no longer gets it. The outcomes
+of that id wait for the answer too, so a handler still never runs before
+the caller has the id. `enqueueTimeoutMs` stays and sets when the warning
+fires. If native never answers, which is a native bug, `mutate()` stays
+pending and the warning is the only signal. Do not await `mutate()` where a
+wait blocks other work.
+
+Added `configure({ onWarning })`. When set, every warning that the library's
+JavaScript raises goes to it instead of `console.warn`, with the error or
+event as a second argument. An app can send the slow-enqueue warning, and
+the others, to its error tracker. Warnings raised before `configure()` still
+go to `console.warn`, and so does a warning whose sink throws. Native
+warnings do not go to `onWarning`; read them with `takeDiagnostics()`.
+
+Added `holdNext('enqueue')` to `createFakeNative()`. The next enqueue stays
+pending until the returned function is called, so a test can model a native
+that is slow to answer. Later enqueues wait behind it, as they do on a
+device.
+
 iOS now keeps a new request through a power loss right after `mutate()`
 resolves. Before, no rename into place was flushed to disk, so the request
 directory could come back holding only `entry.json.tmp`, which nothing read:
