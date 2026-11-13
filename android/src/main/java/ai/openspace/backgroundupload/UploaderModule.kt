@@ -133,7 +133,9 @@ class UploaderModule(context: ReactApplicationContext) :
         promise.reject(QueueException.E_INVALID, e.message, e)
       } catch (e: Throwable) {
         Diag.error("queue operation failed", e)
-        promise.reject(QueueException.E_STORAGE, e.message ?: e.javaClass.simpleName, e)
+        // Not only storage failures land here (a WorkManager error, a bug),
+        // so the message names the throwable's class.
+        promise.reject(QueueException.E_STORAGE, StorageCause.rejectMessage(e), e)
       }
     }
   }

@@ -273,7 +273,8 @@ while the app was dead from being sent twice.
    `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`. `E_INVALID` is malformed
    input native cannot send: a non-http(s) URL, header names or values the
    platform HTTP client rejects, a GET with a body, or parts that do not
-   tile the moved file.
+   tile the moved file. An `E_STORAGE` message ends with the underlying
+   error, ` (cause: …)`, for logs. Match on `code`, not on the message.
 2. **Journal before emit, ack after the handler.** Every terminal outcome is
    journaled natively, then delivered. The library acknowledges after the
    handler's promise resolves. A rejection, or app death before the ack,
@@ -454,7 +455,8 @@ again.
 The queue's Wi-Fi setting. Persisted natively. Applies to queued and future
 entries whose descriptor does not set `wifiOnly`. An entry that sets it keeps
 its own value. Both are checked before each attempt, so a toggle moves the
-queued entries that follow the setting.
+queued entries that follow the setting. A call with the current value
+resolves without a write.
 
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and

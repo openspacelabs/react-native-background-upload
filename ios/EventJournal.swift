@@ -125,15 +125,19 @@ final class EventJournal {
   /// outcome file is gone cannot be acked.
   @discardableResult
   func append(_ event: JournaledEvent, keeping: Set<String> = []) -> Bool {
-    queue.sync {
+    (try? appendOrThrow(event, keeping: keeping)) != nil
+  }
+
+  /// `append`, but a failed write throws its error.
+  func appendOrThrow(_ event: JournaledEvent, keeping: Set<String> = []) throws {
+    try queue.sync {
       do {
         try write(event)
       } catch {
         NSLog("[RNFileUploader] journal append failed: \(error.localizedDescription)")
-        return false
+        throw error
       }
       pruneToMax(keeping: keeping.union([event.eventId]))
-      return true
     }
   }
 

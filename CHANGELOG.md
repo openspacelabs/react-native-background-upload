@@ -116,6 +116,23 @@ pending until the returned function is called, so a test can model a native
 that is slow to answer. Later enqueues wait behind it, as they do on a
 device.
 
+`setWifiOnly()` with the value the queue already has no longer writes the
+settings file, on both platforms. It still resolves. Before, an app that
+calls it at every start wrote the file each time, so on a nearly full disk
+the call rejected `E_STORAGE` for no reason. `configure()` with the same
+options also no longer rewrites the settings file. Neither do `pause()` and
+`resume()` on Android when they change nothing; iOS already skipped those.
+On iOS, a failed write now deletes its partly written `.tmp` file, as
+Android already did.
+
+Each `E_STORAGE` rejection now ends with the underlying error, after the
+same message text as before: ` (cause: …)`. On iOS it holds the error domain
+and code, the POSIX code when there is one, and the description when the
+message does not already hold it. On Android it holds the exception class
+and the errno name when the cause chain has one. A failed rename or
+directory create on Android now also says why, for example `Permission
+denied`. The code stays `E_STORAGE`.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
