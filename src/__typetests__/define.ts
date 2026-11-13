@@ -1,7 +1,15 @@
 // Type-level tests. tsc compiles this file with the library (yarn typecheck);
 // nothing here runs. Each @ts-expect-error line fails the build when the
 // error it expects goes away.
-import type { Meta, OutcomeError, RawResponse, UploadClient } from '../types';
+import type {
+  Diagnostic,
+  Meta,
+  OutcomeError,
+  QueueOrphans,
+  RawResponse,
+  UploadClient,
+  V9Leftovers,
+} from '../types';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B
   ? 1
@@ -297,3 +305,71 @@ client.define({
   // @ts-expect-error wifiOnly is a boolean
   request: (_vars: null) => ({ url: 'https://x', wifiOnly: 'yes' }),
 });
+
+// takeDiagnostics(): the boot snapshot's v9Leftovers and orphans are typed;
+// other data fields stay unknown.
+declare const record: Diagnostic;
+const v9 = record.data?.v9Leftovers;
+assertEqual<typeof v9, V9Leftovers | undefined>(true);
+if (v9) {
+  expectType<number>(v9.legacyRows);
+  expectType<number>(v9.legacyBytes);
+  expectType<number>(v9.unownedUploads);
+  expectType<number>(v9.unownedBytes);
+  assertEqual<typeof v9.unownedIds, string[]>(true);
+}
+const orphaned = record.data?.orphans;
+assertEqual<typeof orphaned, QueueOrphans | undefined>(true);
+if (orphaned) {
+  expectType<number>(orphaned.dirs);
+  expectType<number>(orphaned.bytes);
+}
+assertEqual<NonNullable<typeof record.data>['entries'], unknown>(true);
+const zero: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  data: {
+    v9Leftovers: {
+      legacyRows: 0,
+      legacyBytes: 0,
+      unownedUploads: 0,
+      unownedBytes: 0,
+      unownedIds: [],
+    },
+    orphans: { dirs: 0, bytes: 0 },
+  },
+};
+expectType<Diagnostic>(zero);
+const partial: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error every count is required
+  data: { v9Leftovers: { legacyRows: 0 } },
+};
+expectType<Diagnostic>(partial);
+const partialOrphans: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error orphans needs dirs and bytes
+  data: { orphans: { dirs: 0 } },
+};
+expectType<Diagnostic>(partialOrphans);
+const numericIds: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  data: {
+    v9Leftovers: {
+      legacyRows: 0,
+      legacyBytes: 0,
+      unownedUploads: 1,
+      unownedBytes: 0,
+      // @ts-expect-error ids are strings
+      unownedIds: [1],
+    },
+  },
+};
+expectType<Diagnostic>(numericIds);

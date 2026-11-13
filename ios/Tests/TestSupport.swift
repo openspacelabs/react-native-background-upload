@@ -253,6 +253,18 @@ final class Harness {
     drain()
   }
 
+  /// What takeDiagnostics() resolves. Waits for the boot count, as JS does.
+  func takeDiagnostics() -> [[String: Any]] {
+    let done = DispatchSemaphore(value: 0)
+    var out: [[String: Any]] = []
+    coordinator.takeDiagnostics {
+      out = $0
+      done.signal()
+    }
+    done.wait()
+    return out
+  }
+
   func unacknowledged() -> [[String: Any]] {
     var out: [[String: Any]] = []
     coordinator.unacknowledgedEvents { out = $0 }

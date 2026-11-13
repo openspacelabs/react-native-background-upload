@@ -102,10 +102,11 @@ export interface Spec extends TurboModule {
   ackEvents(ids: string[]): Promise<void>;
   // The persisted diagnostic records, oldest first, in the ./types
   // Diagnostic shape: { at, level, message, error?, data? }. Native clears
-  // them as it returns them. Android keeps the newest 50: its warnings and
-  // errors, including ones from headless workers, and one 'info' record per
-  // boot sweep with the queue and its WorkManager runs. iOS resolves an
-  // empty list.
+  // them as it returns them. Both add an 'info' boot record with
+  // data.v9Leftovers and data.orphans: Android at each module start, iOS
+  // once per process. Android keeps the newest 50: its warnings and errors,
+  // including ones from headless workers, and that record, which also has
+  // the queue and its WorkManager runs. iOS keeps the newest 50 in memory.
   takeDiagnostics(): Promise<CodegenTypes.UnsafeObject[]>;
 
   // Events. state carries a full RequestRow per transition. progress is

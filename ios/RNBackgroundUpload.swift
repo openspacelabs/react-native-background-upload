@@ -181,11 +181,12 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     coordinator.unacknowledgedEvents { resolve($0) }
   }
 
-  /// Android keeps a diagnostic log. iOS has none yet, so this is always empty.
+  /// The diagnostic records of this process, then none: the boot snapshot
+  /// with the leftover count, and warnings. Kept in memory only.
   @objc(takeDiagnostics:reject:)
   public func takeDiagnostics(_ resolve: @escaping RCTPromiseResolveBlock,
                               reject: @escaping RCTPromiseRejectBlock) {
-    resolve([])
+    coordinator.takeDiagnostics { resolve($0) }
   }
 
   @objc(ackEvents:resolve:reject:)

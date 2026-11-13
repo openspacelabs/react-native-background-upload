@@ -393,6 +393,11 @@ class QueueController(
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
    * 5. Schedule every queued entry, and the expiry wake of every parked one.
+   *
+   * Then it writes the boot snapshot, on every start. The leftover count
+   * in it runs after step 5, so it never delays queued work. It costs one
+   * directory listing and a few file checks per id directory, less than the
+   * entry reads above.
    */
   fun sweep() {
     val now = clock()
@@ -402,10 +407,12 @@ class QueueController(
     // toSchedule as the sweep found it, before toStopped or toResumed reset
     // state and updatedAt. The boot snapshot describes these.
     val found = mutableListOf<QueueEntry>()
+    val legacyIds = mutableListOf<String>()
     val s = settings.load()
     store.locked {
       val records = journal.unacknowledged().groupBy { it.id }
       for (e in store.all()) {
+        if (e.legacy) legacyIds += e.id
         if (e.legacy || isWorkerRunning(e.id)) continue
         val own = records[e.id].orEmpty().filter { it.generation == e.generation }
         if (e.isLive) {
@@ -452,9 +459,14 @@ class QueueController(
     val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
     toForget.forEach { scheduler.cancel(it) }
     toSchedule.forEach { scheduleRun(it, keepWake = true) }
-    if (toSchedule.isNotEmpty() || !runs.isNullOrEmpty()) {
-      Diag.info(BootSnapshot.MESSAGE, BootSnapshot.of(found, runs, now))
-    }
+    // Every start, even an idle one: a v9 leftover count of zero is a value
+    // the app reports. It replaces a snapshot JS has not taken yet, so
+    // launches with no takeDiagnostics() do not push out real warnings.
+    Diag.info(
+      BootSnapshot.MESSAGE,
+      BootSnapshot.of(found, runs, now, store.countLeftovers(legacyIds)),
+      replaceUntaken = true,
+    )
     changed.forEach { events.state(it.toRow()) }
   }
 

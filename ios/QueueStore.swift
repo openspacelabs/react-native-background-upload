@@ -88,13 +88,115 @@ final class QueueStore {
   /// (the only copy of the caller's bytes). A directory with an
   /// `entry.json`, readable or not, is kept. The empty id names the store
   /// root, so it deletes nothing.
-  func removeUnowned(_ id: String) {
-    guard !id.isEmpty else { return }
-    queue.sync {
+  /// Returns the error of a delete that failed.
+  @discardableResult
+  func removeUnowned(_ id: String) -> Error? {
+    guard !id.isEmpty else { return nil }
+    return queue.sync {
       let d = dir(id)
-      guard FileIO.exists(d), !FileIO.exists(d.appendingPathComponent(Self.entryName)) else { return }
-      _ = try? FileManager.default.removeItem(at: d)
+      guard FileIO.exists(d), Self.isUnowned(d) else { return nil }
+      do {
+        try FileManager.default.removeItem(at: d)
+        return nil
+      } catch {
+        return error
+      }
     }
+  }
+
+  /// The most unowned v9 ids one count lists. The count itself stays exact.
+  static let maxUnownedIds = 100
+
+  /// The id whose `dir(_:)` is named `name`, or nil when no id encodes to it.
+  func id(forDirectoryName name: String) -> String? {
+    var b64 = name.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    while b64.count % 4 != 0 { b64 += "=" }
+    guard let data = Data(base64Encoded: b64), let id = String(data: data, encoding: .utf8),
+          dir(id).lastPathComponent == name else { return nil }
+    return id
+  }
+
+  /// A directory that `removeUnowned` deletes: it holds no `entry.json`.
+  private static func isUnowned(_ d: URL) -> Bool {
+    !FileIO.exists(d.appendingPathComponent(entryName))
+  }
+
+  /// Test seam: runs before the count lists an unowned directory.
+  var beforeCountListing: ((URL) -> Void)?
+
+  /// Counts what no v10 entry owns, for the boot snapshot. Only directories
+  /// that `removeUnowned` would delete (no `entry.json`, not empty) count:
+  /// - v9: the directory holds `manifest.json` or a file named exactly
+  ///   `blob` (v10 names its blobs `blob-<uuid>`). Its id, decoded from the
+  ///   directory name, goes in unownedIds, sorted, at most `maxUnownedIds`.
+  ///   A name that decodes to no id is a warning; the directory still counts;
+  /// - orphan: any other, such as `body-<uuid>`, `blob-<uuid>` or a `.tmp`.
+  /// Each legacy row in `legacyIds` counts once, and the v9 manifest and
+  /// blob it keeps count as legacy bytes. A legacy directory has its
+  /// `entry.json`, so it is never an unowned upload too. Hidden directories
+  /// (a `.forget-` set aside by a cancel) are skipped.
+  ///
+  /// Lists directories and reads file sizes only. It opens no file and
+  /// changes nothing. It does not run on `queue`, so store calls do not
+  /// wait; a directory that changes during the count, such as one an
+  /// enqueue is staging, can be counted either way. An error goes in
+  /// `warnings`, and the count goes on.
+  func countLeftovers(legacyIds: [String]) -> (Leftovers, warnings: [(message: String, error: Error?)]) {
+    var found = Leftovers()
+    found.v9.legacyRows = legacyIds.count
+    var warnings: [(message: String, error: Error?)] = []
+    var ids: [String] = []
+    let fm = FileManager.default
+    let dirs: [URL]
+    do {
+      dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                        options: [.skipsHiddenFiles])
+    } catch {
+      warnings.append(("leftover count: could not list the queue directory", error))
+      dirs = []
+    }
+    for d in dirs where (try? d.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && Self.isUnowned(d) {
+      beforeCountListing?(d)
+      let files: [URL]
+      do {
+        files = try fm.contentsOfDirectory(at: d, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+      } catch {
+        // Gone since the root listing (a cancel or a forget) is not an error.
+        if FileIO.exists(d) {
+          warnings.append(("leftover count: could not list \(d.lastPathComponent)", error))
+        }
+        continue
+      }
+      guard !files.isEmpty else { continue }
+      let size = files.reduce(0) { $0 + (Self.regularFileSize($1) ?? 0) }
+      let names = Set(files.map(\.lastPathComponent))
+      if names.contains(Self.manifestName) || names.contains(ChunkedManifestV9.blobName) {
+        found.v9.unownedUploads += 1
+        found.v9.unownedBytes += size
+        if let id = id(forDirectoryName: d.lastPathComponent) {
+          ids.append(id)
+        } else {
+          warnings.append(("leftover count: no id encodes to the directory \(d.lastPathComponent)", nil))
+        }
+      } else {
+        found.orphans.dirs += 1
+        found.orphans.bytes += size
+      }
+    }
+    // A legacy id with no entry file was counted above, as the scan found it.
+    for id in legacyIds where !Self.isUnowned(dir(id)) {
+      found.v9.legacyBytes += [fileURL(id, Self.manifestName), fileURL(id, ChunkedManifestV9.blobName)]
+        .compactMap(Self.regularFileSize).reduce(0, +)
+    }
+    found.v9.unownedIds = Array(ids.sorted().prefix(Self.maxUnownedIds))
+    return (found, warnings)
+  }
+
+  /// The size of a regular file, or nil for anything else or a failed read.
+  private static func regularFileSize(_ url: URL) -> Int64? {
+    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          values.isRegularFile == true else { return nil }
+    return Int64(values.fileSize ?? 0)
   }
 
   // MARK: - Forget in steps (cancel on a settled entry)
