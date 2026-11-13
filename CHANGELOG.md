@@ -15,6 +15,20 @@ the standard table decides those first. The defaults are unchanged.
 `configure()` now checks every option, `retry` included the way `mutate()`
 does, before it changes any setting.
 
+`cancel(id)` on an id with no row now deletes the id's directory when it
+holds no entry file. A v9 chunked upload that was still running at the
+upgrade got no legacy row, so its manifest and blob could never be released.
+Before, `cancel()` on such an id did nothing. The same cancel also discards
+a chunked file the library kept after an enqueue that rejected `E_STORAGE`.
+A delete that fails is reported through `takeDiagnostics()` on Android.
+
+A same-id `mutate()` over a legacy row whose v9 manifest could not be read
+now runs over the kept v9 blob. Before, it ignored the blob and failed with
+`E_FILE_MISSING` once the caller's source was gone. A caller file that exists
+still wins. A plan that does not tile the blob rejects `E_INVALID`, as for
+any chunked body; before, that case was `E_FILE_MISSING` too. Fixed on
+Android and iOS.
+
 iOS no longer deletes a chunked upload's file when `enqueue` cannot save the
 entry, for example on a full disk. The library had already moved the
 caller's file into its queue, so this deleted the only copy. The file now

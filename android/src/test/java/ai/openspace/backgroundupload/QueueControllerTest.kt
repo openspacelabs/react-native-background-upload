@@ -287,6 +287,64 @@ class QueueControllerTest {
     assertEquals(0, e.bytesSent)
   }
 
+  @Test
+  fun `a same-id enqueue over a legacy row with an unreadable manifest runs over the v9 blob`() {
+    val dir = store.entryDir("e1").apply { mkdirs() }
+    File(dir, "blob").writeBytes(ByteArray(20))
+    File(dir, "manifest.json").writeText("""{"id":"e1","parts":[""")
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = "/gone.bin", parts = listOf(part(0, 10), part(10, 20)))))
+    val e = store.load("e1")!!
+    assertFalse(e.legacy)
+    assertEquals(2, e.generation)
+    assertEquals("blob", e.body!!.fileName)
+    assertTrue(e.descriptor!!.parts!!.none { it.accepted })
+    assertEquals(0, e.bytesSent)
+    assertEquals(setOf("entry.json", "blob"), dirFiles()) // the manifest is pruned
+  }
+
+  /** A legacy row whose v9 manifest can not be read, over a v9 blob of 20 zero bytes. */
+  private fun legacyRowOverV9Blob(): File {
+    val dir = store.entryDir("e1").apply { mkdirs() }
+    File(dir, "blob").writeBytes(ByteArray(20))
+    File(dir, "manifest.json").writeText("""{"id":"e1","parts":[""")
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    return dir
+  }
+
+  @Test
+  fun `a same-id plan that does not tile the v9 blob of a legacy row rejects E_INVALID`() {
+    val dir = legacyRowOverV9Blob()
+    val e = assertThrows(QueueException::class.java) {
+      controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = "/gone.bin", parts = listOf(part(0, 10), part(10, 30)))))
+    }
+    assertEquals(QueueException.E_INVALID, e.code)
+    assertTrue(store.load("e1")!!.legacy)
+    assertEquals(20, File(dir, "blob").length())
+  }
+
+  @Test
+  fun `a caller file that exists wins over the v9 blob of a legacy row`() {
+    legacyRowOverV9Blob()
+    val src = source("new.bin", 30)
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = src.path, parts = listOf(part(0, 15), part(15, 30)))))
+    val e = store.load("e1")!!
+    assertFalse(e.legacy)
+    val body = store.bodyFile(e)!!
+    assertEquals(30, body.length())
+    assertArrayEquals(ByteArray(30) { it.toByte() }, body.readBytes())
+  }
+
+  @Test
+  fun `a same-id enqueue over a legacy row with no blob and a missing file rejects E_FILE_MISSING`() {
+    store.save(LegacyImport.legacyRow(LegacyImport.V9Entry("x", "e1", "error", 5))!!)
+    val e = assertThrows(QueueException::class.java) {
+      controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = "/gone.bin", parts = listOf(part(0, 20)))))
+    }
+    assertEquals(QueueException.E_FILE_MISSING, e.code)
+    assertTrue(store.load("e1")!!.legacy)
+  }
+
   // MARK: - chunked replace (a present file wins over the old blob)
 
   private fun chunkedErrorEntry(): File {
@@ -559,6 +617,54 @@ class QueueControllerTest {
   @Test
   fun `cancel of an unknown id is a no-op`() {
     controller.cancel("nope")
+    assertEquals(emptyList<String>(), events.log)
+    assertFalse(store.entryDir("nope").exists())
+  }
+
+  @Test
+  fun `cancel of an id with only v9 files deletes its directory`() {
+    val dir = v9Dir("cap", v9Parts, 20)
+    controller.cancel("cap")
+    assertFalse(dir.exists())
+    assertEquals(emptyList<String>(), events.log)
+    assertTrue(journal.unacknowledged().isEmpty())
+  }
+
+  @Test
+  fun `cancel of an id with only a v9 blob deletes its directory`() {
+    val dir = store.entryDir("cap").apply { mkdirs() }
+    File(dir, "blob").writeBytes(ByteArray(20))
+    controller.cancel("cap")
+    assertFalse(dir.exists())
+  }
+
+  @Test
+  fun `cancel of an id with only a staged v10 body and no entry file deletes its directory`() {
+    val dir = store.entryDir("cap").apply { mkdirs() }
+    File(dir, "body-1.json").writeText("{}")
+    controller.cancel("cap")
+    assertFalse(dir.exists())
+  }
+
+  @Test
+  fun `cancel keeps a directory whose entry file can not be read`() {
+    val dir = v9Dir("cap", v9Parts, 20)
+    File(dir, "entry.json").writeText("{")
+    controller.cancel("cap")
+    assertEquals(setOf("entry.json", "manifest.json", "blob"), dirFiles("cap"))
+  }
+
+  @Test
+  fun `cancel of an empty id deletes nothing in the store`() {
+    controller.enqueue(parsed())
+    events.log.clear()
+    val dir = store.entryDir("cap").apply { mkdirs() }
+    File(dir, "blob").writeBytes(ByteArray(20))
+    controller.setWifiOnly(true)
+    controller.cancel("")
+    assertNotNull(store.load("e1"))
+    assertTrue(File(dir, "blob").exists())
+    assertTrue(File(root, "settings.json").exists())
     assertEquals(emptyList<String>(), events.log)
   }
 
