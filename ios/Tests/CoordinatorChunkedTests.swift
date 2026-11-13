@@ -222,6 +222,23 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(h.entry("cap")?.state, .running)
   }
 
+  func testARefusedDelayedPartTaskIsNoAttemptAndWaitsOutItsBackoff() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
+    h.complete(try XCTUnwrap(partTask(0)), status: 503)
+    let delayed = try XCTUnwrap(partTask(0))
+    XCTAssertNotNil(delayed.beginAt)
+    let attempts = h.sink.attempts.count
+    // nsurlsessiond refused the connection: -1 at once, no response, no byte.
+    h.complete(delayed, error: NSError(domain: NSURLErrorDomain, code: NSURLErrorUnknown))
+    XCTAssertEqual(h.sink.attempts.count, attempts, "no attempt event")
+    XCTAssertEqual(h.entry("cap")?.parts[0].rejections, 1, "no rejection")
+    XCTAssertNil(partTask(0), "no task before the begin date")
+    h.advance(1_000)
+    let again = try XCTUnwrap(partTask(0))
+    XCTAssertNil(again.beginAt)
+    XCTAssertEqual(h.entry("cap")?.parts[0].rejections, 1)
+  }
+
   func testRowShowsNextAttemptAtWhenEveryPartWaits() throws {
     _ = try h.enqueue(h.chunkedRaw(id: "cap", size: 30, parts: 3)).get()
     h.complete(try XCTUnwrap(partTask(0)), status: 503)
