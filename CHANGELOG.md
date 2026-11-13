@@ -21,6 +21,18 @@ caller's file into its queue, so this deleted the only copy. The file now
 stays, `enqueue` still rejects `E_STORAGE`, and a retry with the same id
 uses it, as Android already did.
 
+iOS now waits out a retry's backoff when the system refuses the retry
+before it starts. A retry is a background task with a begin date, so when
+`nsurlsessiond` refused the app's connection, the task failed at once, the
+next retry was created at once, and that one failed too: hundreds of
+attempts a second, until the app used all its CPU and gigabytes of memory.
+A delayed task that ends before its begin date with no response and no
+bytes sent never reached the server. It no longer counts as an attempt or
+emits an event; the rest of the delay is waited out in the app and the
+attempt is sent again under the same id. A chunked part does the same. As a
+backstop, a retry of a simple request never starts sooner than the base
+backoff after the previous attempt started.
+
 ## 11.1.0
 
 Added `takeDiagnostics()`. On Android it returns the module's recent
