@@ -19,6 +19,12 @@ extension QueueCoordinator {
   /// cancelled before it sent a body byte (replaceBackgroundTasks). It keeps
   /// the ordinal and request id whether or not the attempt was waiting.
   func issue(_ id: String, delayMs: Int? = nil, advanceAttempt: Bool = true, replacing: Bool = false) {
+    Signpost.interval("issue", id) {
+      issueLocked(id, delayMs: delayMs, advanceAttempt: advanceAttempt, replacing: replacing)
+    }
+  }
+
+  private func issueLocked(_ id: String, delayMs: Int?, advanceAttempt: Bool, replacing: Bool) {
     guard var e = index.entry(id), !e.legacy, e.state == .queued,
           !settings.isPaused(e.key) else { return }
     let t = now()
@@ -88,8 +94,7 @@ extension QueueCoordinator {
         buildRequest(e, url: url, requestId: requestId), fromFile: body,
         wifiOnly: settings.wifiOnly(e.wifiOnly),
         description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
-        beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) },
-        beforeResume: { key in self.taskMap.set(meta, forKey: key) })
+        beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) })
     } catch {
       // The session could not open the body. Gone since the check above: it
       // can never send. Still there: it is unreadable for now (data
@@ -105,6 +110,8 @@ extension QueueCoordinator {
       deferIssue(waiting, delayMs: delayMs)
       return
     }
+    taskMap.set(meta, forKey: task.key)
+    task.resume()
     liveTasks[task.key] = (id, task)
     attemptStarts[id] = beginAt ?? t
     throttle.reset(id)

@@ -454,11 +454,17 @@ final class QueueStore {
       var remaining = end - start
       while remaining > 0 {
         let chunk = Int(min(remaining, 1 << 20))
-        guard let data = try reader.read(upToCount: chunk), !data.isEmpty else {
-          throw FileIO.IOError(message: "short read building part \(index)")
+        // One pool per 1 MiB read, so each read buffer is freed before the
+        // next. This block runs inside queue.sync, on the caller's thread,
+        // so a queue-level autoreleaseFrequency would not cover it.
+        let copied = try autoreleasepool { () throws -> Int in
+          guard let data = try reader.read(upToCount: chunk), !data.isEmpty else {
+            throw FileIO.IOError(message: "short read building part \(index)")
+          }
+          try writer.write(contentsOf: data)
+          return data.count
         }
-        try writer.write(contentsOf: data)
-        remaining -= Int64(data.count)
+        remaining -= Int64(copied)
       }
       try FileIO.rename(tmp, onto: dest)
       return dest

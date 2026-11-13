@@ -8,6 +8,10 @@ extension QueueCoordinator {
 
   /// Returns the id, and whether to issue it after the resolve.
   func enqueueLocked(_ raw: [String: Any]) throws -> (id: String, issue: Bool) {
+    try Signpost.interval("enqueue", raw["id"] as? String ?? "") { try enqueueRaw(raw) }
+  }
+
+  private func enqueueRaw(_ raw: [String: Any]) throws -> (id: String, issue: Bool) {
     let p: ParsedEnqueue
     do {
       p = try EnqueueParser.parse(raw)

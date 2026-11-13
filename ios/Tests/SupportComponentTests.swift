@@ -200,6 +200,21 @@ final class TaskMapTests: XCTestCase {
     XCTAssertEqual(reread.meta(forKey: "s:2"), .init(id: "b", purpose: .superseded), "a key with no meta gets one")
   }
 
+  func testSetManyEntriesInOneWrite() {
+    let url = makeTempDir().appendingPathComponent("map.json")
+    let map = TaskMap(fileURL: url)
+    let a = TaskMap.Meta(id: "a", partIndex: 0, incarnation: "i", attempt: 1, purpose: .attempt)
+    let b = TaskMap.Meta(id: "a", partIndex: 1, incarnation: "i", attempt: 2, purpose: .attempt)
+    let before = map.writeCount
+    map.set([(key: "s:1", meta: a), (key: "s:2", meta: b)])
+    XCTAssertEqual(map.writeCount - before, 1)
+    let reread = TaskMap(fileURL: url)
+    XCTAssertEqual(reread.meta(forKey: "s:1"), a)
+    XCTAssertEqual(reread.meta(forKey: "s:2"), b)
+    map.set([])
+    XCTAssertEqual(map.writeCount - before, 1, "nothing to write: no write")
+  }
+
   func testV9EntryDecodes() throws {
     let url = makeTempDir().appendingPathComponent("map.json")
     try Data(#"{"s:9":{"id":"old","acceptStatus":[409]},"s:10":{"id":"new","purpose":"future"}}"#.utf8).write(to: url)
@@ -230,6 +245,18 @@ final class ChunkedEngineTests: XCTestCase {
     XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [0, 1, 2, 3, 4], inFlight: [0, 1]), [2, 3, 4])
     XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [1, 2], inFlight: [0, 1, 2]), [])
     XCTAssertEqual(ChunkedEngine.indexesToEnqueue(pending: [3, 4], inFlight: [3]), [4], "never an in-flight index")
+  }
+
+  func testSliceTakesPartsUntilTheBudgetAndAtLeastOne() {
+    let mib: Int64 = 1 << 20
+    let size: (Int) -> Int64 = { $0 == 4 ? 8 * mib : 20 * mib }
+    XCTAssertEqual(ChunkedEngine.slice([0, 1, 2, 3, 4], budget: 32 * mib, size: size), [0, 1],
+                   "20 MiB parts: two reach 32 MiB")
+    XCTAssertEqual(ChunkedEngine.slice([3, 4], budget: 32 * mib, size: size), [3, 4])
+    XCTAssertEqual(ChunkedEngine.slice([2, 3], budget: 20 * mib, size: size), [2], "exactly the budget")
+    XCTAssertEqual(ChunkedEngine.slice([0, 1, 2], budget: 1, size: size), [0], "at least one part")
+    XCTAssertEqual(ChunkedEngine.slice([0, 1, 2], budget: .max, size: size), [0, 1, 2])
+    XCTAssertEqual(ChunkedEngine.slice([], budget: 32 * mib, size: size), [])
   }
 
   func testDescriptionsSurviveHostileIds() {

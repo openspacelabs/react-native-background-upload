@@ -63,6 +63,8 @@ final class FakeTask: UploadTask {
   var bytesSent: Int64 = 0
   var hasResponse = false
   private(set) var cancelled = false
+  private(set) var resumed = false
+  var onResume: ((FakeTask) -> Void)?
   let request: URLRequest
   let file: URL?
   let beginAt: Date?
@@ -83,6 +85,11 @@ final class FakeTask: UploadTask {
     isLive = false
   }
 
+  func resume() {
+    resumed = true
+    onResume?(self)
+  }
+
   func header(_ name: String) -> String? { request.value(forHTTPHeaderField: name) }
 }
 
@@ -100,14 +107,16 @@ final class FakeTransport: Transport {
   /// When set, upload calls it and throws what it returns: the session could
   /// not open the file. It may delete the file first, to race the check.
   var failUpload: ((URL) -> Error?)?
+  /// Called as each created task resumes.
+  var onResume: ((FakeTask) -> Void)?
 
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask {
+              beginAt: Date?) throws -> UploadTask {
     if let error = failUpload?(file) { throw error }
     let task = FakeTask(key: "\(wifiOnly ? "wifi" : "any"):\(Self.next)", description: description,
                         request: request, file: file, beginAt: beginAt, wifiOnly: wifiOnly)
     Self.next += 1
-    beforeResume(task.key)
+    task.onResume = { [weak self] in self?.onResume?($0) }
     created.append(task)
     return task
   }
@@ -156,6 +165,18 @@ final class Harness {
   var timers: [(delayMs: Int, block: () -> Void)] = []
   private(set) var coordinator: QueueCoordinator!
   let queue = DispatchQueue(label: "test.queue")
+  /// The part-slice budget in bytes. Set it small to build a plan in many
+  /// slices. Kept across relaunch().
+  var sliceBytes: Int64? {
+    didSet { applySliceHooks() }
+  }
+  /// When true, each queued part slice is held here instead of going on the
+  /// queue. Dropping them models a crash between slices. Kept across
+  /// relaunch().
+  var holdSlices = false {
+    didSet { applySliceHooks() }
+  }
+  private(set) var heldSlices: [() -> Void] = []
 
   init(root: URL = makeTempDir()) {
     self.root = root
@@ -173,6 +194,36 @@ final class Harness {
       store: store, journal: journal, taskMap: TaskMap(fileURL: taskMap.fileURL),
       transport: transport, sink: sink, queue: queue, now: { [unowned self] in self.clock },
       random: { 0.5 }, schedule: { [unowned self] ms, block in self.timers.append((ms, block)) })
+    heldSlices = []
+    applySliceHooks()
+  }
+
+  private func applySliceHooks() {
+    guard let coordinator else { return }
+    if let sliceBytes { coordinator.chunked.sliceBytes = sliceBytes }
+    coordinator.chunked.dispatchSlice = holdSlices ? { [unowned self] in self.heldSlices.append($0) } : nil
+  }
+
+  /// Runs the oldest held slice on the queue. Returns false when none is held.
+  @discardableResult
+  func runHeldSlice() -> Bool {
+    guard !heldSlices.isEmpty else { return false }
+    let block = heldSlices.removeFirst()
+    queue.sync { block() }
+    return true
+  }
+
+  /// Runs held slices until no slice is held.
+  func runHeldSlices() {
+    while runHeldSlice() {}
+  }
+
+  /// Puts the held slices on the queue, in order, without running them.
+  /// The slices they queue are held again.
+  func requeueHeldSlices() {
+    let blocks = heldSlices
+    heldSlices = []
+    blocks.forEach { queue.async(execute: $0) }
   }
 
   var map: TaskMap { coordinator.taskMap }
@@ -185,6 +236,11 @@ final class Harness {
   }
 
   func drain() { queue.sync {} }
+
+  /// Drains until no part slice is queued: every part build has finished.
+  func drainAll() {
+    repeat { drain() } while queue.sync { !coordinator.chunked.queuedSlices.isEmpty }
+  }
 
   /// Fires every timer that is due within `ms` (advancing the clock).
   func advance(_ ms: Double) {
