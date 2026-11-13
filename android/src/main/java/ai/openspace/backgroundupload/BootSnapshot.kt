@@ -6,7 +6,8 @@ package ai.openspace.backgroundupload
  * sweep changes them. Stale wakes show as delayed runs far in the future.
  * A queued or running entry with no run at all shows in entriesWithoutRun.
  * v9Leftovers counts the v9 work still on disk, and orphans the
- * directories with no entry file that are not v9, zeros included.
+ * directories with no entry file that are not v9: what the boot cleanup
+ * left, and what it deleted. Zeros included.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"

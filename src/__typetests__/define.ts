@@ -323,6 +323,8 @@ assertEqual<typeof orphaned, QueueOrphans | undefined>(true);
 if (orphaned) {
   expectType<number>(orphaned.dirs);
   expectType<number>(orphaned.bytes);
+  expectType<number>(orphaned.removedDirs);
+  expectType<number>(orphaned.removedBytes);
 }
 assertEqual<NonNullable<typeof record.data>['entries'], unknown>(true);
 const zero: Diagnostic = {
@@ -337,7 +339,7 @@ const zero: Diagnostic = {
       unownedBytes: 0,
       unownedIds: [],
     },
-    orphans: { dirs: 0, bytes: 0 },
+    orphans: { dirs: 0, bytes: 0, removedDirs: 0, removedBytes: 0 },
   },
 };
 expectType<Diagnostic>(zero);
@@ -357,6 +359,14 @@ const partialOrphans: Diagnostic = {
   data: { orphans: { dirs: 0 } },
 };
 expectType<Diagnostic>(partialOrphans);
+const orphansWithoutRemoved: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error orphans needs removedDirs and removedBytes
+  data: { orphans: { dirs: 0, bytes: 0 } },
+};
+expectType<Diagnostic>(orphansWithoutRemoved);
 const numericIds: Diagnostic = {
   at: 1,
   level: 'info',

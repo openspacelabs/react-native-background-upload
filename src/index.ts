@@ -234,7 +234,8 @@ export const createUploadClient = ({
    * The library's persisted diagnostic records, oldest first. Each call
    * returns the records since the last one, so report them where they can
    * be seen, such as an error tracker. A boot record (message 'boot
-   * sweep') has `v9Leftovers` and `orphans`, zeros included. Android adds
+   * sweep') has `v9Leftovers` and `orphans`, zeros included; `orphans`
+   * also says what the start-up cleanup deleted. Android adds
    * it at each module start and keeps the newest 50 records: native
    * warnings and errors, including ones from background runs with no JS,
    * and that record, which also describes the queue and its WorkManager

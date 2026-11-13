@@ -4,6 +4,8 @@ import android.content.Context
 import com.google.gson.Gson
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.util.Base64
 
 /**
@@ -31,6 +33,30 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     /** The v9 manifest and the tmp file of its atomic write. v10 writes neither. */
     val V9_MANIFEST_FILES = setOf(V9_MANIFEST_FILE, "manifest.tmp")
     const val BLOB_FILE = "blob"
+    /**
+     * The boot cleanup deletes an orphan directory only when its newest
+     * file, and the directory itself, changed longer ago than this. A guard
+     * against a staging path the name rules below do not know.
+     */
+    const val ORPHAN_MIN_AGE_MS = 24L * 60 * 60 * 1000
+
+    /**
+     * The files of an orphan that the boot cleanup may delete: copies whose
+     * source the caller still has, and the tmp files of their atomic writes.
+     * - `body-<gen>.json`, `body-<gen>.multipart`: written from the call
+     *   ([BodyStaging.stage]);
+     * - `file-<gen>`: a copy of the caller's file ([BodyStaging.copyFile]);
+     * - any of these plus `.tmp`: an atomic write that did not finish
+     *   ([AtomicFiles.tmpFor]).
+     * Never a chunked blob (`blob`, `blob-<gen>`): that file was moved in,
+     * so it can be the only copy, and a same-id enqueue adopts it. Never
+     * `entry.json.tmp`: after a crash it can be the only trace of an entry
+     * whose save renamed it but did not reach the disk, while its enqueue
+     * already resolved.
+     */
+    private val COPIED_BODY = Regex("""(body-\d+\.(json|multipart)|file-\d+)(\.tmp)?""")
+
+    fun isCopiedBodyFile(name: String): Boolean = COPIED_BODY.matches(name)
 
     private val gson = Gson()
 
@@ -145,6 +171,9 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
   /** A directory that [removeUnowned] deletes: it holds no `entry.json`. */
   private fun isUnowned(d: File) = d.isDirectory && !File(d, ENTRY_FILE).exists()
 
+  /** Test seam: runs before the cleanup checks an orphan directory. */
+  internal var beforeOrphanRemoval: (File) -> Unit = {}
+
   /** Test seam: runs before the count lists an unowned directory. */
   internal var beforeCountListing: (File) -> Unit = {}
 
@@ -174,6 +203,7 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     val v9Ids = mutableListOf<String>()
     var orphanDirs = 0
     var orphanBytes = 0L
+    val orphanList = mutableListOf<File>()
     try {
       val dirs = dir.listFiles()
       if (dirs == null) Diag.warn("leftover count: could not list the queue directory")
@@ -196,6 +226,7 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
         } else {
           orphanDirs++
           orphanBytes += size
+          orphanList += d
         }
       }
       legacyIds.forEach { id ->
@@ -211,7 +242,73 @@ class QueueStore(private val dir: File, private val index: RequestIndex = Reques
     return Leftovers(
       V9Leftovers(legacyIds.size, legacyBytes, v9Dirs, v9Bytes, v9Ids.sorted().take(MAX_UNOWNED_IDS)),
       Orphans(orphanDirs, orphanBytes),
+      orphanList,
     )
+  }
+
+  /**
+   * The boot cleanup. Deletes each directory of [dirs] (the orphans that
+   * [countLeftovers] listed) when all of these hold, checked under the
+   * store lock just before the delete:
+   * - it has no `entry.json`;
+   * - every entry in it is a regular file that [isCopiedBodyFile] accepts.
+   *   So a v9 manifest, a chunked blob, `entry.json.tmp`, an unknown file,
+   *   a symbolic link or a subdirectory keeps the whole directory;
+   * - its newest file, and the directory itself, changed more than
+   *   [ORPHAN_MIN_AGE_MS] before [now].
+   * The caller runs it where no enqueue can be staging (the queue executor).
+   * A failed delete is a warning; the other directories go on. It never
+   * throws. Returns what it deleted: directories fully gone, and the bytes
+   * of every file deleted.
+   */
+  fun removeOrphans(dirs: List<File>, now: Long): Orphans {
+    var removedDirs = 0
+    var removedBytes = 0L
+    for (d in dirs) {
+      try {
+        beforeOrphanRemoval(d)
+        val (bytes, gone) = removeOrphan(d, now) ?: continue
+        removedBytes += bytes
+        if (gone) removedDirs++
+      } catch (error: Exception) {
+        Diag.warn("orphan cleanup: could not check ${d.name}", error)
+      }
+    }
+    return Orphans(0, 0, removedDirs, removedBytes)
+  }
+
+  /** One directory of [removeOrphans]. Null when it is kept untouched; else the bytes freed and whether it is gone. */
+  @Synchronized
+  private fun removeOrphan(d: File, now: Long): Pair<Long, Boolean>? {
+    if (!d.isDirectory || !isUnowned(d)) return null
+    val files = d.listFiles() ?: return null
+    if (files.isEmpty()) return null
+    val deletable = files.all {
+      Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) && isCopiedBodyFile(it.name)
+    }
+    if (!deletable) return null
+    // lastModified() is 0 when it can not be read: then the age is unknown.
+    val times = files.map { it.lastModified() } + d.lastModified()
+    if (times.any { it <= 0L } || now - times.max() <= ORPHAN_MIN_AGE_MS) return null
+    var freed = 0L
+    for (f in files) {
+      val size = f.length()
+      try {
+        Files.delete(f.toPath())
+      } catch (error: IOException) {
+        Diag.warn("orphan cleanup: could not delete ${d.name}/${f.name}", error)
+        return freed to false
+      }
+      freed += size
+    }
+    try {
+      // Deletes an empty directory only.
+      Files.delete(d.toPath())
+    } catch (error: IOException) {
+      Diag.warn("orphan cleanup: could not delete ${d.name}", error)
+      return freed to false
+    }
+    return freed to true
   }
 
   /** Every v10 entry. A directory with only a v9 manifest is not a row. */
@@ -311,13 +408,31 @@ data class V9Leftovers(
   )
 }
 
-/** Directories with no entry file that are not v9: the library's own leftovers. */
-data class Orphans(val dirs: Int, val bytes: Long) {
-  fun toMap(): Map<String, Any?> = mapOf("dirs" to dirs, "bytes" to bytes)
+/**
+ * Directories with no entry file that are not v9: the library's own
+ * leftovers. [dirs] and [bytes] are what is left; [removedDirs] and
+ * [removedBytes] are what the boot cleanup deleted.
+ */
+data class Orphans(val dirs: Int, val bytes: Long, val removedDirs: Int = 0, val removedBytes: Long = 0) {
+  fun toMap(): Map<String, Any?> =
+    mapOf("dirs" to dirs, "bytes" to bytes, "removedDirs" to removedDirs, "removedBytes" to removedBytes)
 }
 
-/** What [QueueStore.countLeftovers] found. */
-data class Leftovers(val v9: V9Leftovers, val orphans: Orphans)
+/**
+ * What [QueueStore.countLeftovers] found. [orphanDirs]: the orphan
+ * directories it counted, for [QueueStore.removeOrphans].
+ */
+data class Leftovers(val v9: V9Leftovers, val orphans: Orphans, val orphanDirs: List<File> = emptyList()) {
+  /** The counts after the cleanup deleted [removed]: what is left, and what went. */
+  fun afterCleanup(removed: Orphans): Leftovers = copy(
+    orphans = Orphans(
+      (orphans.dirs - removed.removedDirs).coerceAtLeast(0),
+      (orphans.bytes - removed.removedBytes).coerceAtLeast(0),
+      removed.removedDirs,
+      removed.removedBytes,
+    ),
+  )
+}
 
 /**
  * A v9 chunked manifest, only the fields v10 reads. The field names are the

@@ -1,5 +1,25 @@
 ## Unreleased
 
+At each start the library now deletes orphan directories that it can prove
+are safe to delete. An orphan is a directory with no entry file that is not
+v9, left by a crash between staging a body and saving its entry, or by an
+enqueue whose entry save failed. The library deletes one only when every
+file in it is a request body it copied or wrote (or the temporary file of
+that write), and its newest file and the directory are more than 24 hours
+old. It never deletes a v9 directory, a chunked file it moved in from the
+caller (that can be the only copy, and a same-id `mutate()` still uses it),
+a directory with `entry.json.tmp` (after a crash it can hold a request whose
+save did not reach the disk), or a directory with any other file, a
+symbolic link or a subdirectory. The cleanup runs after
+queued work is scheduled, in the same serial order as enqueue, and checks for
+the entry file again just before each delete.
+
+The boot record's `data.orphans` now has `removedDirs` and `removedBytes`:
+what the cleanup deleted. `dirs` and `bytes` now mean what is left after
+it, not everything the count found. A failed delete is a `warn` record; the cleanup goes on with the next
+directory. The fake native module's `seedBootSnapshot()` fills the new
+fields with 0.
+
 `takeDiagnostics()` now reports how much v9 work is still on the device. The
 boot record (`info`, message `boot sweep`) has `data.v9Leftovers` with
 `legacyRows`, `legacyBytes`, `unownedUploads` and `unownedBytes`. The counts
@@ -8,7 +28,7 @@ left. `unownedIds` lists the ids of the v9 uploads with no row, at most 100,
 so the app can cancel the ones it will not send again. It also has `data.orphans` (`{ dirs, bytes }`): directories with no
 entry file that are not v9. The library counts these when the module
 starts, after queued work is scheduled, from a directory listing and file
-sizes. It deletes nothing.
+sizes.
 
 On Android the boot record is now written at every module start, even an
 idle one, so zero is reported. Before, it was skipped when nothing was
@@ -18,7 +38,7 @@ WorkManager-run detail is dropped with it.
 
 iOS used to return an empty list. It now keeps up to 50 records in memory:
 one boot record per process, with `v9Leftovers` and `orphans` only, the
-warnings of its count, and a warning when `cancel(id)` cannot delete an
+warnings of its count and of the orphan cleanup, and a warning when `cancel(id)` cannot delete an
 unowned directory. The fake native module has `seedBootSnapshot()`.
 
 Added `retry.transient`: rules that make a 4xx response transient when its
