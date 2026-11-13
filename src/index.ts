@@ -225,7 +225,9 @@ export const createUploadClient = ({
   /**
    * On a live entry: settles it 'cancelled' with reason 'user', then forgets
    * it after the ack. On a settled entry: forgets it now: row, bytes, and its
-   * unacknowledged outcomes.
+   * unacknowledged outcomes. On an id with no row: deletes the id's directory
+   * when it has no entry file: a v9 upload's bytes, or a chunked file kept
+   * after an enqueue that rejected E_STORAGE.
    */
   const cancel = async (id: string): Promise<void> => {
     // On a settled entry native also drops the unacknowledged outcomes, so
@@ -284,10 +286,13 @@ export const createUploadClient = ({
   /**
    * The library's persisted diagnostic records, oldest first. Each call
    * returns the records since the last one, so report them where they can
-   * be seen, such as an error tracker. Android keeps the newest 50: native
+   * be seen, such as an error tracker. A boot record (message 'boot
+   * sweep') has `v9Leftovers` and `orphans`, zeros included; `orphans`
+   * also says what the start-up cleanup deleted. Android adds
+   * it at each module start and keeps the newest 50 records: native
    * warnings and errors, including ones from background runs with no JS,
-   * and an 'info' record per launch that describes the queue and its
-   * WorkManager runs. iOS returns an empty list.
+   * and that record, which also describes the queue and its WorkManager
+   * runs. iOS adds it once per process and keeps its records in memory.
    */
   const takeDiagnostics = async (): Promise<Diagnostic[]> =>
     (await native.takeDiagnostics()) as Diagnostic[];
