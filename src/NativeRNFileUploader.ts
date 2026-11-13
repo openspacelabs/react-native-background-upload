@@ -77,10 +77,10 @@ export interface Spec extends TurboModule {
   // Live entry: journal 'cancelled' (user), forget after its ack. The
   // journaled record is the cancel: it resolves even if the entry save then
   // fails, and the record is applied later. Settled entry: forget now: row,
-  // bytes, and its unacknowledged outcomes. Unknown id: resolve, no-op. If
-  // the journal (live entry) or the store (settled entry) cannot be written,
-  // cancel rejects with E_STORAGE and changes nothing; the caller may call
-  // again.
+  // bytes, and its unacknowledged outcomes. No row: delete the id's
+  // directory when it has no entry file, then resolve. If the journal (live
+  // entry) or the store (settled entry) cannot be written, cancel rejects
+  // with E_STORAGE and changes nothing; the caller may call again.
   cancel(id: string): Promise<void>;
   // The queue's Wi-Fi setting. Persisted natively. Applies to queued and
   // future entries whose descriptor has no wifiOnly. An entry with
@@ -112,10 +112,11 @@ export interface Spec extends TurboModule {
   ackEvents(ids: string[]): Promise<void>;
   // The persisted diagnostic records, oldest first, in the ./types
   // Diagnostic shape: { at, level, message, error?, data? }. Native clears
-  // them as it returns them. Android keeps the newest 50: its warnings and
-  // errors, including ones from headless workers, and one 'info' record per
-  // boot sweep with the queue and its WorkManager runs. iOS resolves an
-  // empty list.
+  // them as it returns them. Both add an 'info' boot record with
+  // data.v9Leftovers and data.orphans: Android at each module start, iOS
+  // once per process. Android keeps the newest 50: its warnings and errors,
+  // including ones from headless workers, and that record, which also has
+  // the queue and its WorkManager runs. iOS keeps the newest 50 in memory.
   takeDiagnostics(): Promise<CodegenTypes.UnsafeObject[]>;
 
   // Events. state carries a full RequestRow per transition. progress is

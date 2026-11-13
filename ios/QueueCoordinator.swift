@@ -93,6 +93,9 @@ final class QueueCoordinator {
   /// Every task this process created or adopted, by TaskMap key.
   var liveTasks: [String: (id: String, task: UploadTask)] = [:]
   var expiryTokens: [String: UUID] = [:]
+  /// When each simple entry's latest task begins (its begin date, or when it
+  /// was made), by id. In memory only: the floor in scheduleRetry.
+  var attemptStarts: [String: Double] = [:]
   /// Bumped by scheduleReplace: only the latest scheduled replace runs.
   var replaceGeneration = 0
   /// Open grace waits (a completion that may still replay), by name. While
@@ -105,6 +108,8 @@ final class QueueCoordinator {
   /// entry still names them.
   var pendingJournal: [String: JournaledEvent] = [:]
   lazy var chunked = ChunkedCoordinator(self)
+  /// What takeDiagnostics() returns. Set in init, with the clock.
+  let diagnostics: DiagnosticLog
 
   init(store: QueueStore, journal: EventJournal, taskMap: TaskMap, transport: Transport,
        sink: EventSink?, queue: DispatchQueue = DispatchQueue(label: QueueCoordinator.queueLabel),
@@ -118,6 +123,7 @@ final class QueueCoordinator {
     self.transport = transport
     self.sink = sink
     self.now = now
+    diagnostics = DiagnosticLog(clock: now)
     self.random = random
     self.schedule = schedule ?? { ms, block in
       queue.asyncAfter(deadline: .now() + .milliseconds(ms), execute: block)
@@ -135,9 +141,48 @@ final class QueueCoordinator {
     settings.headerGeneration = max(settings.headerGeneration,
                                     index.entries().map(\.headerGeneration).max() ?? 0,
                                     taskMap.maxHeaderGeneration() ?? 0)
+    recordBootSnapshot()
+  }
+
+  /// One boot snapshot per process, after the import so its legacy rows
+  /// count. The disk count runs on the diagnostic log's queue, so it delays
+  /// neither the thread that creates the coordinator nor `queue`.
+  ///
+  /// Then the orphan cleanup (`QueueStore.removeOrphans`) runs on `queue`,
+  /// over the orphans the count listed, and only when there are any. On
+  /// `queue`, no enqueue is between staging its body and saving its entry:
+  /// enqueue runs there from start to end. The cleanup is one block on
+  /// `queue`, so it runs before or after reconcile, never during it. The
+  /// snapshot reports what is left and what it deleted.
+  private func recordBootSnapshot() {
+    let legacyIds = index.entries().filter(\.legacy).map(\.id)
+    let store = self.store
+    let log = diagnostics
+    let queue = self.queue
+    // The boot time, read here: the count must not call `now` off this thread.
+    let at = now()
+    log.perform {
+      let (found, warnings) = store.countLeftovers(legacyIds: legacyIds)
+      for w in warnings { log.warn(w.message, error: w.error, at: at) }
+      var orphans = found.orphans
+      if !found.orphanDirs.isEmpty {
+        // The log's queue waits for `queue`; `queue` never waits for it.
+        let removed = queue.sync { store.removeOrphans(found.orphanDirs, now: at) }
+        for w in removed.warnings { log.warn(w.message, error: w.error, at: at) }
+        orphans = orphans.afterCleanup(removedDirs: removed.removedDirs, removedBytes: removed.removedBytes)
+      }
+      log.info(DiagnosticLog.bootMessage,
+               data: ["v9Leftovers": found.v9.dictionary, "orphans": orphans.dictionary], at: at)
+    }
   }
 
   // MARK: - Module methods
+
+  /// The diagnostic records, then none. Waits for the boot count, off the
+  /// coordinator queue.
+  func takeDiagnostics(_ completion: @escaping ([[String: Any]]) -> Void) {
+    diagnostics.take(completion)
+  }
 
   func configure(_ options: [String: Any]) {
     queue.async {
@@ -246,13 +291,19 @@ final class QueueCoordinator {
   }
 
   /// Live entry: journal 'cancelled' (user); forgotten after its ack.
-  /// Settled entry: forgotten now, with its unacked outcomes. Unknown: no-op.
+  /// Settled entry: forgotten now, with its unacked outcomes. No row: the id
+  /// directory is deleted when it has no entry file.
   /// When the journal or the store cannot be written, rejects E_STORAGE and
   /// changes nothing: the entry keeps running (or stays settled), and JS may
   /// call again.
   func cancel(_ id: String, resolve: @escaping () -> Void, reject: @escaping (String, String) -> Void) {
     queue.async {
-      guard let e = self.index.entry(id) else { return resolve() }
+      guard let e = self.index.entry(id) else {
+        if let error = self.store.removeUnowned(id) {
+          self.diagnostics.warn("could not delete the unowned files of '\(id)'", error: error)
+        }
+        return resolve()
+      }
       if e.isLive && !e.legacy {
         do {
           try self.settle(id, .cancelled(reason: "user"), requireJournal: true)

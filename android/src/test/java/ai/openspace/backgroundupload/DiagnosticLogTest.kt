@@ -89,4 +89,25 @@ class DiagnosticLogTest {
     Diag.log = null
     Diag.error("nowhere to write")
   }
+
+  @Test
+  fun `replace keeps one untaken record of a message and the other records`() {
+    val log = log()
+    log.append(record(1))
+    repeat(DiagnosticLog.MAX_RECORDS + 10) {
+      log.replace(DiagnosticLog.Record(at = it.toLong(), level = DiagnosticLog.INFO, message = "boot sweep"))
+    }
+    val records = log.drain()
+    assertEquals(listOf("m1", "boot sweep"), records.map { it.message })
+    assertEquals((DiagnosticLog.MAX_RECORDS + 9).toLong(), records.last().at)
+  }
+
+  @Test
+  fun `replace after a drain adds the record again`() {
+    val log = log()
+    log.replace(DiagnosticLog.Record(at = 1, level = DiagnosticLog.INFO, message = "boot sweep"))
+    log.drain()
+    log.replace(DiagnosticLog.Record(at = 2, level = DiagnosticLog.INFO, message = "boot sweep"))
+    assertEquals(listOf(2L), log.drain().map { it.at })
+  }
 }

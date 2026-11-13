@@ -114,8 +114,13 @@ class QueueController(
       }
       EnqueueRules.Action.Replace -> {
         val old = existing!!
-        // Different parts: a present caller file wins; the old blob is the fallback.
-        val ownedBlob = if (old.body?.kind == StagedBody.CHUNKED) store.bodyFile(old) else null
+        // Different parts: a present caller file wins; the old blob is the
+        // fallback. A legacy row has no body, so its fallback is the v9 blob.
+        val ownedBlob = when {
+          old.legacy -> store.blobFile(p.id)
+          old.body?.kind == StagedBody.CHUNKED -> store.bodyFile(old)
+          else -> null
+        }
         val staged = preStaged(old.generation + 1)
           ?: stageOrThrow(p.descriptor, dir, old.generation + 1, ownedBlob)
         commit(EnqueueRules.replaced(old, p, staged, s.isPaused(p.key), s.headerGeneration, now))
@@ -227,7 +232,8 @@ class QueueController(
   /**
    * Live: journal a 'cancelled' (user) outcome, then forget after its ack.
    * Settled (or legacy): forget now, row, bytes, and its unacknowledged
-   * outcomes. Unknown: no-op.
+   * outcomes. No row: delete the id's directory when it has no entry file
+   * ([QueueStore.removeUnowned]).
    *
    * A failed journal write rejects E_STORAGE and changes nothing: the entry
    * goes on, and JS can call cancel() again.
@@ -244,8 +250,11 @@ class QueueController(
     var saved: QueueEntry? = null
     try {
       store.locked {
-        stop = true // unknown or settled: stop any stray work, as before
-        val e = store.load(id) ?: return@locked
+        stop = true // no row or settled: stop any stray work
+        val e = store.load(id) ?: run {
+          store.removeUnowned(id)
+          return@locked
+        }
         if (!e.isLive || e.legacy) {
           journal.ackEntry(id)
           store.remove(id)
@@ -424,6 +433,21 @@ class QueueController(
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
    * 5. Schedule every queued entry, and the expiry wake of every parked one.
+   *
+   * 6. Delete the orphan directories that hold only copied bodies and are
+   *    older than [QueueStore.ORPHAN_MIN_AGE_MS] ([QueueStore.removeOrphans]).
+   *
+   * Then it writes the boot snapshot, on every start. The leftover count
+   * and step 6 run after step 5, so they never delay queued work. The
+   * count costs one directory listing and a few file checks per id
+   * directory, less than the entry reads above. Step 6 looks only at the
+   * orphans the count listed: one more listing of each, and the deletes.
+   *
+   * Step 6 can not delete the directory of an enqueue in progress: the
+   * sweep and every enqueue run on the same single-thread executor
+   * ([UploaderModule.queueExecutor]), so no enqueue is between staging and
+   * its entry save while step 6 runs. Step 6 also checks for `entry.json`
+   * under the store lock, which every entry save takes.
    */
   fun sweep() {
     val now = clock()
@@ -433,10 +457,12 @@ class QueueController(
     // toSchedule as the sweep found it, before toStopped or toResumed reset
     // state and updatedAt. The boot snapshot describes these.
     val found = mutableListOf<QueueEntry>()
+    val legacyIds = mutableListOf<String>()
     val s = settings.load()
     store.locked {
       val records = journal.unacknowledged().groupBy { it.id }
       for (e in store.all()) {
+        if (e.legacy) legacyIds += e.id
         if (e.legacy || isWorkerRunning(e.id)) continue
         val own = records[e.id].orEmpty().filter { it.generation == e.generation }
         if (e.isLive) {
@@ -483,9 +509,18 @@ class QueueController(
     val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
     toForget.forEach { scheduler.cancel(it) }
     toSchedule.forEach { scheduleRun(it, keepWake = true) }
-    if (toSchedule.isNotEmpty() || !runs.isNullOrEmpty()) {
-      Diag.info(BootSnapshot.MESSAGE, BootSnapshot.of(found, runs, now))
-    }
+    // Every start, even an idle one: a v9 leftover count of zero is a value
+    // the app reports. It replaces a snapshot JS has not taken yet, so
+    // launches with no takeDiagnostics() do not push out real warnings.
+    // The orphan cleanup runs here, after the work above is scheduled, on
+    // this executor, so no enqueue is staging meanwhile.
+    val counted = store.countLeftovers(legacyIds)
+    val removed = store.removeOrphans(counted.orphanDirs, now)
+    Diag.info(
+      BootSnapshot.MESSAGE,
+      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed)),
+      replaceUntaken = true,
+    )
     changed.forEach { events.state(it.toRow()) }
   }
 
