@@ -309,6 +309,18 @@ final class Harness {
     drain()
   }
 
+  /// What takeDiagnostics() resolves. Waits for the boot count, as JS does.
+  func takeDiagnostics() -> [[String: Any]] {
+    let done = DispatchSemaphore(value: 0)
+    var out: [[String: Any]] = []
+    coordinator.takeDiagnostics {
+      out = $0
+      done.signal()
+    }
+    done.wait()
+    return out
+  }
+
   func unacknowledged() -> [[String: Any]] {
     var out: [[String: Any]] = []
     coordinator.unacknowledgedEvents { out = $0 }
@@ -323,7 +335,7 @@ final class Harness {
     coordinator.taskCompleted(TaskCompletion(
       key: task.key, description: task.taskDescription, url: task.request.url?.absoluteString,
       statusCode: error == nil ? status : nil, headers: headers, body: error == nil ? body : nil,
-      bodyTruncated: false, error: error))
+      bodyTruncated: false, error: error, bytesSent: task.bytesSent))
   }
 
   /// Delivers the NSURLErrorCancelled callback of a task the test cancelled.

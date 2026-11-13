@@ -147,6 +147,7 @@ final class ChunkedCoordinator {
   func partCompleted(id: String, part: Int, incarnation: String?, key: String, meta: TaskMap.Meta?,
                      completion c: TaskCompletion) {
     let owned = inFlight[id]?[part] == key
+    let beginAt = owned ? partBeginAt[id]?[part] : nil
     if owned {
       inFlight[id]?[part] = nil
       partSent[id]?[part] = nil
@@ -167,6 +168,16 @@ final class ChunkedCoordinator {
     }
     let cancelled = RetryClassifier.isCancellation(c.error)
     if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
+    // A delayed part task that ended before its begin date, with no response
+    // and no body byte sent, never reached the daemon (see
+    // QueueCoordinator.taskCompletedLocked). No event and no rejection: keep
+    // its begin date and refill once it has passed. The new task takes a new
+    // ordinal, as every part task does.
+    if let beginAt, e.state == .running, q.now() < beginAt, c.statusCode == nil, c.bytesSent == 0 {
+      partBeginAt[id, default: [:]][part] = beginAt
+      q.schedule(Int((beginAt - q.now()).rounded(.up))) { [weak self] in self?.refill(id) }
+      return
+    }
     let accepted = c.error == nil
       && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
     // A system cancel is not an attempt: no event. It retries below.

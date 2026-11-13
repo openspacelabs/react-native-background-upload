@@ -64,6 +64,8 @@ struct TaskCompletion {
   let body: String?
   let bodyTruncated: Bool
   let error: NSError?
+  /// countOfBytesSent when the task ended.
+  let bytesSent: Int64
 }
 
 /// Who a task belongs to. From taskDescription first, TaskMap second.
