@@ -14,17 +14,19 @@ extension QueueCoordinator {
   /// exists. With no listener the outcome stays at deliveries 0 for the
   /// drain.
   ///
-  /// `requireJournal` (a user cancel): a failed journal write returns false
-  /// and changes nothing. No task stops, no row moves, nothing is emitted,
-  /// and nothing is kept in memory, so the caller can reject and JS can call
-  /// again.
-  ///
-  /// Otherwise a failed journal write still settles and emits: the request
-  /// already ran, so a retry would send it twice. The event stays in memory,
-  /// a timer retries the write, and ack finds the row by its settledEventId.
-  @discardableResult
-  func settle(_ id: String, _ outcome: Outcome, requireJournal: Bool = false) -> Bool {
-    guard var e = index.entry(id) else { return true }
+  /// A failed journal write still settles and emits: the request already
+  /// ran, so a retry would send it twice. The event stays in memory, a timer
+  /// retries the write, and ack finds the row by its settledEventId.
+  func settle(_ id: String, _ outcome: Outcome) {
+    try? settle(id, outcome, requireJournal: false)
+  }
+
+  /// `requireJournal` (a user cancel): a failed journal write throws its
+  /// error and changes nothing. No task stops, no row moves, nothing is
+  /// emitted, and nothing is kept in memory, so the caller can reject and JS
+  /// can call again. With `requireJournal` false it never throws.
+  func settle(_ id: String, _ outcome: Outcome, requireJournal: Bool) throws {
+    guard var e = index.entry(id) else { return }
     switch outcome {
     case .completed: e.bytesSent = e.totalBytes
     // A simple entry keeps the live bytes of its last attempt.
@@ -52,8 +54,14 @@ extension QueueCoordinator {
       event.partIndex = nil
       e.state = .cancelled
     }
-    let journaled = journal.append(event, keeping: referencedEventIds().union([event.eventId]))
-    if !journaled && requireJournal { return false }
+    let journaled: Bool
+    do {
+      try journal.appendOrThrow(event, keeping: referencedEventIds().union([event.eventId]))
+      journaled = true
+    } catch {
+      if requireJournal { throw error }
+      journaled = false
+    }
     cancelTasks(id, purpose: .superseded)
     chunked.stop(id)
     emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
@@ -79,7 +87,6 @@ extension QueueCoordinator {
     disarmExpiry(id)
     throttle.reset(id)
     attemptStarts[id] = nil
-    return true
   }
 
   /// A settle whose journal write landed but whose entry.json save failed

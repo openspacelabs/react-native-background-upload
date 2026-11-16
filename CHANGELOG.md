@@ -37,6 +37,71 @@ the entry, logs it, and runs the request as usual. A missing body then
 settles `error` with `errorKind: 'file'`. A tmp that does not read is left
 on disk. A tmp next to a readable `entry.json` is deleted.
 
+`setWifiOnly()` with the value the queue already has no longer writes the
+settings file, on both platforms. It still resolves. Before, an app that
+calls it at every start wrote the file each time, so on a nearly full disk
+the call rejected `E_STORAGE` for no reason. `configure()` with the same
+options also no longer rewrites the settings file. Neither do `pause()` and
+`resume()` on Android when they change nothing; iOS already skipped those.
+On iOS, a failed write now deletes its partly written `.tmp` file, as
+Android already did.
+
+Each `E_STORAGE` rejection now ends with the underlying error, after the
+same message text as before: ` (cause: …)`. On iOS it holds the error domain
+and code, the POSIX code when there is one, and the description when the
+message does not already hold it. On Android it holds the exception class
+and the errno name when the cause chain has one. A failed rename or
+directory create on Android now also says why, for example `Permission
+denied`. The code stays `E_STORAGE`.
+
+`setWifiOnly()`, `updateHeaders()`, `pause()` and `resume()` no longer
+reject `E_STORAGE` when the settings file cannot be saved, on both
+platforms. The new value applies in memory at once, so this session uses
+it. The failed save is logged with its cause. On Android,
+`takeDiagnostics()` returns it. On iOS, it goes to the device log only for
+now. The library saves again at the next settings call, when the app
+becomes active, and when it leaves the foreground. These retries happen
+only while the process lives. A new process uses the last value that
+reached the disk, so an app should send its settings again at each start.
+A call with an unchanged value writes nothing. Before, one failed save at
+startup kept the old value for the whole session, and an app that stopped
+on the rejection sent nothing. `configure()` also applies its retry
+defaults when the save fails; before, they were dropped. See "Settings on
+a full disk" in the README. `updateHeaders()` with an invalid header still
+rejects `E_INVALID` and changes nothing.
+
+On Android, `updateHeaders()`, `pause()` and `resume()` still reject
+`E_STORAGE` when an entry file cannot be saved, because Android reads the
+entries from disk. They now change and schedule every other entry first.
+Before, the first failed entry stopped the loop, and entries already saved
+as `queued` got no work until the next launch. An entry that failed keeps
+its old state.
+
+On Android, `resume()` and the launch sweep now compare a parked entry with
+its own header generation, not the one in the settings file. Before, after
+a settings save that never landed, a resumed entry that already had new
+headers could go back to `awaiting-auth`.
+
+The header generation no longer goes back after a relaunch that read an
+older settings file. iOS raises it at launch above every entry and task
+record. Android raises it above every entry at each `updateHeaders()`.
+
+A key that `define()` registers after `configure()` now receives its held
+outcomes in the same session. Before, an outcome that replayed before its
+key had a definition emitted the `unhandled-key` row and then waited for the
+next launch. This happened when a bundler loaded a module lazily, such as
+Metro with `inlineRequires`. The outcomes of one id and key still deliver
+in order; across keys, the key defined first delivers first. The
+`unhandled-key` row is not followed by a new `state` row when the outcome is
+handled. `cancel(id)` drops the held outcomes of that id. An outcome whose
+key is never defined stays unacknowledged, as before.
+
+`configure()` takes an optional `definitions` list, the handles that
+`define()` returned. Listing a handle imports its module, so its `define()`
+runs before the replay. In development, a later `define()` of a key that is
+not listed logs a warning. Nothing else changes: an unlisted key still
+receives its outcomes. The new `AnyDefined` type names one entry of the list.
+
 iOS no longer makes a `mutate()` wait while a chunked upload copies all of
 its parts. Since 11.0.0, a chunked `mutate()` copied every part out of the
 file and created every part task in one block on the queue, so the next

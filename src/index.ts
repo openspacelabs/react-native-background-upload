@@ -18,6 +18,7 @@ import {
   createRegistry,
   DEFAULT_ENQUEUE_TIMEOUT_MS,
   DEFAULT_LIFETIME_MS,
+  isDev,
   MAX_VARS_BYTES,
   type AnyDefinition,
   type Settings,
@@ -147,11 +148,32 @@ export const createUploadClient = ({
     onAcked: (event) => requests.acked(event),
     warn,
   });
+  // The keys of the last configure({ definitions }), and the unlisted keys
+  // already warned about.
+  let listedKeys: Set<string> | undefined;
+  const warnedKeys = new Set<string>();
+
+  const onDefine = (key: string): void => {
+    if (
+      listedKeys !== undefined &&
+      !listedKeys.has(key) &&
+      !warnedKeys.has(key) &&
+      isDev()
+    ) {
+      warnedKeys.add(key);
+      warn(
+        `define: "${key}" is not in configure({ definitions }). It still receives its outcomes, but list it so that its module loads before configure().`,
+      );
+    }
+    delivery.release(key);
+  };
+
   const registry = createRegistry({
     native,
     definitions,
     getSettings: () => settings,
     trackMutate: delivery.trackMutate,
+    onDefine,
     warn,
   });
 
@@ -162,12 +184,26 @@ export const createUploadClient = ({
    * lifetime, retry and Android notification settings to native, then starts
    * replaying journaled outcomes. A second call updates the settings and does
    * not replay again. Each call replaces the full configuration.
+   *
+   * `definitions` is optional. Each listed handle came from define(), so its
+   * key is registered already. The list only pins the keys, so that a later
+   * define() of another key warns in development.
    */
   const configure = (options: ConfigureOptions): void => {
     // Every check runs before any setting changes, so a rejected call leaves
     // the previous configuration whole.
     if (options.retry !== undefined) {
       validateRetryPolicy(options.retry, 'configure');
+    }
+    const listed = options.definitions;
+    if (
+      listed !== undefined &&
+      (!Array.isArray(listed) ||
+        !listed.every((handle) => typeof handle?.key === 'string'))
+    ) {
+      throw new Error(
+        'configure: definitions must be an array of the handles that define() returned',
+      );
     }
     const lifetimeMs = options.lifetimeMs ?? DEFAULT_LIFETIME_MS;
     if (!Number.isFinite(lifetimeMs) || lifetimeMs <= 0) {
@@ -209,6 +245,10 @@ export const createUploadClient = ({
     if (options.retry !== undefined) {
       forwarded.retry = options.retry;
     }
+    listedKeys =
+      listed === undefined
+        ? undefined
+        : new Set(listed.map((handle) => handle.key));
     native.configure(forwarded);
     delivery.start();
   };
@@ -236,20 +276,32 @@ export const createUploadClient = ({
    * when it has no entry file: a v9 upload's bytes, or a chunked file kept
    * after an enqueue that rejected E_STORAGE.
    */
-  const cancel = (id: string): Promise<void> =>
-    native.cancel(id).then(() => {
-      // Native forgets a settled entry with no event. Display only: the
-      // cancel has landed, so a throw here must not reject it.
-      try {
-        requests.cancelled(id);
-      } catch (e) {
-        warn(`cancel: updating the request rows after cancel(${id}) threw`, e);
-      }
-    });
+  const cancel = async (id: string): Promise<void> => {
+    // On a settled entry native also drops the unacknowledged outcomes, so
+    // the held ones must not reach a handler later. On a live entry native
+    // keeps an earlier generation's outcomes; dropping them here only defers
+    // them to the next launch, as before late definitions existed.
+    // Forget before the await, so a define() of the key that runs while
+    // native cancels does not run a handler for this id. When native cancel
+    // rejects, the dropped outcomes were never acknowledged, so native
+    // redelivers them at the next launch.
+    delivery.forget(id);
+    await native.cancel(id);
+    // Forget again: an outcome of the id can be held during the await.
+    delivery.forget(id);
+    // Native forgets a settled entry with no event. Display only: the
+    // cancel has landed, so a throw here must not reject it.
+    try {
+      requests.cancelled(id);
+    } catch (e) {
+      warn(`cancel: updating the request rows after cancel(${id}) threw`, e);
+    }
+  };
 
   /**
    * Persisted natively. Applies to queued and future entries whose
-   * descriptor does not set `wifiOnly`.
+   * descriptor does not set `wifiOnly`. Does not reject: a failed save
+   * still applies the value for this session.
    */
   const setWifiOnly = (enabled: boolean): Promise<void> =>
     native.setWifiOnly(enabled);
@@ -260,7 +312,10 @@ export const createUploadClient = ({
    * same-named headers a part carries. This is how a fresh token
    * reaches requests that stalled on 401. Native bumps a header generation, so
    * a 401 from an attempt issued under the old headers re-issues at once
-   * instead of parking.
+   * instead of parking. Rejects `E_INVALID` for a header native cannot
+   * send. A failed settings save does not reject. On Android, an entry file
+   * that cannot be saved rejects `E_STORAGE` after the other entries are
+   * patched.
    */
   const updateHeaders = (patch: Record<string, string>): Promise<void> =>
     native.updateHeaders(patch);

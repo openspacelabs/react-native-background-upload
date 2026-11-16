@@ -42,13 +42,14 @@ class EntryTransitionsTest {
   }
 
   @Test
-  fun `resume returns to awaiting-auth only when the parked generation is current`() {
-    val paused = entry(state = EntryState.PAUSED, parkedGeneration = 3)
-    assertEquals(EntryState.AWAITING_AUTH, EntryTransitions.toResumed(paused, headerGeneration = 3, now = 9).state)
-    val stale = EntryTransitions.toResumed(paused, headerGeneration = 4, now = 9)
+  fun `resume returns to awaiting-auth only when the parked generation is the entry's own`() {
+    val paused = entry(state = EntryState.PAUSED, parkedGeneration = 3).copy(headerGeneration = 3)
+    assertEquals(EntryState.AWAITING_AUTH, EntryTransitions.toResumed(paused, now = 9).state)
+    // updateHeaders() saved newer headers with the entry.
+    val stale = EntryTransitions.toResumed(paused.copy(headerGeneration = 4), now = 9)
     assertEquals(EntryState.QUEUED, stale.state)
     assertNull(stale.parkedGeneration)
-    assertEquals(EntryState.QUEUED, EntryTransitions.toResumed(entry(state = EntryState.PAUSED), 0, 9).state)
+    assertEquals(EntryState.QUEUED, EntryTransitions.toResumed(entry(state = EntryState.PAUSED), 9).state)
   }
 
   @Test

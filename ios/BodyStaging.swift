@@ -38,7 +38,7 @@ enum BodyStaging {
     do {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     } catch {
-      throw StagingError.io("cannot create the entry directory: \(error.localizedDescription)")
+      throw ioError("cannot create the entry directory", error)
     }
     switch body {
     case .none:
@@ -75,7 +75,7 @@ enum BodyStaging {
         throw e
       } catch {
         try? fm.removeItem(at: tmp)
-        throw StagingError.io("cannot write the form body: \(error.localizedDescription)")
+        throw ioError("cannot write the form body", error)
       }
 
     case .file(let path):
@@ -93,7 +93,7 @@ enum BodyStaging {
         try? fm.removeItem(at: tmp)
         // The source vanished between the check and the copy.
         if !fm.fileExists(atPath: src.path) { throw StagingError.fileMissing(path) }
-        throw StagingError.io("cannot copy the file body: \(error.localizedDescription)")
+        throw ioError("cannot copy the file body", error)
       }
       return StagedBody(kind: .file, relativePath: name, contentType: nil,
                         forceContentType: false, totalBytes: FileIO.size(dest) ?? 0, adopted: false)
@@ -108,7 +108,7 @@ enum BodyStaging {
           // An O(1) rename on the same volume. Across volumes FileManager copies.
           try fm.moveItem(at: src, to: dir.appendingPathComponent(name))
         } catch {
-          throw StagingError.io("cannot move the chunked file: \(error.localizedDescription)")
+          throw ioError("cannot move the chunked file", error)
         }
         return StagedBody(kind: .parts, relativePath: name, contentType: nil,
                           forceContentType: false, totalBytes: size, adopted: false)
@@ -127,10 +127,12 @@ enum BodyStaging {
   static func writeMultipart(_ fields: [ParsedEnqueue.FormField], boundary: String, to url: URL,
                              fm: FileManager = .default) throws -> Int64 {
     try? fm.removeItem(at: url)
-    guard fm.createFile(atPath: url.path, contents: nil) else {
-      throw StagingError.io("cannot create the form body")
+    let out: FileHandle
+    do {
+      out = try FileIO.create(url)
+    } catch {
+      throw StagingError.io("cannot create the form body" + FileIO.cause(error))
     }
-    let out = try FileHandle(forWritingTo: url)
     defer { try? out.close() }
     var total: Int64 = 0
     func put(_ data: Data) throws {
@@ -192,11 +194,16 @@ enum BodyStaging {
       .replacingOccurrences(of: "\n", with: "%0A")
   }
 
+  /// `<step>: <description> (cause: <domain> <code>; POSIX <n>)`.
+  private static func ioError(_ step: String, _ error: Error) -> StagingError {
+    .io("\(step): \(error.localizedDescription)" + FileIO.cause(error, description: false))
+  }
+
   private static func write(_ data: Data, _ url: URL) throws {
     do {
       try FileIO.writeAtomically(data, to: url)
     } catch {
-      throw StagingError.io("cannot write the body: \(error.localizedDescription)")
+      throw ioError("cannot write the body", error)
     }
   }
 }

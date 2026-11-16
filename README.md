@@ -296,7 +296,8 @@ while the app was dead from being sent twice.
    `E_RUNNING`, `E_FILE_MISSING`, or `E_STORAGE`. `E_INVALID` is malformed
    input native cannot send: a non-http(s) URL, header names or values the
    platform HTTP client rejects, a GET with a body, or parts that do not
-   tile the moved file.
+   tile the moved file. An `E_STORAGE` message ends with the underlying
+   error, ` (cause: …)`, for logs. Match on `code`, not on the message.
 2. **Journal before emit, ack after the handler.** Every terminal outcome is
    journaled natively, then delivered. The library acknowledges after the
    handler's promise resolves. A rejection, or app death before the ack,
@@ -316,13 +317,25 @@ while the app was dead from being sent twice.
    outcomes wait too. They stay journaled and unacknowledged, so none is
    lost.
 5. **Replay starts after `configure()`.** Outcomes journaled by a dead session
-   deliver then. Call every `define()` first.
-6. **Unknown key is loud.** An outcome whose key has no definition stays
-   unacknowledged and reaches `state` listeners with `reason: 'unhandled-key'`.
+   deliver then. Call every `define()` first. A bundler that loads modules
+   lazily, such as Metro with `inlineRequires`, can run a `define()` later.
+   That key then receives its held outcomes when its `define()` runs, in the
+   same session and in their original order per id. Order holds among the
+   outcomes of one key. Across keys, the key defined first delivers first.
+   `cancel(id)` drops the held outcomes of that id.
+6. **Unknown key is loud.** An outcome whose key has no definition reaches
+   `state` listeners with `reason: 'unhandled-key'`, and the library holds it.
+   When no `define()` of the key comes in this session, it stays
+   unacknowledged and redelivers at the next launch. When a later `define()`
+   handles it, no new `state` row replaces the `unhandled-key` row. After the
+   ack, a `completed` or `cancelled` entry leaves `getRequests()` without a
+   `state` event, and an `error` entry stays with its `error` row.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
    or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in
-   order. There is no ordering guarantee between different ids.
+   order. One exception: when one id has held outcomes under two keys, the
+   key defined first delivers first (rule 5). There is no ordering guarantee
+   between different ids.
 9. **`attempt` events are live-only.** They are never journaled or replayed.
 
 Retry classes:
@@ -424,10 +437,13 @@ whose `request` takes no vars, call `mutate()` with no arguments; native stores
 ### `configure(options): void`
 
 Call one time at boot, after every `define()`. Starts replay of journaled
-outcomes. A second call updates the settings and does not replay again.
+outcomes. A second call updates the settings and does not replay again. A
+`define()` that runs after `configure()` still receives the outcomes that
+reached its key before it; see rule 5 of "Reliable delivery".
 
 | Option | Notes |
 | --- | --- |
+| `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
 | `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
@@ -458,6 +474,10 @@ event (`paused`, then `queued`). No outcome is produced and the bytes are
 kept. A paused entry past `expiresAt` settles `error` with
 `errorKind: 'expired'` when it is resumed.
 
+Neither call rejects because the settings cannot be saved. On Android,
+either call can still reject `E_STORAGE` when an entry file cannot be saved.
+See [Settings on a full disk](#settings-on-a-full-disk).
+
 ### `cancel(id): Promise<void>`
 A live entry settles `cancelled` with reason `user` and is forgotten after
 its ack. A settled entry is forgotten now: row, bytes, and its
@@ -477,7 +497,11 @@ again.
 The queue's Wi-Fi setting. Persisted natively. Applies to queued and future
 entries whose descriptor does not set `wifiOnly`. An entry that sets it keeps
 its own value. Both are checked before each attempt, so a toggle moves the
-queued entries that follow the setting.
+queued entries that follow the setting. A call with the current value
+resolves without a write.
+
+It does not reject. The new value applies at once, also when the disk is
+full. See [Settings on a full disk](#settings-on-a-full-disk).
 
 ### `updateHeaders(patch): Promise<void>`
 Merges the patch into the headers of every entry not yet forgotten and
@@ -486,7 +510,51 @@ same-named headers a part carries. This is how a fresh token
 reaches requests that stalled on 401. Each call bumps a header generation: a
 401 or 403 from an attempt issued under an older generation re-issues at once
 instead of parking. Parking emits one `state` event per entry. A header name
-or value the platform HTTP client cannot send rejects with `E_INVALID`.
+or value the platform HTTP client cannot send rejects with `E_INVALID` and
+changes nothing. A settings file that cannot be saved does not reject. On
+Android, an entry file that cannot be saved does reject `E_STORAGE`. See
+[Settings on a full disk](#settings-on-a-full-disk).
+
+### Settings on a full disk
+`setWifiOnly()`, `updateHeaders()`, `pause()`, `resume()` and `configure()`
+change queue settings that native saves to a file. They apply the new value
+in memory first, so this session uses it at once. Then they save the file.
+If the save fails, for example on a full disk, the call still resolves.
+
+The library records a warning. On Android, `takeDiagnostics()` returns it.
+On iOS, the warning goes to the device log only for now. It will go to
+`takeDiagnostics()` when iOS has a diagnostics list.
+
+The library tries the save again at the next one of these calls, when the
+app becomes active, and when the app leaves the foreground. These retries
+happen only while the process lives. A new process, for example a relaunch
+in the background with no JS, uses the last value that reached the disk:
+
+- `setWifiOnly()`: the earlier Wi-Fi setting applies.
+- `pause()` and `resume()`: the earlier pause state applies. At launch,
+  native moves the entries to match it. So an entry that was paused can run,
+  and an entry that was resumed can wait.
+- `updateHeaders()`: the headers are saved with each entry, not in the
+  settings file, so they are not lost. Only a counter of header updates is.
+  Native raises that counter again above the entries' values, so a 401 still
+  re-issues as described above.
+
+So send your settings again at each app start: call `setWifiOnly()`, and
+`pause()` or `resume()`, with the values you want. A call with the value
+native already has writes nothing.
+
+`updateHeaders()`, `pause()` and `resume()` also save each entry they
+change. On iOS, a failed entry save is logged, the entry changes in memory,
+and the next save of that entry writes it. On Android, the entries are read
+from disk, so they cannot change in memory only. There, the call changes and
+schedules every entry it can save, then rejects `E_STORAGE` when one or more
+entries could not be saved. Each entry that failed keeps its old state:
+
+- `updateHeaders()`: it keeps its old headers and stays in `awaiting-auth`
+  if it was there. Call `updateHeaders()` again.
+- `pause()`: it keeps its state, but its worker sees the pause before its
+  next attempt.
+- `resume()`: it stays `paused`. Call `resume()` again.
 
 ### `getRequests(filter?): RequestRow[]`
 Synchronous, from native's in-memory index, so it works offline. Returns
@@ -535,9 +603,10 @@ const CaptureBadge = ({ captureId }: { captureId: string }) => {
   `getRequests()`. Cancelled rows are left out unless `includeCancelled` is
   `true`. A cancelled row has no work left, and native forgets it at its ack.
 - Completed rows are included. A completed row stays until its outcome is
-  acknowledged. When its handler rejects or its key has no definition, the
-  outcome is not acknowledged, so the row stays for the whole session. Do not
-  treat a completed row as work still to do.
+  acknowledged. When its handler rejects, or its key has no definition and
+  no `define()` of the key runs in this session (rule 5 of "Reliable
+  delivery"), the outcome is not acknowledged, so the row stays for the whole
+  session. Do not treat a completed row as work still to do.
 - `useRequests()` re-renders when a row appears, changes state, or goes. A
   row's bytes are those of its last `state` event.
 - `useRequestsWithProgress()` also re-renders on each `progress` event of a
