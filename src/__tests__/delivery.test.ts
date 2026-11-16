@@ -56,15 +56,17 @@ const setup = (
   };
   const stateEvents: StateEvent[] = [];
   const warn = jest.fn();
+  const onAcked = jest.fn();
   const delivery = createDelivery({
     native,
     lookup: (key) => definitions[key],
     emitState: (e) => stateEvents.push(e),
+    onAcked,
     warn,
     handlerWarningMs,
   });
   const emit = (event: SettledEvent) => handlers.forEach((h) => h(event));
-  return { ...delivery, native, emit, stateEvents, warn, handlers };
+  return { ...delivery, native, emit, stateEvents, warn, handlers, onAcked };
 };
 
 describe('replay', () => {
@@ -800,5 +802,95 @@ describe('slow handler warning', () => {
     await flush();
     await jest.advanceTimersByTimeAsync(60_000);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('onAcked', () => {
+  it('reports each outcome after its ack resolves', async () => {
+    const ackGate = deferred();
+    const { start, emit, native, onAcked } = setup({
+      k: { key: 'k', request: jest.fn() },
+    });
+    native.ackEvents.mockReturnValueOnce(ackGate.promise);
+    start();
+    await flush();
+    emit(completed());
+    await flush();
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+    expect(onAcked).not.toHaveBeenCalled();
+    ackGate.resolve();
+    await flush();
+    expect(onAcked).toHaveBeenCalledTimes(1);
+    expect(onAcked).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: 'e1', id: 'u1', kind: 'completed' }),
+    );
+  });
+
+  it('reports a cancelled outcome, which has no handler', async () => {
+    const { start, emit, onAcked } = setup({});
+    start();
+    await flush();
+    emit({
+      ...completed(),
+      kind: 'cancelled',
+      cancelReason: 'user',
+      state: 'cancelled',
+    } as SettledEvent);
+    await flush();
+    expect(onAcked).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'u1', kind: 'cancelled' }),
+    );
+  });
+
+  it('does not report an outcome whose ack failed', async () => {
+    const { start, emit, native, onAcked } = setup({
+      k: { key: 'k', request: jest.fn() },
+    });
+    native.ackEvents.mockRejectedValueOnce(new Error('E_STORAGE'));
+    start();
+    await flush();
+    emit(completed());
+    await flush();
+    expect(onAcked).not.toHaveBeenCalled();
+  });
+
+  it('does not report an outcome that was not acked', async () => {
+    const { start, emit, onAcked } = setup({
+      k: {
+        key: 'k',
+        request: jest.fn(),
+        onSuccess: async () => {
+          throw new Error('no');
+        },
+      },
+    });
+    start();
+    await flush();
+    emit(completed());
+    emit(completed({ eventId: 'e2', key: 'unknown' }));
+    await flush();
+    expect(onAcked).not.toHaveBeenCalled();
+  });
+
+  it('warns when onAcked throws, and keeps delivering', async () => {
+    const onSuccess = jest.fn();
+    const { start, emit, native, onAcked, warn } = setup({
+      k: { key: 'k', request: jest.fn(), onSuccess },
+    });
+    onAcked.mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    start();
+    await flush();
+    emit(completed());
+    emit(completed({ eventId: 'e2' }));
+    await flush();
+    expect(native.ackEvents).toHaveBeenCalledTimes(2);
+    expect(onSuccess).toHaveBeenCalledTimes(2);
+    expect(onAcked).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/after the ack of e1/),
+      expect.any(Error),
+    );
   });
 });
