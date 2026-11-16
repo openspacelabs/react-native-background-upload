@@ -107,17 +107,21 @@ describe('client shape', () => {
     expect(Object.keys(client).sort()).toEqual(
       [
         'addListener',
+        'addRequestsListener',
         'android',
         'cancel',
         'chunkPlan',
         'configure',
         'define',
+        'getCachedRequests',
         'getRequests',
         'pause',
         'resume',
         'setWifiOnly',
         'takeDiagnostics',
         'updateHeaders',
+        'useRequests',
+        'useRequestsWithProgress',
       ].sort(),
     );
     expect(Object.keys(client.android)).toEqual(['addNotificationListener']);
@@ -1292,13 +1296,22 @@ describe('a definition that arrives after configure()', () => {
   });
 });
 
-describe('late definitions with onWarning', () => {
+describe('late definitions with onWarning and the row cache', () => {
   const request = (_v: null) => ({ url: 'https://x' });
   let consoleWarn: jest.SpyInstance;
   beforeEach(() => {
     consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
   afterEach(() => consoleWarn.mockRestore());
+
+  const queuedEarlier = async (
+    fake: ReturnType<typeof createFakeNative>,
+    key: string,
+  ): Promise<string> => {
+    const earlier = createUploadClient({ native: fake });
+    const { id } = await earlier.define({ key, request }).mutate();
+    return id;
+  };
 
   it('sends the warning for an unlisted late define() to onWarning', async () => {
     const fake = createFakeNative();
@@ -1313,5 +1326,43 @@ describe('late definitions with onWarning', () => {
       undefined,
     );
     expect(consoleWarn).not.toHaveBeenCalled();
+  });
+
+  it('drops the completed row of a released outcome after its ack', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    const acked = fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const subscription = client.addRequestsListener(() => {});
+    client.configure({});
+    await flush();
+    expect(client.getCachedRequests({ id })).toEqual([
+      expect.objectContaining({ id, state: 'completed' }),
+    ]);
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    await acked;
+    expect(onSuccess).toHaveBeenCalled();
+    expect(client.getCachedRequests({ id })).toEqual([]);
+    subscription.remove();
+  });
+
+  it('forgets held outcomes and drops a settled row on cancel()', async () => {
+    const fake = createFakeNative();
+    const id = await queuedEarlier(fake, 'late');
+    void fake.settle(id, { kind: 'completed' });
+    const client = createUploadClient({ native: fake });
+    const subscription = client.addRequestsListener(() => {});
+    client.configure({});
+    await flush();
+    await client.cancel(id);
+    const onSuccess = jest.fn();
+    client.define({ key: 'late', request, onSuccess });
+    await flush();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(client.getCachedRequests({ id, includeCancelled: true })).toEqual(
+      [],
+    );
+    subscription.remove();
   });
 });

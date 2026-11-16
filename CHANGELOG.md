@@ -1,5 +1,42 @@
 ## Unreleased
 
+Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
+hooks that return the queue rows for display, and
+`definition.useRequests()` and `definition.useRequestsWithProgress()`, which
+return one definition's rows with typed `vars`. The client keeps one copy of
+the rows in memory, read from native when the first hook mounts and updated
+by each `state` event. It also removes a row when native forgets it with no
+event: after the ack of a `completed` or `cancelled` outcome, and after
+`cancel()` on a settled entry. A `state` event that arrives after the copy
+removed its row is checked against native, so it does not add a finished row
+back. The filter takes `includeCancelled`; cancelled rows are left out by
+default. `addRequestsListener()` and `getCachedRequests()` give the same rows
+outside React. Completed rows are included until their outcome is
+acknowledged. An app that keeps its own copy of `getRequests()` for display,
+and wraps `cancel()` to update it, can remove that code. Delivery, acks and
+cancel are unchanged. `define()` now returns the two hooks with `key` and
+`mutate`. The `Defined` and `UploadClient` types gained the new functions as
+required members, so a test double built by hand with one of those types no
+longer compiles until it adds them.
+
+`createFakeNative().settle()` now resolves one promise turn later, after the
+client has handled the ack, so the row hooks are up to date when it resolves.
+
+iOS now keeps a new request through a power loss right after `mutate()`
+resolves. Before, no rename into place was flushed to disk, so the request
+directory could come back holding only `entry.json.tmp`, which nothing read:
+the request was silently lost. Every atomic write on iOS (entries, data
+bodies, outcome journal, task map, settings) now syncs its directory after
+the rename, as Android does, and an entry's first save also syncs the queue
+root. Form, file and chunked bodies are placed by a rename or move into the
+request directory, and the entry save that follows syncs that directory
+before `mutate()` resolves. A failed directory sync is logged and does not
+fail the write. At
+startup, iOS turns a lone `entry.json.tmp` that reads as a valid entry into
+the entry, logs it, and runs the request as usual. A missing body then
+settles `error` with `errorKind: 'file'`. A tmp that does not read is left
+on disk. A tmp next to a readable `entry.json` is deleted.
+
 A key that `define()` registers after `configure()` now receives its held
 outcomes in the same session. Before, an outcome that replayed before its
 key had a definition emitted the `unhandled-key` row and then waited for the

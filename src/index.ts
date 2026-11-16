@@ -9,6 +9,12 @@ import type { Spec } from './NativeRNFileUploader';
 import { chunkPlan } from './chunkPlan';
 import { createDelivery } from './delivery';
 import {
+  createRequestCache,
+  createSelector,
+  matches,
+  useRequestRows,
+} from './requests';
+import {
   createRegistry,
   DEFAULT_ENQUEUE_TIMEOUT_MS,
   DEFAULT_LIFETIME_MS,
@@ -21,11 +27,17 @@ import {
 import type {
   AddListener,
   ConfigureOptions,
+  Define,
+  Defined,
+  DefinedRequestsFilter,
+  Definition,
   Diagnostic,
   PauseScope,
   RequestRow,
+  RequestsFilter,
   StateEvent,
   UploadClient,
+  Vars,
 } from './types';
 
 export * from './types';
@@ -132,6 +144,8 @@ export const createUploadClient = ({
     native,
     lookup: (key) => definitions.get(key),
     emitState,
+    // Native forgets a completed or cancelled row at its ack, with no event.
+    onAcked: (event) => requests.acked(event),
     warn,
   });
   // The keys of the last configure({ definitions }), and the unlisted keys
@@ -154,7 +168,7 @@ export const createUploadClient = ({
     delivery.release(key);
   };
 
-  const { define } = createRegistry({
+  const registry = createRegistry({
     native,
     definitions,
     getSettings: () => settings,
@@ -275,6 +289,13 @@ export const createUploadClient = ({
     await native.cancel(id);
     // Forget again: an outcome of the id can be held during the await.
     delivery.forget(id);
+    // Native forgets a settled entry with no event. Display only: the
+    // cancel has landed, so a throw here must not reject it.
+    try {
+      requests.cancelled(id);
+    } catch (e) {
+      warn(`cancel: updating the request rows after cancel(${id}) threw`, e);
+    }
   };
 
   /**
@@ -366,6 +387,80 @@ export const createUploadClient = ({
     }
   }) as AddListener;
 
+  const requests = createRequestCache({
+    readNative: () => getRequests(),
+    addListener,
+    warn,
+  });
+  const visibleRows = createSelector(requests.read, {});
+
+  const getCachedRequests = (filter?: RequestsFilter): readonly RequestRow[] => {
+    if (filter?.key === undefined && filter?.id === undefined) {
+      return filter?.includeCancelled === true
+        ? requests.read()
+        : visibleRows();
+    }
+    return requests.read().filter((row) => matches(row, filter));
+  };
+
+  const addRequestsListener = (
+    listener: (rows: readonly RequestRow[]) => void,
+  ): { remove: () => void } => {
+    // No call while it registers: the caller reads getCachedRequests() after
+    // this returns. After that, a call only when the rows it gets changed,
+    // not when only a hidden cancelled row did.
+    let registering = true;
+    let last: readonly RequestRow[] | undefined;
+    const remove = requests.subscribe(() => {
+      if (registering) {
+        return;
+      }
+      const rows = visibleRows();
+      if (rows === last) {
+        return;
+      }
+      last = rows;
+      try {
+        listener(rows);
+      } catch (e) {
+        warn('addRequestsListener: a listener threw', e);
+      }
+    });
+    registering = false;
+    last = visibleRows();
+    return { remove };
+  };
+
+  const useRequests = (filter?: RequestsFilter): readonly RequestRow[] =>
+    useRequestRows(requests.subscribe, requests.rows, filter);
+
+  const useRequestsWithProgress = (
+    filter?: RequestsFilter,
+  ): readonly RequestRow[] =>
+    useRequestRows(
+      requests.subscribeWithProgress,
+      requests.rowsWithProgress,
+      filter,
+    );
+
+  // define() from the registry, plus the definition's own row hooks. The
+  // rows of a key are the rows its mutate() enqueued, so their vars are
+  // typed as the definition's vars.
+  const define = (<V extends Vars, T>(
+    definition: Definition<V, T>,
+  ): Defined<V, T> => {
+    const defined = registry.define(definition);
+    const { key } = defined;
+    type Rows = ReturnType<Defined<V, T>['useRequests']>;
+    return {
+      ...defined,
+      useRequests: (filter?: DefinedRequestsFilter) =>
+        useRequests({ ...filter, key }) as Rows,
+      useRequestsWithProgress: (filter?: DefinedRequestsFilter) =>
+        useRequestsWithProgress({ ...filter, key }) as Rows,
+    };
+  }) as Define;
+
   const android = {
     /**
      * Fires when the Android upload notification is pressed. It never fires
@@ -384,6 +479,10 @@ export const createUploadClient = ({
     setWifiOnly,
     updateHeaders,
     getRequests,
+    useRequests,
+    useRequestsWithProgress,
+    addRequestsListener,
+    getCachedRequests,
     takeDiagnostics,
     addListener,
     chunkPlan,
