@@ -1,4 +1,4 @@
-## Unreleased
+## 11.2.0
 
 At each start the library now deletes orphan directories that it can prove
 are safe to delete. An orphan is a directory with no entry file that is not
