@@ -90,10 +90,16 @@ class QueueSettingsStore(private val file: File) {
     return validated(read).also { cached = it }
   }
 
-  /** Throws IOException when the write fails. The cache then keeps the old value. */
+  /**
+   * Throws IOException when the write fails. The cache then keeps the old
+   * value. A [transform] that changes nothing writes nothing, so a call such
+   * as setWifiOnly() at every app start does not fail on a full disk.
+   */
   @Synchronized
   fun update(transform: (QueueSettings) -> QueueSettings): QueueSettings {
-    val next = transform(load())
+    val current = load()
+    val next = transform(current)
+    if (next == current) return current
     AtomicFiles.writeText(file, gson.toJson(next))
     cached = next
     return next

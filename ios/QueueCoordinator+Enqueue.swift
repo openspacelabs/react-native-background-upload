@@ -176,7 +176,8 @@ extension QueueCoordinator {
     do {
       try store.save(e)
     } catch {
-      throw EnqueueError.storage("enqueue: cannot save '\(e.id)': \(error.localizedDescription)")
+      throw EnqueueError.storage(
+        "enqueue: cannot save '\(e.id)': \(error.localizedDescription)" + FileIO.cause(error, description: false))
     }
   }
 
@@ -189,7 +190,8 @@ extension QueueCoordinator {
       try store.save(e)
     } catch {
       if staged.kind != .parts { try? FileManager.default.removeItem(at: store.fileURL(e.id, staged.relativePath)) }
-      throw EnqueueError.storage("enqueue: cannot save '\(e.id)': \(error.localizedDescription)")
+      throw EnqueueError.storage(
+        "enqueue: cannot save '\(e.id)': \(error.localizedDescription)" + FileIO.cause(error, description: false))
     }
   }
 
