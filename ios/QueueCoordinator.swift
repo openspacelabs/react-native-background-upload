@@ -82,6 +82,10 @@ final class QueueCoordinator {
   let schedule: (_ delayMs: Int, _ block: @escaping () -> Void) -> Void
 
   var settings: QueueSettings
+  /// true while settings.json holds an older value than `settings`, because
+  /// a save failed. The next settings call and the next app activation try
+  /// the save again.
+  var settingsBehind = false
   /// false until the first reconcile has matched the daemon's tasks to the
   /// entries. Until then nothing issues: a task made now could duplicate one
   /// the daemon already holds. Reconcile issues whatever waited.
@@ -133,6 +137,13 @@ final class QueueCoordinator {
     // the time JS can call it, legacy rows included.
     index.load(store.all())
     importLegacyIfNeeded()
+    // After a settings save that never landed, settings.json can hold an
+    // older header generation than an entry or a task tag (taskWillBegin
+    // re-tags a task without saving its entry). The next updateHeaders must
+    // go above all of them, or a 401 under the newest headers parks.
+    settings.headerGeneration = max(settings.headerGeneration,
+                                    index.entries().map(\.headerGeneration).max() ?? 0,
+                                    taskMap.maxHeaderGeneration() ?? 0)
     recordBootSnapshot()
   }
 
@@ -180,7 +191,9 @@ final class QueueCoordinator {
     queue.async {
       var next = self.settings
       next.apply(configure: options)
-      _ = self.saveSettings(next)
+      // The same options write nothing, unless an earlier save failed.
+      guard next != self.settings else { return self.retrySettingsSave() }
+      self.applySettings(next)
     }
   }
 
@@ -194,7 +207,7 @@ final class QueueCoordinator {
         reject(e.code, e.message)
         return
       } catch {
-        reject("E_STORAGE", error.localizedDescription)
+        reject("E_STORAGE", error.localizedDescription + FileIO.cause(error, description: false))
         return
       }
       resolve(result.id)
@@ -224,8 +237,9 @@ final class QueueCoordinator {
     }
   }
 
-  /// Parses the scope, saves the changed settings, then moves every entry
+  /// Parses the scope, applies the changed settings, then moves every entry
   /// whose paused state changed. `change` gets nil keys for the whole queue.
+  /// A failed save does not reject: see applySettings.
   private func changeGate(_ scope: [String: Any], method: String, resolve: @escaping () -> Void,
                           reject: @escaping (String, String) -> Void,
                           change: @escaping (inout QueueSettings, Set<String>?) -> Void) {
@@ -240,10 +254,7 @@ final class QueueCoordinator {
       }
       var next = self.settings
       change(&next, keys)
-      guard next == self.settings || self.saveSettings(next) else {
-        reject("E_STORAGE", "\(method): cannot save the queue settings")
-        return
-      }
+      if next != self.settings { self.applySettings(next) } else { self.retrySettingsSave() }
       self.applyPauseGates()
       resolve()
     }
@@ -297,14 +308,18 @@ final class QueueCoordinator {
         return resolve()
       }
       if e.isLive && !e.legacy {
-        guard self.settle(id, .cancelled(reason: "user"), requireJournal: true) else {
-          return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed")
+        do {
+          try self.settle(id, .cancelled(reason: "user"), requireJournal: true)
+        } catch {
+          return reject("E_STORAGE", "cancel: cannot journal the outcome of '\(id)'; nothing changed"
+                          + FileIO.cause(error))
         }
       } else {
         do {
           try self.forgetWithEvents(id)
         } catch {
-          return reject("E_STORAGE", "cancel: cannot delete '\(id)': \(error.localizedDescription)")
+          return reject("E_STORAGE", "cancel: cannot delete '\(id)': \(error.localizedDescription)"
+                          + FileIO.cause(error, description: false))
         }
       }
       resolve()
@@ -315,17 +330,20 @@ final class QueueCoordinator {
   /// the session it picks. Such a queued entry whose retry waits in the
   /// daemon moves to the new session; a running task finishes where it
   /// started (session config is fixed). An entry that pins wifiOnly stays.
+  /// The value it already has writes nothing and resolves, so a call at
+  /// every app start does not fail on a full disk. A failed save does not
+  /// reject either: see applySettings.
   func setWifiOnly(_ enabled: Bool, resolve: @escaping () -> Void,
                    reject: @escaping (String, String) -> Void) {
     queue.async {
-      var next = self.settings
-      let changed = next.wifiOnly != enabled
-      next.wifiOnly = enabled
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "setWifiOnly: cannot save the queue settings")
-        return
+      guard self.settings.wifiOnly != enabled else {
+        self.retrySettingsSave()
+        return resolve()
       }
-      if changed && self.ready {
+      var next = self.settings
+      next.wifiOnly = enabled
+      self.applySettings(next)
+      if self.ready {
         for e in self.index.entries() where e.state == .queued && !e.isChunked && !e.legacy
           && e.wifiOnly == nil {
           let remaining = e.nextAttemptAt.map { Int($0 - self.now()) }
@@ -340,7 +358,8 @@ final class QueueCoordinator {
 
   /// Merges the patch into every entry not yet forgotten (names match
   /// without regard to case) and bumps the header generation. Parked entries
-  /// go back to queued and issue. Resolves after the loop.
+  /// go back to queued and issue. Resolves after the loop. Only an invalid
+  /// header rejects; a failed save does not (see applySettings).
   func updateHeaders(_ patch: [String: Any], resolve: @escaping () -> Void,
                      reject: @escaping (String, String) -> Void) {
     queue.async {
@@ -352,11 +371,8 @@ final class QueueCoordinator {
         return
       }
       var next = self.settings
-      next.headerGeneration += 1
-      guard self.saveSettings(next) else {
-        reject("E_STORAGE", "updateHeaders: cannot save the queue settings")
-        return
-      }
+      next.headerGeneration += 1 // init raised it above every saved tag
+      self.applySettings(next)
       for e in self.index.entries() where !e.legacy {
         var n = e
         n.headers = HeaderMerge.merge(e.headers, headers)
@@ -381,10 +397,13 @@ final class QueueCoordinator {
 
   /// The app became active. Tasks created from now on are foreground tasks,
   /// and the background tasks that have not started are replaced after
-  /// replaceDelayMs.
+  /// replaceDelayMs. A settings save that failed earlier is tried again.
   func appBecameActive() {
     activity.isActive = true
-    queue.async { self.scheduleReplace() }
+    queue.async {
+      self.retrySettingsSave()
+      self.scheduleReplace()
+    }
   }
 
   /// Runs replaceBackgroundTasks after replaceDelayMs, while the app is
@@ -401,9 +420,11 @@ final class QueueCoordinator {
   }
 
   /// The app is about to leave the foreground. Tasks created from now on are
-  /// background tasks.
+  /// background tasks. A settings save that failed earlier is tried again:
+  /// this is the last chance before a relaunch with no JS reads the file.
   func appResignedActive() {
     activity.isActive = false
+    queue.async { self.retrySettingsSave() }
   }
 
   /// Replaces every live task that was created while the app was not active
@@ -613,15 +634,37 @@ final class QueueCoordinator {
     expiryTokens[id] = nil
   }
 
-  // Assigns only when the write landed.
-  func saveSettings(_ next: QueueSettings) -> Bool {
+  /// Applies `next` in memory, then saves it. The caller's value never
+  /// depends on the disk: a failed save is logged, settings.json stays
+  /// behind, and retrySettingsSave writes it later in this process. A new
+  /// process reads the last value that reached the file.
+  func applySettings(_ next: QueueSettings) {
+    settings = next
+    persistSettings()
+  }
+
+  /// Saves `settings` when an earlier save failed. Runs at every settings
+  /// call and when the app becomes or resigns active; no timer.
+  func retrySettingsSave() {
+    if settingsBehind { persistSettings() }
+  }
+
+  private func persistSettings() {
     do {
-      try store.saveSettings(next)
-      settings = next
-      return true
+      try store.saveSettings(settings)
+      settingsBehind = false
     } catch {
-      NSLog("[RNFileUploader] cannot save settings: \(error.localizedDescription)")
-      return false
+      // Only the first failure in a row, so retries on a full disk do not
+      // repeat it at every activation, as on Android.
+      if !settingsBehind { reportSettingsSaveFailure(error) }
+      settingsBehind = true
     }
+  }
+
+  /// The device log only for now. iOS has no diagnostics list yet; once it
+  /// has one, record this there too, so takeDiagnostics() returns it.
+  private func reportSettingsSaveFailure(_ error: Error) {
+    NSLog("[RNFileUploader] cannot save the queue settings; this session uses the new value, and the next "
+            + "settings call or app activation tries again" + FileIO.cause(error))
   }
 }
