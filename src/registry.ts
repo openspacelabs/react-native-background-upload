@@ -115,6 +115,8 @@ type RegistryDeps = {
   getSettings: () => Settings;
   /** Called with every enqueue promise, so delivery can wait for it. */
   trackMutate: (id: string, pending: Promise<unknown>) => void;
+  /** Called after `define()` has registered `key`. */
+  onDefine?: (key: string) => void;
   warn?: (message: string) => void;
   now?: () => number;
 };
@@ -585,6 +587,7 @@ export const createRegistry = ({
   definitions,
   getSettings,
   trackMutate,
+  onDefine,
   warn = console.warn,
   now = Date.now,
 }: RegistryDeps): Registry => {
@@ -609,6 +612,7 @@ export const createRegistry = ({
       );
     }
     definitions.set(key, definition);
+    onDefine?.(key);
 
     const mutate = async (
       input: V | undefined,
