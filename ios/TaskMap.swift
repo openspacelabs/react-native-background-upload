@@ -132,6 +132,11 @@ final class TaskMap {
     }
   }
 
+  /// The highest header generation a task was tagged with, or nil.
+  func maxHeaderGeneration() -> Int? {
+    queue.sync { cache.values.compactMap(\.headerGeneration).max() }
+  }
+
   func keys(where predicate: (Meta) -> Bool) -> [String] {
     queue.sync { cache.filter { predicate($0.value) }.map(\.key) }
   }

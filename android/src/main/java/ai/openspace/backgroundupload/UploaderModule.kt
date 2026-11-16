@@ -1,6 +1,7 @@
 package ai.openspace.backgroundupload
 
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReadableArray
@@ -24,7 +25,7 @@ import java.util.concurrent.TimeUnit
  * getRequests() is synchronous and reads the in-memory index only.
  */
 class UploaderModule(context: ReactApplicationContext) :
-  NativeRNFileUploaderSpec(context) {
+  NativeRNFileUploaderSpec(context), LifecycleEventListener {
 
   companion object {
     const val NAME = "RNFileUploader"
@@ -73,7 +74,22 @@ class UploaderModule(context: ReactApplicationContext) :
       }
       runCatching { controller.sweep() }.onFailure { Diag.error("boot sweep failed", it) }
     }
+    context.addLifecycleEventListener(this)
   }
+
+  // A settings write that failed earlier is tried again each time the app
+  // comes to the foreground, and when it leaves: the last chance before a
+  // relaunch with no JS reads the file. Off the UI thread, on the queue
+  // executor.
+  override fun onHostResume() {
+    queueExecutor.execute { settings.saveIfBehind() }
+  }
+
+  override fun onHostPause() {
+    queueExecutor.execute { settings.saveIfBehind() }
+  }
+
+  override fun onHostDestroy() = Unit
 
   // Set by invalidate(). A drain still queued on the executor then does not
   // make this dead module the journal's listener.
@@ -86,6 +102,7 @@ class UploaderModule(context: ReactApplicationContext) :
     // The flag goes first: the drain reads it under the journal lock.
     invalidated = true
     journal.stopListening(this)
+    reactApplicationContext.removeLifecycleEventListener(this)
     if (instance === this) instance = null
     super.invalidate()
   }

@@ -186,6 +186,11 @@ class QueueController(
    * paused set, and an empty list changes nothing. Each live row that is now
    * paused (gate on, or its key in the set) moves to paused and its work
    * stops. No outcome.
+   *
+   * A failed settings write does not throw (see [QueueSettingsStore.update]).
+   * A failed entry save throws E_STORAGE after every other entry is moved
+   * and its work stopped. The entry that failed keeps its old row; its
+   * worker sees the paused gate before its next attempt.
    */
   fun pause(keys: List<String>? = null) {
     if (keys != null && keys.isEmpty()) return
@@ -193,17 +198,21 @@ class QueueController(
       if (keys == null) it.copy(paused = true) else it.copy(pausedKeys = it.pausedKeys + keys)
     }
     val now = clock()
-    val paused = transformAll { e ->
+    val result = transformAll { e ->
       if (e.isLive && e.state != EntryState.PAUSED && s.isPaused(e.key)) EntryTransitions.toPaused(e, now) else e
     }
-    paused.forEach { scheduler.cancel(it.id) }
-    paused.forEach { events.state(it.toRow()) }
+    result.changed.forEach { scheduler.cancel(it.id) }
+    result.changed.forEach { events.state(it.toRow()) }
+    result.throwIfFailed("pause")
   }
 
   /**
    * Undoes the pause of the same scope: [keys] null turns the gate off, a
    * list removes those keys from the set. A row comes back only when no
    * scope still pauses it, so the gate on + its key resumed stays paused.
+   *
+   * A failed entry save throws E_STORAGE after every other entry is moved
+   * and every queued entry is scheduled. The entry that failed stays paused.
    */
   fun resume(keys: List<String>? = null) {
     if (keys != null && keys.isEmpty()) return
@@ -211,12 +220,13 @@ class QueueController(
       if (keys == null) it.copy(paused = false) else it.copy(pausedKeys = it.pausedKeys - keys.toSet())
     }
     val now = clock()
-    val resumed = transformAll { e ->
-      if (e.state == EntryState.PAUSED && !s.isPaused(e.key)) EntryTransitions.toResumed(e, s.headerGeneration, now) else e
+    val result = transformAll { e ->
+      if (e.state == EntryState.PAUSED && !s.isPaused(e.key)) EntryTransitions.toResumed(e, now) else e
     }
-    resumed.forEach { events.state(it.toRow()) }
+    result.changed.forEach { events.state(it.toRow()) }
     // Every queued entry, not only the resumed ones: a run is idempotent.
     store.all().forEach { scheduleRun(it) }
+    result.throwIfFailed("resume")
   }
 
   /**
@@ -316,6 +326,11 @@ class QueueController(
     generation = e.generation,
   )
 
+  /**
+   * The settings calls (this one, [pause], [resume], [configureRetry],
+   * [updateHeaders]) never throw for a failed settings write. See
+   * [QueueSettingsStore.update].
+   */
   fun setWifiOnly(enabled: Boolean) {
     settings.update { it.copy(wifiOnly = enabled) }
   }
@@ -330,21 +345,30 @@ class QueueController(
    * own headerGeneration, which changes here under the store lock together
    * with its headers. So a worker that gets a 401 either sees the patched
    * entry and re-issues, or parks first and is requeued here.
+   *
+   * A failed entry save throws E_STORAGE after every other entry is patched
+   * and the unparked ones are scheduled. The entry that failed keeps its old
+   * headers on disk and stays parked if it was. A later call patches it.
    */
   fun updateHeaders(patch: Map<String, String>) {
-    val s = settings.update { it.copy(headerGeneration = it.headerGeneration + 1) }
+    // Above every entry's value too. After a failed settings write and a
+    // relaunch, the file can hold an older generation than the entries, and
+    // a 401 under the newest one must still see newer headers.
+    val entriesMax = store.all().maxOfOrNull { it.headerGeneration } ?: 0
+    val s = settings.update { it.copy(headerGeneration = maxOf(it.headerGeneration, entriesMax) + 1) }
     val now = clock()
     val unparkedIds = mutableSetOf<String>()
-    val changed = transformAll { e ->
+    val result = transformAll { e ->
       val patched = e.withHeadersPatched(patch, s.headerGeneration)
       if (patched.state != EntryState.AWAITING_AUTH) return@transformAll patched
       unparkedIds += e.id
       EntryTransitions.toUnparked(patched, s.isPaused(patched.key), now)
     }
-    changed.filter { it.id in unparkedIds }.forEach { entry ->
+    result.changed.filter { it.id in unparkedIds }.forEach { entry ->
       scheduleRun(entry)
       events.state(entry.toRow())
     }
+    result.throwIfFailed("updateHeaders")
   }
 
   // MARK: - journal
@@ -460,7 +484,7 @@ class QueueController(
           if (paused && cur.state != EntryState.PAUSED) {
             cur = EntryTransitions.toPaused(cur, now)
           } else if (!paused && cur.state == EntryState.PAUSED) {
-            cur = EntryTransitions.toResumed(cur, s.headerGeneration, now)
+            cur = EntryTransitions.toResumed(cur, now)
           }
           if (cur !== e) {
             if (trySave(cur)) changed += cur else continue
@@ -543,16 +567,42 @@ class QueueController(
     if (!isWorkerRunning(id)) scheduler.cancelWake(id)
   }
 
-  /** Applies [transform] to every non-legacy entry under the store lock. Returns the ones it changed. */
-  private fun transformAll(transform: (QueueEntry) -> QueueEntry): List<QueueEntry> {
+  /** The entries [transformAll] saved, and the saves that failed. */
+  private class Transformed(val changed: List<QueueEntry>, val failures: Int, val firstFailure: IOException?) {
+    /** Throws E_STORAGE when an entry save failed. Call it after the work for [changed] is done. */
+    fun throwIfFailed(method: String) {
+      val e = firstFailure ?: return
+      throw QueueException(
+        QueueException.E_STORAGE,
+        "$method: could not save $failures entries: ${e.message}" + StorageCause.suffix(e, withMessage = false),
+        e,
+      )
+    }
+  }
+
+  /**
+   * Applies [transform] to every non-legacy entry under the store lock. An
+   * entry whose save fails keeps its old row, and the loop goes on, so one
+   * full-disk failure does not leave the other entries unchanged.
+   */
+  private fun transformAll(transform: (QueueEntry) -> QueueEntry): Transformed {
     val changed = mutableListOf<QueueEntry>()
+    var failures = 0
+    var first: IOException? = null
     store.locked {
       store.all().filter { !it.legacy }.forEach { e ->
-        store.compute(e.id) { cur ->
-          if (cur == null) null else transform(cur).also { if (it !== cur) changed += it }
+        try {
+          var next: QueueEntry? = null
+          store.compute(e.id) { cur ->
+            if (cur == null) null else transform(cur).also { if (it !== cur) next = it }
+          }
+          next?.let { changed += it } // only once the save landed
+        } catch (error: IOException) {
+          failures++
+          if (first == null) first = error
         }
       }
     }
-    return changed
+    return Transformed(changed, failures, first)
   }
 }

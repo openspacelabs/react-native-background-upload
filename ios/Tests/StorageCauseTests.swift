@@ -88,25 +88,6 @@ final class StorageCauseTests: XCTestCase {
 
   // MARK: - The cause in the message
 
-  func testFailedSettingsSaveRejectsWithTheCause() throws {
-    h.pause(keys: ["capture"]) // so the resume below changes the settings
-    setReadOnly(h.store.root, true)
-    let calls: [(String, EnqueueError?)] = [
-      ("setWifiOnly", rejection { self.h.coordinator.setWifiOnly(true, resolve: $0, reject: $1) }),
-      ("updateHeaders", rejection { self.h.coordinator.updateHeaders(["A": "b"], resolve: $0, reject: $1) }),
-      ("pause", rejection { self.h.coordinator.pause([:], resolve: $0, reject: $1) }),
-      ("resume", rejection { self.h.coordinator.resume(["keys": ["capture"]], resolve: $0, reject: $1) }),
-    ]
-    for (method, rejected) in calls {
-      let r = try XCTUnwrap(rejected, "\(method) resolved")
-      XCTAssertEqual(r.code, "E_STORAGE")
-      // EACCES: the read-only directory refuses settings.json.tmp.
-      XCTAssertTrue(r.message.hasPrefix(
-        "\(method): cannot save the queue settings (cause: NSPOSIXErrorDomain 13; cannot create settings.json.tmp"),
-                    r.message)
-    }
-  }
-
   func testCancelWhoseJournalWriteFailsRejectsWithTheCause() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     setReadOnly(h.journal.root, true)
