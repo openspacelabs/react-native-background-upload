@@ -14,6 +14,9 @@ import Foundation
 /// Next to the directories: `settings.json` and the `v10-imported` marker.
 /// Writes are tmp + fsync + rename. A corrupt or half-written file reads as
 /// absent. Synchronous on a private serial queue, like the v9 store.
+///
+/// `entry.json.tmp` alone in a directory is an entry save that a crash or a
+/// power loss cut short. Boot finishes it (`promoteInterruptedSaves`).
 final class QueueStore {
   static let shared = QueueStore(
     root: FileIO.applicationSupport().appendingPathComponent("RNFileUploaderChunked", isDirectory: true))
@@ -59,10 +62,21 @@ final class QueueStore {
 
   /// Throws on a write failure. An entry that did not persist must fail the
   /// enqueue.
+  ///
+  /// `writeAtomically` syncs the entry directory after the rename, so a
+  /// power loss cannot undo it: the first save would leave only
+  /// entry.json.tmp, and a later save would bring back an older entry. The
+  /// first save also syncs the root, which holds the new directory's name.
+  /// A failed sync is logged and the save still counts. If a power loss then
+  /// undoes a first save, boot promotes the lone tmp.
   func save(_ entry: QueueEntry) throws {
     try queue.sync {
-      try FileManager.default.createDirectory(at: dir(entry.id), withIntermediateDirectories: true)
-      try FileIO.writeAtomically(Self.encode(entry), to: fileURL(entry.id, Self.entryName))
+      let d = dir(entry.id)
+      let url = d.appendingPathComponent(Self.entryName)
+      try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+      let first = !FileIO.exists(url)
+      try FileIO.writeAtomically(Self.encode(entry), to: url)
+      if first { FileIO.syncDirectoryOrLog(root) }
     }
   }
 
@@ -78,9 +92,63 @@ final class QueueStore {
   }
 
   /// Deletes the id directory: entry, body, blob, part files, and a v9
-  /// manifest.
+  /// manifest. A stray entry.json.tmp goes first, and that delete is synced:
+  /// a removal cut short must never leave the tmp alone, because boot would
+  /// promote it and bring the request back.
   func remove(_ id: String) {
-    queue.sync { _ = try? FileManager.default.removeItem(at: dir(id)) }
+    queue.sync {
+      let d = dir(id)
+      let tmp = FileIO.tmpURL(for: d.appendingPathComponent(Self.entryName))
+      if (try? FileManager.default.removeItem(at: tmp)) != nil { FileIO.syncDirectoryOrLog(d) }
+      _ = try? FileManager.default.removeItem(at: d)
+    }
+  }
+
+  // MARK: - Boot repair
+
+  /// Runs at boot, before anything reads, counts or cleans the entry
+  /// directories. Finishes entry saves that a crash or a power loss cut
+  /// short. For each id directory that holds `entry.json.tmp`:
+  /// - No `entry.json`, and the tmp decodes to the entry of this directory:
+  ///   the tmp is renamed onto `entry.json` and loads like any entry. The
+  ///   app asked for the request, even when the process died before its
+  ///   enqueue resolved.
+  /// - No `entry.json`, and the tmp does not decode: both stay as they are.
+  /// - A readable `entry.json`: the tmp is a later save that did not finish.
+  ///   `entry.json` wins and the tmp is deleted.
+  /// - An unreadable `entry.json`: both stay as they are.
+  /// It reads nothing but `entry.json.tmp`, so v9 files stay as they are. It
+  /// skips set-aside directories, which are hidden. Returns the promoted ids.
+  @discardableResult
+  func promoteInterruptedSaves() -> [String] {
+    queue.sync {
+      var promoted: [String] = []
+      for d in subdirectories() {
+        let url = d.appendingPathComponent(Self.entryName)
+        let tmp = FileIO.tmpURL(for: url)
+        guard FileIO.exists(tmp) else { continue }
+        if FileIO.exists(url) {
+          if Self.read(url) != nil { _ = try? FileManager.default.removeItem(at: tmp) }
+          continue
+        }
+        guard let e = Self.read(tmp), dir(e.id).lastPathComponent == d.lastPathComponent else {
+          NSLog("[RNFileUploader] \(d.lastPathComponent)/\(tmp.lastPathComponent) is not an entry of this "
+                + "directory; left as it is")
+          continue
+        }
+        do {
+          try FileIO.rename(tmp, onto: url)
+        } catch {
+          NSLog("[RNFileUploader] cannot recover entry \(e.id): \(error.localizedDescription)")
+          continue
+        }
+        FileIO.syncDirectoryOrLog(d)
+        FileIO.syncDirectoryOrLog(root)
+        promoted.append(e.id)
+        NSLog("[RNFileUploader] recovered entry \(e.id) from an entry save that did not finish")
+      }
+      return promoted
+    }
   }
 
   /// Deletes the id directory when it holds no `entry.json`: v9 files that
@@ -214,9 +282,11 @@ final class QueueStore {
   /// Never a chunked blob (`blob`, `blob-<uuid>`): that file was moved in,
   /// so it can be the only copy, and a same-id enqueue adopts it
   /// (`adoptableBlob`). Never a part file: its entry is gone, so its use is
-  /// not known. Never `entry.json.tmp`: `FileIO.writeAtomically` does not
-  /// sync the directory, so after a crash it can be the only trace of an
-  /// entry whose enqueue already resolved.
+  /// not known. Never `entry.json.tmp`: boot promotion
+  /// (`promoteInterruptedSaves`) runs before this cleanup, so a tmp still
+  /// here is one it could not use: it does not read as this directory's
+  /// entry, or its rename failed. It can still be the only trace of a
+  /// request, so the directory stays.
   static func isCopiedBodyFile(_ name: String) -> Bool {
     let range = NSRange(name.startIndex..., in: name)
     return copiedBody.firstMatch(in: name, range: range) != nil

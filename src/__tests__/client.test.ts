@@ -107,17 +107,21 @@ describe('client shape', () => {
     expect(Object.keys(client).sort()).toEqual(
       [
         'addListener',
+        'addRequestsListener',
         'android',
         'cancel',
         'chunkPlan',
         'configure',
         'define',
+        'getCachedRequests',
         'getRequests',
         'pause',
         'resume',
         'setWifiOnly',
         'takeDiagnostics',
         'updateHeaders',
+        'useRequests',
+        'useRequestsWithProgress',
       ].sort(),
     );
     expect(Object.keys(client.android)).toEqual(['addNotificationListener']);
