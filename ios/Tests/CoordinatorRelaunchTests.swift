@@ -32,6 +32,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
     fresh.relaunch(daemonTasks: [survivor])
     fresh.boot()
     XCTAssertTrue(fresh.transport.created.isEmpty, "adopted, not re-issued")
+    XCTAssertTrue(survivor.resumed, "a task left suspended by a crash runs")
     XCTAssertEqual(fresh.row("a")?["state"] as? String, "running")
     fresh.complete(survivor)
     XCTAssertEqual(fresh.entry("a")?.state, .completed)

@@ -29,6 +29,7 @@ import {
   remove,
   type TestFile,
 } from './harness/files';
+import {LATENCY_RUNS, measureEnqueueLatency} from './harness/latency';
 import {clearLog, clock, getLog, log, subscribeLog} from './harness/log';
 import type {LogEntry, LogKind} from './harness/log';
 import {saveSettings, settings} from './harness/settings';
@@ -210,6 +211,9 @@ const App = () => {
         ...[1, 2, 3].map(() => enqueueJson('slow', undefined)),
       ]);
     }),
+    latency: run(`Enqueue latency x${LATENCY_RUNS}`, () =>
+      measureEnqueueLatency(settings.host),
+    ),
     stats: run('Server stats', async () =>
       (await fetch(`${settings.host}/stats`)).json(),
     ),
@@ -383,6 +387,13 @@ const App = () => {
             <Btn
               title="Cap test: 3 chunked + 3 JSON on /slow"
               onPress={actions.capTest}
+              disabled={!isReady}
+            />
+          </Row>
+          <Row>
+            <Btn
+              title={`Enqueue latency x${LATENCY_RUNS}: 2 GiB, 20 MiB parts, on /slow`}
+              onPress={actions.latency}
               disabled={!isReady}
             />
           </Row>

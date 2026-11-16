@@ -51,11 +51,12 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
   // AppDelegate stores the system completion handler here per session id.
   private static let bgHandlerLock = NSLock()
   private static var bgCompletionHandlers: [String: () -> Void] = [:]
-  // While a relaunch reconcile runs (deferrals > 0), urlSessionDidFinishEvents
-  // must not hand the system its handler: the system could suspend the app
-  // before the refill enqueues the next tasks, leaving zero daemon tasks and
-  // no future wake. A session that finishes its events in that window parks
-  // its id here; the release drains it.
+  // While a relaunch reconcile runs or part slices are queued (deferrals > 0),
+  // the system must not get its handler: it could suspend the app before the
+  // refill enqueues the next tasks, leaving parts with no daemon task and no
+  // future wake. urlSessionDidFinishEvents parks its session id here and
+  // holds a deferral until the coordinator is idle; the last release drains
+  // the parked ids.
   private static var bgHandlerDeferrals = 0
   private static var bgSessionsAwaitingDrain: Set<String> = []
 
@@ -69,6 +70,13 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
     coordinator = QueueCoordinator(
       store: .shared, journal: .shared, taskMap: .shared, transport: transport, sink: sink)
     super.init()
+    // UIApplication is main-thread only. The coordinator queue may wait on
+    // main here: main never waits on the coordinator queue.
+    coordinator.wakeTimeRemaining = {
+      Thread.isMainThread
+        ? UIApplication.shared.backgroundTimeRemaining
+        : DispatchQueue.main.sync { UIApplication.shared.backgroundTimeRemaining }
+    }
     transport.createSessions(delegate: self)
     observeAppState()
     // Claim the completion-handler deferral BEFORE the reconcile is queued.
@@ -289,16 +297,14 @@ public class RNBackgroundUpload: NSObject, URLSessionDataDelegate {
 
   public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
     guard let identifier = session.configuration.identifier else { return }
+    // The completions just delivered may have queued part slices, and a
+    // relaunch reconcile may be in flight. Park the id and hold one more
+    // deferral until the coordinator is idle. The last release drains the id.
     RNBackgroundUpload.bgHandlerLock.lock()
-    guard RNBackgroundUpload.bgHandlerDeferrals <= 0 else {
-      // A relaunch reconcile is in flight. Park the id; the release drains it.
-      RNBackgroundUpload.bgSessionsAwaitingDrain.insert(identifier)
-      RNBackgroundUpload.bgHandlerLock.unlock()
-      return
-    }
-    let handler = RNBackgroundUpload.bgCompletionHandlers.removeValue(forKey: identifier)
+    RNBackgroundUpload.bgHandlerDeferrals += 1
+    RNBackgroundUpload.bgSessionsAwaitingDrain.insert(identifier)
     RNBackgroundUpload.bgHandlerLock.unlock()
-    if let handler { DispatchQueue.main.async { handler() } }
+    coordinator.whenIdle { RNBackgroundUpload.releaseBackgroundCompletionHandlers() }
   }
 
   // MARK: - App state
@@ -362,7 +368,7 @@ private final class SessionTransport: Transport {
   }
 
   func upload(_ request: URLRequest, fromFile file: URL, wifiOnly: Bool, description: String,
-              beginAt: Date?, beforeResume: (String) -> Void) throws -> UploadTask {
+              beginAt: Date?) throws -> UploadTask {
     let session = self.session(wifiOnly: wifiOnly)
     // A background session uploads from a file only. When it cannot read the
     // file it raises an Objective-C exception, not an error. Swift cannot
@@ -378,10 +384,8 @@ private final class SessionTransport: Transport {
     let task = created!
     task.taskDescription = description
     if let beginAt { task.earliestBeginDate = beginAt }
-    let handle = SessionTask(session: session, task: task)
-    beforeResume(handle.key)
-    task.resume()
-    return handle
+    // Not resumed: the caller writes the TaskMap entry first.
+    return SessionTask(session: session, task: task)
   }
 
   func allTasks(_ completion: @escaping ([UploadTask]) -> Void) {
@@ -439,5 +443,6 @@ private final class SessionTask: UploadTask {
   var beginAt: Date? { task.earliestBeginDate }
   var bytesSent: Int64 { task.countOfBytesSent }
   var hasResponse: Bool { task.response != nil }
+  func resume() { task.resume() }
   func cancel() { task.cancel() }
 }

@@ -47,8 +47,15 @@ const ensureDir = async () => {
 
 export type TestFile = {path: string; size: number; md5: string};
 
-/** Writes a new file of `mb` MiB and returns its path, size, and MD5. */
-export const makeFile = async (name: string, mb: number): Promise<TestFile> => {
+/**
+ * Writes a new file of `mb` MiB and returns its path, size, and MD5. With
+ * `md5: false` the MD5 is '' (hashing a large file takes long).
+ */
+export const makeFile = async (
+  name: string,
+  mb: number,
+  options: {md5?: boolean} = {},
+): Promise<TestFile> => {
   await ensureDir();
   const path = `${TEST_DIR}/${name}`;
   await RNFS.writeFile(path, block(0), 'utf8');
@@ -56,7 +63,8 @@ export const makeFile = async (name: string, mb: number): Promise<TestFile> => {
     await RNFS.appendFile(path, block(i), 'utf8');
   }
   const {size} = await RNFS.stat(path);
-  return {path, size: Number(size), md5: await RNFS.hash(path, 'md5')};
+  const md5 = options.md5 === false ? '' : await RNFS.hash(path, 'md5');
+  return {path, size: Number(size), md5};
 };
 
 /** Writes a new 1x1 JPEG and returns its path. */

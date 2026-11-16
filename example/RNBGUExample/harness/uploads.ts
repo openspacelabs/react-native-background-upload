@@ -153,32 +153,52 @@ export const putFile = Upload.define({
 export type ChunkedVars = Target & {file: string; size: number};
 
 /**
- * A chunked PUT. The library moves the file at mutate(). Part URLs are
- * `${path}/${n}`, 1-indexed, with a Diana-style Content-Range. A 404 on a
- * part is terminal, as in Diana, so onError could recreate the upload.
+ * A chunked PUT over `ranges`. The library moves the file at mutate(). Part
+ * URLs are `${path}/${n}`, 1-indexed, with a Diana-style Content-Range. A 404
+ * on a part is terminal, as in Diana, so onError could recreate the upload.
  */
+const chunkedRequest = (
+  v: ChunkedVars,
+  ranges: Array<{start: number; end: number}>,
+) => ({
+  method: 'PUT' as const,
+  file: v.file,
+  headers: {'Content-Type': 'application/octet-stream'},
+  parts: ranges.map((range, i) => ({
+    url: `${v.host}${v.path}/${i + 1}`,
+    range,
+    headers: {
+      'Content-Range': `${range.start}-${range.end - 1}/${v.size}`,
+    },
+  })),
+  accept: ALREADY_DONE,
+  retry: {terminalHttp: {exempt: []}},
+  ...common(v),
+});
+
+/** A chunked PUT in 5 MiB parts. */
 export const putChunked = Upload.define({
   key: 'harness.chunked',
-  request: (v: ChunkedVars) => {
-    const ranges = Upload.chunkPlan(v.size, {min: PART_BYTES, max: PART_BYTES});
-    return {
-      method: 'PUT',
-      file: v.file,
-      headers: {'Content-Type': 'application/octet-stream'},
-      parts: ranges.map((range, i) => ({
-        url: `${v.host}${v.path}/${i + 1}`,
-        range,
-        headers: {
-          'Content-Range': `${range.start}-${range.end - 1}/${v.size}`,
-        },
-      })),
-      accept: ALREADY_DONE,
-      retry: {terminalHttp: {exempt: []}},
-      ...common(v),
-    };
-  },
+  request: (v: ChunkedVars) =>
+    chunkedRequest(
+      v,
+      Upload.chunkPlan(v.size, {min: PART_BYTES, max: PART_BYTES}),
+    ),
   onSuccess: (raw, v, meta) =>
     outcome('ok', meta, `${v.path} chunked status=${raw.status ?? 'none'}`),
+  onError: (e, v, meta) => outcome('error', meta, errorText(e, v)),
+});
+
+/**
+ * A chunked PUT in Diana's parts: 20 MiB, at least 8 MiB. A 2 GiB file gives
+ * 103 parts. The enqueue latency run uses it.
+ */
+export const putChunked20 = Upload.define({
+  key: 'harness.chunked20',
+  request: (v: ChunkedVars) =>
+    chunkedRequest(v, Upload.chunkPlan(v.size, {min: 8 * MB, max: 20 * MB})),
+  onSuccess: (raw, v, meta) =>
+    outcome('ok', meta, `${v.path} chunked20 status=${raw.status ?? 'none'}`),
   onError: (e, v, meta) => outcome('error', meta, errorText(e, v)),
 });
 

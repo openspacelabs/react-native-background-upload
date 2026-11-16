@@ -55,6 +55,17 @@ relaunched with no JS running, so queued completions get journaled. `RNFileUploa
 is the TurboModule and is deliberately not reachable from plain Objective-C, because its
 generated header is Objective-C++ only. So the handler lives on `RNBackgroundUpload`.
 
+The library calls the handler when its work for the wake is done: after the
+relaunch reconcile, its grace waits, and every queued slice of chunked part
+tasks (see "Every part is queued at once"). A part slice can take long on an
+older device, so the library stops waiting for slices when less than 5 s of
+background time is left, and calls the handler then. The parts not built yet
+get their tasks at the next wake or launch. Usually that wake comes, because
+the upload already has the tasks of its first slice and the system wakes the
+app when one of them finishes. It may not come when no slice of the upload
+could be built (a full disk, for example): then only an in-process timer
+retries the build, and the parts wait until the app next runs.
+
 # Usage
 
 The library owns a durable queue of HTTP requests: JSON bodies, multipart
@@ -226,16 +237,25 @@ two background sessions (cellular allowed, and Wi-Fi only) sets
 `httpMaximumConnectionsPerHost = 4`. That caps connections to one host, not
 requests: over HTTP/2, every queued part can be in flight at once.
 
-**Every part is queued at once.** A chunked upload creates a task for every
-part at `mutate()`. Each part task reads its own part file, so a chunked
+**Every part is queued at once.** A chunked upload starts creating a task
+for every part at `mutate()`. It copies the parts and creates their tasks in
+slices of about 32 MiB, one slice at a time, and other calls run between two
+slices. So a `mutate()` right after a large chunked one waits for at most one
+slice per chunked upload that is building its parts, not for whole files. Each part task reads its own part file, so a chunked
 upload needs the file's size again in free space until its parts are sent.
+
+**Instruments.** Each `enqueue`, each `issue` and each part slice is an
+`os_signpost` interval (subsystem `ai.openspace.rnbgupload`, Points of
+Interest), with the entry id and the part count.
 
 **Not at the system's discretion.** Both sessions set
 `isDiscretionary = false`, but iOS only honors that for a task created while
 the app is in the foreground. It starts a task created in the background at
 its own discretion, for example when the device charges. Tasks are often
 created in the background: a retry scheduled while the app is there, a
-`mutate()` from a background wake, and the tasks a relaunch rebuilds. So the library records whether the app was active when it created
+`mutate()` from a background wake, the tasks a relaunch rebuilds, and the
+part tasks of a chunked upload whose slice runs after the app leaves the
+foreground. So the library records whether the app was active when it created
 each task. Two seconds after the app becomes active, it replaces every task
 created while the app was not active, unless the task has sent a byte of its
 body or has a response. The delay lets the system report what the task did
