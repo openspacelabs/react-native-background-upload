@@ -50,30 +50,47 @@ events, are lower for uploads that only waited. The number of attempt
 events does not change. That is the correct count.
 
 **Behavior change:** on Android, the boot sweep, `resume()` and a return to
-the foreground now clear a backoff wait and start queued uploads at once.
-Before, an entry on a long backoff (up to 2 hours) kept its wait when the
-app opened, and `resume()` kept it too. `resume({ keys })` clears the waits
-of those keys only. The entry keeps at most 5 backoff steps, so if the
-server still fails, the next wait is about 32 s, then it doubles. A paused
-entry that `resume()` moves back to `queued` starts its backoff over. The
-app needs no code for this.
+the foreground now end some backoff waits and start those uploads at once.
+A wait is ended only when the failure behind it had no server response (a
+transport failure, or a stop that cut the request), or when an older
+version saved the entry, and only 30 s or more after that failure. A wait
+after a server response (a 5xx, 408, 429, or a status a `transient` rule
+retries) keeps its time: the server asked for it, and ending it early
+would spend a rule's `maxRetries` faster. Before, an entry on a long
+backoff (up to 2 hours) kept its wait when the app opened, and `resume()`
+kept it too. `resume({ keys })` affects those keys only. The entry keeps at
+most 5 backoff steps, so if the request fails again, the next wait is 32
+times `baseMs` (32 s at the default 1 s base), and then it doubles. A paused entry that `resume()` moves back to `queued` also keeps at
+most 5 steps. "A return to the foreground" is every Activity resume, also
+after a permission dialog or a picker, so the library does this at most
+once every 30 s. The app needs no code for this. Entries now save the cause
+and time of their last failure; entries saved by an older version read as
+unknown.
 
 Android: the boot sweep, `resume()`, a return to the foreground,
 `updateHeaders()` and a same-id `mutate()` now replace a WorkManager row
 that WorkManager holds back after a system stop, so the entry can start at
-once. Before, the library added no row while that stopped row waited, and
-the entry waited for WorkManager's own backoff (up to 5 hours). The library
-replaces the row only when no run of the entry is in progress.
+once. This applies to every queued entry with no backoff wait, whatever its
+last failure: it only makes sure a row exists. Before, the library added no
+row while that stopped row waited, and the entry waited for WorkManager's
+own backoff (up to 5 hours). The library replaces the row only when no row
+of the entry's main chain runs, and keeps a row that WorkManager starts
+within 30 s. It makes the new row before it cancels the old wake.
 
-Android: a transport failure (no HTTP response) now waits at most 15
-minutes. Every attempt starts on a network that Android reports as
-validated. HTTP failures keep the retry policy's `maxMs` (2 hours by
-default).
+Android: a failure in the connect phase now waits at most 15 minutes. That
+is a failure that proves the request never reached the server:
+`ConnectException`, `UnknownHostException`, `NoRouteToHostException`,
+`PortUnreachableException`, `SSLHandshakeException`,
+`SSLPeerUnverifiedException`. Every attempt starts on a network that
+Android reports as validated. Every other failure, a timeout included,
+keeps the retry policy's `maxMs` (2 hours by default), because the server
+may have the request.
 
-Android: a chunked entry uses its stored backoff only until a part is
-accepted in the run. After that each part counts its own failures from 0.
-Before, one failed part after a long backoff sent the whole entry back for
-the next, longer wait.
+Android: in a chunked entry, the part whose failures set the stored backoff
+goes on from it in the next run, and only that part's acceptance resets it.
+The other parts count their own failures from 0. Before, every part
+started at the stored backoff, so one failed part after a long backoff
+sent the whole entry back for the next, longer wait.
 
 ## 11.3.0
 

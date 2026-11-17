@@ -220,15 +220,20 @@ at the next run, after a growing backoff. A body that needs more than
 10 minutes headless cannot finish that way. Use `parts` for large bodies:
 accepted parts are kept across runs. iOS has no equal limit.
 
-**Backoff and the app.** When the app starts, comes to the foreground, or
-calls `resume()`, the library ends the retry backoff of every queued entry
-(for `resume({ keys })`, of the entries of those keys) and runs it at once.
-The app needs no code for this. The entry keeps at most 5 backoff steps, so
-if the server still fails, the next wait is about 32 s and then doubles. The
-library also replaces a WorkManager row that WorkManager holds back after a
-system stop, so the entry can start at once. A chunked entry uses its stored
-backoff only until a part is accepted in the run; after that each part
-counts its own failures from zero.
+**Backoff and the app.** When the app starts, calls `resume()`, or comes
+to the foreground (every Activity resume, at most once every 30 s), the
+library ends the retry backoff of a queued entry and runs it at once, when
+two things hold: the failure behind the wait had no server response (or an
+older version saved the entry), and it happened 30 s or more ago. A wait
+after a server response, such as a 503 or a status a `transient` rule
+retries, keeps its time. `resume({ keys })` affects those keys only. The
+app needs no code for this. The entry keeps at most 5 backoff steps, so if
+it fails again the next wait is 32 times `baseMs` (32 s at the default
+1 s), then it doubles. For every queued entry with no wait, the library
+also replaces a WorkManager row that WorkManager holds back after a system
+stop, so the entry can start at once. In a chunked entry, the part whose
+failures set the backoff goes on from it; the other parts count their own
+failures from zero.
 
 **Backups.** The queue store (`files/rnbgupload-chunked/`) and the journal
 (`files/rnbgupload-settled/`) hold request headers, including auth tokens,
@@ -353,7 +358,7 @@ Retry classes:
 | Attempt outcome | Action |
 | --- | --- |
 | 2xx, or an `accept` rule matches | settle `completed` |
-| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt`. On Android a network failure (no HTTP response) waits at most 15 minutes |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt`. On Android a failure in the connect phase (the request never reached the server) waits at most 15 minutes |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
 | other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
@@ -484,9 +489,9 @@ event (`paused`, then `queued`). No outcome is produced and the bytes are
 kept. A paused entry past `expiresAt` settles `error` with
 `errorKind: 'expired'` when it is resumed.
 
-On Android, `resume()` also ends the retry backoff of the queued entries in
-its scope, and they run at once. A resumed entry starts its backoff over.
-See "Backoff and the app" under Android platform notes.
+On Android, `resume()` also ends some retry backoff waits of the queued
+entries in its scope, and they run at once. A resumed entry keeps at most 5
+backoff steps. See "Backoff and the app" under Android platform notes.
 
 Neither call rejects because the settings cannot be saved. On Android,
 either call can still reject `E_STORAGE` when an entry file cannot be saved.
