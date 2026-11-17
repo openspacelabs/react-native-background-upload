@@ -64,7 +64,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertTrue(fresh.transport.created.isEmpty, "no duplicate request")
   }
 
-  func testRunningWithALostTaskReissuesAfterTheGraceAndPrunesItsKey() throws {
+  func testRunningWithALostTaskReissuesAfterTheGraceAndKeepsItsKeyForALateResult() throws {
     h.boot()
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
     let lost = h.transport.live[0]
@@ -73,12 +73,20 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertTrue(fresh.transport.created.isEmpty)
     fresh.advance(Double(QueueCoordinator.graceMs))
     XCTAssertEqual(fresh.transport.created.count, 1)
-    XCTAssertNil(fresh.map.meta(forKey: lost.key))
-    XCTAssertTrue(fresh.map.keys(where: { $0.id == "a" && $0.attempt == 1 }).isEmpty, "\(lost.key) pruned")
-    // The next launch does not wait the grace again for the same lost task.
+    XCTAssertEqual(fresh.map.meta(forKey: lost.key)?.purpose, .superseded, "kept, so a late result can win")
+    let retry = try XCTUnwrap(fresh.transport.live.first)
+    // The next launch does not wait the grace again for the same lost task:
+    // the wait covers only attempt 2, so its replay ends the wait at once.
     let third = Harness(root: h.root)
-    third.boot()
-    XCTAssertTrue(third.map.keys(where: { $0.attempt == 1 }).isEmpty)
+    var released = false
+    third.coordinator.reconcileAll { released = true }
+    third.drain()
+    third.drain()
+    XCTAssertFalse(released)
+    third.complete(FakeTask(key: retry.key, description: retry.taskDescription, request: retry.request))
+    XCTAssertTrue(released, "attempt 1's key does not hold the wait")
+    XCTAssertEqual(third.entry("a")?.state, .completed)
+    XCTAssertTrue(third.map.keys(where: { $0.id == "a" }).isEmpty, "the settle removes the kept key")
   }
 
   func testReconcileDropsKeysWhoseIdHasNoEntry() throws {
@@ -111,7 +119,8 @@ final class CoordinatorRelaunchTests: XCTestCase {
   }
 
   // The key says the delayed task may have run while the app was dead: wait
-  // for its replay, then mint a new attempt so a late replay is stale.
+  // for its replay, then mint a new attempt. A late accepted replay of the
+  // old attempt still completes the entry.
   func testQueuedEntryWithAPendingKeyWaitsTheGraceThenMintsANewAttempt() throws {
     h.boot()
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
@@ -124,10 +133,144 @@ final class CoordinatorRelaunchTests: XCTestCase {
     let task = try XCTUnwrap(fresh.transport.live.first)
     XCTAssertEqual(fresh.entry("a")?.attempts, 3)
     XCTAssertNotEqual(task.header("X-Request-Id"), waiting.header("X-Request-Id"))
-    XCTAssertTrue(fresh.map.keys(where: { $0.id == "a" && $0.attempt == 2 }).isEmpty, "the lost task's key is pruned")
-    // A late replay of the lost attempt is dropped.
+    XCTAssertEqual(fresh.map.meta(forKey: waiting.key)?.purpose, .superseded, "the old key is kept, marked")
+    // A late accepted replay of the old attempt wins over the new one.
     fresh.complete(FakeTask(key: waiting.key, description: waiting.taskDescription, request: waiting.request))
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+    XCTAssertTrue(task.cancelled)
+    XCTAssertEqual(fresh.sink.settled.count, 1)
+  }
+
+  // MARK: - A late result wins
+
+  /// Attempt 1's task finished while the app was dead, and its callback is
+  /// late. The grace ends, attempt 2 (task B) is issued, and then attempt 1's
+  /// result arrives.
+  private func reissuedAfterTheGrace() throws -> (fresh: Harness, original: FakeTask, b: FakeTask) {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let original = h.transport.live[0]
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    fresh.advance(Double(QueueCoordinator.graceMs))
+    let b = try XCTUnwrap(fresh.transport.live.first)
+    XCTAssertEqual(fresh.entry("a")?.attempts, 2)
+    return (fresh, original, b)
+  }
+
+  private func replay(_ task: FakeTask) -> FakeTask {
+    FakeTask(key: task.key, description: task.taskDescription, request: task.request)
+  }
+
+  func testALateReplayAfterAReissueCompletesTheEntryAndStopsTheNewTask() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    fresh.complete(replay(original), status: 201, body: #"{"id":7}"#)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+    XCTAssertTrue(b.cancelled, "the second send stops")
+    XCTAssertEqual(fresh.sink.settled.count, 1)
+    let response = fresh.sink.settled.first?["response"] as? [String: Any]
+    XCTAssertEqual(response?["status"] as? Int, 201, "the app gets the first attempt's response")
+    XCTAssertEqual(response?["body"] as? String, #"{"id":7}"#)
+    XCTAssertEqual(fresh.sink.settled.first?["attempts"] as? Int, 2, "the outcome counts both attempts")
+    XCTAssertEqual(fresh.sink.attempts.last?["attempt"] as? Int, 1)
+    XCTAssertEqual(fresh.sink.attempts.last?["requestId"] as? String, original.header("X-Request-Id"))
+    // B's cancel callback adds nothing.
+    fresh.deliverCancel(b)
+    XCTAssertEqual(fresh.sink.settled.count, 1)
+    XCTAssertEqual(fresh.transport.created.count, 1, "no third send")
+  }
+
+  func testALateFailureAfterAReissueLeavesTheNewAttemptAlone() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    let attemptsBefore = fresh.sink.attempts.count
+    fresh.complete(replay(original), status: 500)
+    fresh.complete(replay(original), error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+    fresh.deliverCancel(replay(original))
     XCTAssertEqual(fresh.entry("a")?.state, .running)
+    XCTAssertEqual(fresh.entry("a")?.attempts, 2)
+    XCTAssertFalse(b.cancelled)
+    XCTAssertEqual(fresh.transport.created.count, 1, "no retry is scheduled for the old attempt")
+    XCTAssertEqual(fresh.sink.attempts.count, attemptsBefore, "no event for the old attempt")
+    XCTAssertTrue(fresh.sink.settled.isEmpty)
+    fresh.complete(b, status: 201)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+    XCTAssertEqual(fresh.sink.settled.count, 1)
+  }
+
+  func testALate2xxAfterTheNewAttemptCompletedIsDropped() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    fresh.complete(b, status: 200)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+    let attemptsBefore = fresh.sink.attempts.count
+    fresh.complete(replay(original), status: 201)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+    XCTAssertEqual(fresh.sink.settled.count, 1, "one outcome")
+    XCTAssertEqual(fresh.sink.attempts.count, attemptsBefore)
+    XCTAssertTrue(fresh.transport.live.isEmpty)
+  }
+
+  func testTheSupersededKeysAreRemovedWhenTheEntrySettles() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    XCTAssertEqual(fresh.map.meta(forKey: original.key)?.purpose, .superseded, "kept for a late result")
+    fresh.complete(b, status: 400)
+    XCTAssertEqual(fresh.entry("a")?.state, .error)
+    XCTAssertNil(fresh.map.meta(forKey: original.key))
+    XCTAssertTrue(fresh.map.keys(where: { $0.id == "a" }).isEmpty, "nothing left for the entry")
+  }
+
+  /// The settle's journal write landed and its entry save did not, and the
+  /// process died before the kept key was removed. The relaunch repair of
+  /// the lost settle removes it.
+  func testTheRepairOfALostSettleRemovesTheSupersededKeys() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    let kept = try XCTUnwrap(fresh.map.meta(forKey: original.key))
+    let dir = fresh.store.dir("a")
+    setReadOnly(dir, true)
+    fresh.complete(b, status: 201)
+    setReadOnly(dir, false)
+    XCTAssertEqual(fresh.store.load("a")?.state, .running, "the disk still says running")
+    fresh.map.set(kept, forKey: original.key) // the removal did not land
+    let third = Harness(root: h.root)
+    third.boot()
+    XCTAssertEqual(third.entry("a")?.state, .completed)
+    XCTAssertNil(third.map.meta(forKey: original.key))
+    XCTAssertTrue(third.transport.created.isEmpty)
+  }
+
+  /// A second relaunch between the re-issue and the late result. Attempt
+  /// 1's task is listed as finished (not live): reconcile neither adopts nor
+  /// cancels it, and its result still completes the entry.
+  func testALateReplayAfterASecondRelaunchStillCompletesTheEntry() throws {
+    let (_, original, b) = try reissuedAfterTheGrace()
+    let listed = replay(original)
+    listed.isLive = false
+    let survivor = replay(b)
+    let third = Harness(root: h.root)
+    third.relaunch(daemonTasks: [listed, survivor])
+    third.boot()
+    XCTAssertFalse(listed.cancelled)
+    XCTAssertTrue(third.transport.created.isEmpty, "B is adopted")
+    XCTAssertEqual(third.map.meta(forKey: original.key)?.purpose, .superseded)
+    third.complete(listed, status: 201)
+    XCTAssertEqual(third.entry("a")?.state, .completed)
+    XCTAssertTrue(survivor.cancelled)
+    XCTAssertEqual(third.sink.settled.count, 1)
+  }
+
+  /// Same, but B is lost too: the second grace issues attempt 3, and attempt
+  /// 1's late result still wins over it.
+  func testALateReplayAfterTwoReissuesCompletesTheEntry() throws {
+    let (_, original, _) = try reissuedAfterTheGrace()
+    let third = Harness(root: h.root)
+    third.boot()
+    third.advance(Double(QueueCoordinator.graceMs))
+    let c = try XCTUnwrap(third.transport.live.first)
+    XCTAssertEqual(third.entry("a")?.attempts, 3)
+    third.complete(replay(original), status: 201)
+    XCTAssertEqual(third.entry("a")?.state, .completed)
+    XCTAssertTrue(c.cancelled)
+    XCTAssertEqual(third.sink.settled.count, 1)
+    XCTAssertTrue(third.map.keys(where: { $0.id == "a" && $0.purpose == .superseded && $0.attempt ?? 0 < 3 }).isEmpty)
   }
 
   // MARK: - Review fixes: lost saves, early completions, pending replays

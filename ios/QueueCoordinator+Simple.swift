@@ -178,10 +178,13 @@ extension QueueCoordinator {
     if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
     let accepted = c.error == nil
       && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
-    // A replaced task that finished before its cancel took effect. Its
-    // replacement drives the entry, unless this one landed while the entry
-    // is live. The server has the body then, so the entry completes, even
-    // when the replacement failed and the entry moved to a later attempt.
+    // A replaced task that finished before its cancel took effect, or an
+    // older attempt whose result came after the relaunch grace gave up on it
+    // (withoutTask). The newer task drives the entry, unless this one landed
+    // while the entry is live. The server has the body then, so the entry
+    // completes and settle cancels the newer task, even when the entry moved
+    // to a later attempt. A failure is dropped: it must not disturb the
+    // newer attempt.
     if meta?.purpose == .superseded && (!accepted || !e.isLive) { return }
     // A delayed task that ended before its begin date, with no response and
     // no body byte sent, never reached the daemon: nsurlsessiond refused the

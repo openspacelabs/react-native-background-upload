@@ -182,13 +182,18 @@ extension QueueCoordinator {
       guard let self, let current = self.index.entry(e.id), current.state == e.state,
             current.generation == e.generation, current.attempts == e.attempts,
             !self.liveTasks.values.contains(where: { $0.id == e.id }) else { return }
-      // No replay moved the entry: the task is lost. Its key would send
-      // every later launch through this wait again.
-      self.taskMap.removeAll { _, m in
-        m.id == e.id && m.generation == e.generation && m.attempt == e.attempts
-      }
-      // It may have run, so the next attempt gets a new ordinal: a late
-      // replay of this one is then dropped as stale.
+      // No replay came in time. The task may be lost, or its result may
+      // still arrive later. Mark its keys superseded instead of deleting
+      // them. A late accepted result then completes the entry and cancels
+      // the new attempt's task, and a late failure or cancel is dropped
+      // (taskCompletedLocked). The wait covers only the current attempt, so
+      // once the re-issue below moves the entry to a new attempt, a later
+      // launch does not wait for these keys again. settle removes them.
+      let stale = self.taskMap.keys(where: {
+        $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
+      })
+      self.taskMap.setPurpose(.superseded, for: stale.map { (key: $0, id: e.id) })
+      // It may have run, so the next attempt gets a new ordinal and request id.
       self.reissue(current, advanceAttempt: true)
     }
   }

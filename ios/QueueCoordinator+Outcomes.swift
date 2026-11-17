@@ -63,6 +63,7 @@ extension QueueCoordinator {
       journaled = false
     }
     cancelTasks(id, purpose: .superseded)
+    removeOlderSupersededKeys(e)
     chunked.stop(id)
     emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
     e.settledEventId = event.eventId
@@ -108,10 +109,24 @@ extension QueueCoordinator {
     n.nextAttemptAt = nil
     n.authParked = false
     cancelTasks(e.id, purpose: .superseded)
+    removeOlderSupersededKeys(e)
     chunked.stop(e.id)
     disarmExpiry(e.id)
     commit(n, emit: false)
     return n
+  }
+
+  /// A simple entry keeps the keys of an older attempt that the relaunch
+  /// grace gave up on, so a late result can still complete it (withoutTask).
+  /// Once the entry settles, such a result is dropped anyway, so the keys
+  /// go. Keys of the current attempt stay: a task cancelled at this settle
+  /// reads its purpose in its cancel callback, which removes the key.
+  func removeOlderSupersededKeys(_ e: QueueEntry) {
+    guard !e.isChunked else { return }
+    taskMap.removeAll { _, m in
+      m.id == e.id && m.partIndex == nil && m.purpose == .superseded && m.generation == e.generation
+        && (m.attempt.map { $0 < e.attempts } ?? false)
+    }
   }
 
   /// Relaunch, before any task is matched: every live row whose own

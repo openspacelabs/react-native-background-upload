@@ -282,7 +282,11 @@ above lets the library journal their outcomes.
 **Relaunch.** When the app comes back and an entry's task is gone but a
 completion may still be in flight from the daemon, the library waits up to
 10 s for it before it sends again. This is what stops a request that finished
-while the app was dead from being sent twice.
+while the app was dead from being sent twice. On iOS, when that result comes
+after the wait, it still counts: an accepted result completes the entry with
+the first attempt's response and cancels the new attempt's task. A failure
+that comes late is ignored, and the new attempt goes on. If the new task
+already sent its request, the server gets the request twice.
 
 # Reliable delivery
 
