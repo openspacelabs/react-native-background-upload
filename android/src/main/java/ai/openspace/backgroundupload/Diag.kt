@@ -42,6 +42,18 @@ internal object Diag {
     record(DiagnosticLog.INFO, message, null, data, replaceUntaken)
   }
 
+  /**
+   * A system stop of a run, as a warning. One record per [kind]: it holds
+   * the latest entry id and how many such stops happened since JS last
+   * took the log.
+   */
+  fun countStop(kind: String, entryId: String) {
+    val message = "run stopped by the system: $kind"
+    runCatching { Log.w(TAG, "$message ($entryId)") }
+    val target = log ?: return
+    runCatching { target.count(DiagnosticLog.WARN, message, clock(), mapOf("entryId" to entryId)) }
+  }
+
   private fun record(
     level: String,
     message: String,

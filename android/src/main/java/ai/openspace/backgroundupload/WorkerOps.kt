@@ -114,16 +114,18 @@ class WorkerOps(
 
   /**
    * A short backoff the worker waits out in place: the row stays running
-   * and carries [nextAttemptAt]. Best effort; a lost write only hides the
-   * time. For a chunked entry, a sibling part's next attempt clears it.
+   * and carries [nextAttemptAt]. It also saves the failure's backoff
+   * [streak], so a stop during the wait keeps that step. Best effort; a
+   * lost write hides the time and loses the step. For a chunked entry, a
+   * sibling part's next attempt clears the time.
    */
-  fun backingOff(id: String, generation: Int, nextAttemptAt: Long) {
+  fun backingOff(id: String, generation: Int, nextAttemptAt: Long, streak: Int) {
     val now = clock()
     var applied = false
     val next = store.update(id) { e ->
       if (EntryTransitions.isOwnedRun(e, generation)) {
         applied = true
-        EntryTransitions.toBackingOff(e, nextAttemptAt, now)
+        EntryTransitions.toBackingOff(e, nextAttemptAt, streak, now)
       } else e
     }
     if (applied && next != null) events.state(next.toRow())
@@ -316,12 +318,8 @@ class WorkerOps(
     return result
   }
 
-  /**
-   * A backoff longer than a worker waits: back to queued, woken at
-   * [nextAttemptAt]. [wake] false schedules no wake: the caller knows a run
-   * of the row comes back soon and waits out the rest itself.
-   */
-  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int, wake: Boolean = true): Boolean {
+  /** A backoff longer than a worker waits: back to queued, woken at [nextAttemptAt]. */
+  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int): Boolean {
     val now = clock()
     var applied = false
     val next = store.compute(id) { e ->
@@ -332,12 +330,21 @@ class WorkerOps(
     }
     if (!applied || next == null) return false
     events.state(next.toRow())
-    if (wake) scheduler.scheduleWake(next, nextAttemptAt, replace = true)
+    scheduler.scheduleWake(next, nextAttemptAt, replace = true)
     return true
   }
 
-  /** A system stop. A paused or cancelled entry is the module's, so only a running one moves. Never journals. */
-  fun stopped(id: String, generation: Int) {
+  /**
+   * A system stop. A paused or cancelled entry is the module's, so only a
+   * running one moves. Never journals.
+   *
+   * [wake] true also schedules a fresh wake row, at the entry's
+   * nextAttemptAt or now. A time-limit stop needs it: WorkManager runs the
+   * stopped row again only after its own backoff, which grows with every
+   * start of that row (up to 5 hours), and while that row waits, schedule()
+   * adds no row. A fresh row starts its count at 0.
+   */
+  fun stopped(id: String, generation: Int, wake: Boolean = false) {
     val now = clock()
     var applied = false
     val next = runCatching {
@@ -348,7 +355,14 @@ class WorkerOps(
         } else e
       }
     }.getOrNull()
-    if (applied && next != null) events.state(next.toRow())
+    if (!applied || next == null) return
+    events.state(next.toRow())
+    if (wake) {
+      // A stop must not throw past the run. Without the wake, the stopped
+      // row still runs again, after WorkManager's own backoff.
+      runCatching { scheduler.scheduleWake(next, next.nextAttemptAt ?: now, replace = true) }
+        .onFailure { Diag.error("could not schedule a wake for '$id' after a stop", it) }
+    }
   }
 
   fun settings(): QueueSettings = settings.load()

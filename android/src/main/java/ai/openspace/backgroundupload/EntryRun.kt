@@ -192,12 +192,22 @@ internal class EntryRun(
    * A system stop. Only a time-limit stop that cut a request is a failed
    * attempt. A run that only waited (for the network, a slot, or a short
    * backoff) sent nothing, so it goes back to queued with no backoff step.
-   * No other stop reason says anything about the server. The run ends here,
-   * so a [StopKind.logged] kind writes at most one warning per run.
+   *
+   * After any time-limit stop a fresh wake row starts the entry again.
+   * WorkManager also runs the stopped row again, but only after its own
+   * backoff, which grows with every start of that row. The other stop
+   * reasons say nothing about the server, and the system decides when their
+   * row runs again.
+   *
+   * The state change is saved first, then the diagnostic record.
    */
   private fun afterStop(kind: StopKind) {
-    if (kind.logged) Diag.warn("run of '$entryId' stopped by the system: $kind")
-    if (kind == StopKind.TIME_LIMIT && stopCutRequest) releaseAfterTimeout() else ops.stopped(entryId, generation)
+    when {
+      kind == StopKind.TIME_LIMIT && stopCutRequest -> releaseAfterTimeout()
+      kind == StopKind.TIME_LIMIT -> ops.stopped(entryId, generation, wake = true)
+      else -> ops.stopped(entryId, generation)
+    }
+    if (kind.logged) Diag.countStop(kind.name, entryId)
   }
 
   /**
@@ -205,12 +215,7 @@ internal class EntryRun(
    * way. That happens to a run with no foreground mode after about 10
    * minutes, or to a foreground run whose service type used up its time.
    * Starting again at once would send the body from byte 0 on every run, so
-   * this is one more transient failure: the next backoff step.
-   *
-   * WorkManager runs a stopped row again by itself. A wait short enough for
-   * [waitUntilDue] gets no wake: that re-run sleeps it out. A wake as well
-   * would start a second run that waits on the per-id gate for the whole
-   * upload.
+   * this is one more transient failure: the next backoff step, then a wake.
    */
   private fun releaseAfterTimeout() {
     runCatching {
@@ -219,8 +224,7 @@ internal class EntryRun(
       val streak = e!!.backoffStreak + 1
       val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
-      val at = RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt)
-      ops.release(entryId, generation, at, streak, wake = at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS)
+      ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak)
     }.onFailure { Diag.error("could not release '$entryId' after a timeout stop", it) }
   }
 
@@ -289,10 +293,7 @@ internal class EntryRun(
         written = e
         val d = e.descriptor!!
         val part = partIndex?.let { d.parts!![it] }
-        host.send(
-          TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part), d.highPriority),
-          onProgress,
-        )
+        host.send(TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
       }
     } catch (error: CancellationException) {
       // A stop after the write-ahead cut a request that was on its way.
@@ -366,7 +367,7 @@ internal class EntryRun(
     val now = host.now()
     if (backoff <= RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
       val wait = min(backoff, max(0L, expiresAt - now))
-      ops.backingOff(entryId, generation, now + wait)
+      ops.backingOff(entryId, generation, now + wait, streak)
       host.sleep(wait)
       return
     }

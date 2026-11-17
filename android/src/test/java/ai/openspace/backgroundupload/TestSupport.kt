@@ -111,6 +111,8 @@ internal class RecordingEvents : QueueEvents {
 internal class FakeScheduler : WorkScheduler {
   val scheduled = mutableListOf<String>()
   val wakes = mutableListOf<Pair<String, Long>>()
+  /** The replace argument of every scheduleWake, in order. REPLACE makes a fresh row. */
+  val wakeReplaces = mutableListOf<Boolean>()
   val cancelled = mutableListOf<String>()
   val cancelledWakes = mutableListOf<String>()
   /** What libraryRuns() returns. */
@@ -122,6 +124,7 @@ internal class FakeScheduler : WorkScheduler {
 
   override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
     wakes += entry.id to at
+    wakeReplaces += replace
   }
 
   override fun cancel(id: String) {

@@ -6,18 +6,34 @@ up to 2 hours, also for a run that only waited for the network or for a free
 transmit slot and sent nothing. Now a run that only waited goes back to
 `queued` with no backoff step. A time-limit stop that cut a request still
 takes one backoff step. The foreground-service time limit (Android 15 and
-later) now counts as a time-limit stop. Stops for quota, standby bucket,
-background restriction, device state and the user write one warning to
-`takeDiagnostics()` that names the reason. Android 10 and 11 (API 29 and 30)
-cannot read stop reasons, so every stop there goes back to `queued` with no
-backoff step, as before.
+later) now counts as a time-limit stop.
+
+After every time-limit stop, the library schedules a fresh WorkManager row
+for the entry: at once after a run that only waited, or when its backoff
+ends, also for a short backoff. WorkManager runs the stopped row again too,
+but only after its own backoff, which grows with each start of that row and
+reaches hours after a few stops. A fresh row does not have that wait. Stops
+for other reasons go back to `queued`, and the system decides when the row
+runs again, as before.
+
+Stops for quota, standby bucket, background restriction, device state and
+the user write a warning to `takeDiagnostics()`, only when the run had
+already taken the entry. There is one record per reason, for example
+`run stopped by the system: QUOTA`. Its `data` holds the latest `entryId`
+and a `count` of such stops since the last `takeDiagnostics()`. So many
+stops cannot push older warnings and errors out of the log. Android 10 and
+11 (API 29 and 30) cannot read stop reasons, so every stop there goes back
+to `queued` with no backoff step and no warning, as before.
+
+A short backoff that a run waits out in place now saves its backoff step at
+once. A stop during that wait keeps the step. A stopped entry whose
+`nextAttemptAt` is already past no longer shows it.
 
 **Behavior change:** the attempt is now written ahead after the request
 gets a transmit slot, not before. A run that waits for a slot and is stopped
-counts no attempt. So `attempts` and the attempt events are lower for
-uploads that only waited. That is the correct count. A time-limit stop with
-a backoff of 30 s or less no longer schedules a wake: WorkManager runs the
-stopped row again, and that run waits out the rest.
+counts no attempt. So `attempts`, and the `attempt` field of later attempt
+events, are lower for uploads that only waited. The number of attempt
+events does not change. That is the correct count.
 
 ## 11.3.0
 

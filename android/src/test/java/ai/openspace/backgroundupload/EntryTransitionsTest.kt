@@ -86,7 +86,7 @@ class EntryTransitionsTest {
 
   @Test
   fun `a short backoff keeps the row running and shows the time, and the next attempt clears it`() {
-    val waiting = EntryTransitions.toBackingOff(entry(state = EntryState.RUNNING), 9_000, 5)
+    val waiting = EntryTransitions.toBackingOff(entry(state = EntryState.RUNNING), 9_000, 1, 5)
     assertEquals(EntryState.RUNNING, waiting.state)
     assertEquals(9_000L, waiting.nextAttemptAt)
     assertEquals(9_000.0, waiting.toRow().toMap()["nextAttemptAt"])

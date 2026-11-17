@@ -1,5 +1,7 @@
 package ai.openspace.backgroundupload
 
+import kotlin.math.max
+
 /**
  * The state changes of one entry, as pure functions. [QueueController] and
  * [WorkerOps] apply them inside `QueueStore.compute`, so each one is atomic
@@ -21,10 +23,15 @@ object EntryTransitions {
 
   /**
    * A short backoff that the worker waits out itself. The row stays running
-   * and shows when the next attempt is due.
+   * and shows when the next attempt is due. The failure's step is saved now,
+   * not at the next release. Chunked parts keep their own streaks, so the
+   * entry keeps the highest; an accepted part resets it to 0.
    */
-  fun toBackingOff(e: QueueEntry, nextAttemptAt: Long, now: Long) =
-    e.copy(nextAttemptAt = nextAttemptAt, updatedAt = now)
+  fun toBackingOff(e: QueueEntry, nextAttemptAt: Long, streak: Int, now: Long) = e.copy(
+    nextAttemptAt = nextAttemptAt,
+    backoffStreak = max(e.backoffStreak, streak),
+    updatedAt = now,
+  )
 
   /** One attempt starts: attempts + 1, its X-Request-Id, and no pending backoff. */
   fun toAttempt(e: QueueEntry, requestId: String, now: Long) = e.copy(
@@ -71,8 +78,15 @@ object EntryTransitions {
       e.copy(state = EntryState.QUEUED, parkedGeneration = null, updatedAt = now)
     }
 
-  /** A system stop of a running worker. WorkManager runs the row again. No outcome. */
-  fun toStopped(e: QueueEntry, now: Long) = e.copy(state = EntryState.QUEUED, updatedAt = now)
+  /**
+   * A system stop of a running worker. No outcome. A nextAttemptAt that is
+   * already past is cleared: a queued row does not show a due time behind it.
+   */
+  fun toStopped(e: QueueEntry, now: Long) = e.copy(
+    state = EntryState.QUEUED,
+    nextAttemptAt = e.nextAttemptAt?.takeIf { it > now },
+    updatedAt = now,
+  )
 
   /** updateHeaders() on a parked entry. */
   fun toUnparked(e: QueueEntry, paused: Boolean, now: Long) = e.copy(

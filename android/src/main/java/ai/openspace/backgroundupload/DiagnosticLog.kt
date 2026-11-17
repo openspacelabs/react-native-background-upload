@@ -37,6 +37,7 @@ class DiagnosticLog(private val file: File) {
     const val INFO = "info"
     const val WARN = "warn"
     const val ERROR = "error"
+    const val COUNT_KEY = "count"
 
     private val gson = Gson()
     private val listType = object : TypeToken<List<Record>>() {}.type
@@ -85,6 +86,21 @@ class DiagnosticLog(private val file: File) {
       val next = (kept + record).takeLast(MAX_RECORDS)
       cached = next
       AtomicFiles.writeText(file, gson.toJson(next))
+    }
+  }
+
+  /**
+   * A repeating event in one slot, as [replace] does, with a count. The new
+   * record carries [data], plus `count`: 1 more than the untaken record of
+   * the same level and message, or 1. So many events cannot push older
+   * records out of the log.
+   */
+  @Synchronized
+  fun count(level: String, message: String, at: Long, data: Map<String, Any?>) {
+    runCatching {
+      val earlier = records().lastOrNull { it.level == level && it.message == message }
+      val count = ((earlier?.data?.get(COUNT_KEY) as? Number)?.toInt() ?: 0) + 1
+      replace(Record(at, level, message, null, data + (COUNT_KEY to count)))
     }
   }
 

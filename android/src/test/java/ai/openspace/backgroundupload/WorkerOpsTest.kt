@@ -438,7 +438,7 @@ class WorkerOpsTest {
   @Test
   fun `a short backoff shows nextAttemptAt on the running row until the next attempt`() {
     store.save(entry(state = EntryState.RUNNING))
-    ops.backingOff("e1", 1, nextAttemptAt = 24_000)
+    ops.backingOff("e1", 1, nextAttemptAt = 24_000, streak = 1)
     val waiting = store.load("e1")!!
     assertEquals(EntryState.RUNNING, waiting.state)
     assertEquals(24_000L, waiting.nextAttemptAt)
@@ -459,7 +459,7 @@ class WorkerOpsTest {
   @Test
   fun `a short backoff on an entry the run no longer owns changes nothing`() {
     store.save(entry(state = EntryState.PAUSED))
-    ops.backingOff("e1", 1, nextAttemptAt = 24_000)
+    ops.backingOff("e1", 1, nextAttemptAt = 24_000, streak = 1)
     assertNull(store.load("e1")!!.nextAttemptAt)
     assertEquals(emptyList<String>(), events.log)
   }
