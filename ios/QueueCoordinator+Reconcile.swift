@@ -214,7 +214,8 @@ extension QueueCoordinator {
       // already marked superseded or pause keeps its purpose: its task may
       // still owe a cancel callback.
       let stale = self.taskMap.keys(where: {
-        $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
+        $0.id == e.id && e.ownsSimpleTask(incarnation: $0.incarnation)
+          && $0.generation == e.generation && $0.attempt == e.attempts
           && ($0.purpose ?? .attempt) == .attempt
       })
       self.taskMap.setPurpose(.lateResult, for: stale.map { (key: $0, id: e.id) })

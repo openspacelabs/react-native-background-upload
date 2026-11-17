@@ -460,10 +460,8 @@ final class QueueCoordinator {
       switch resolved {
       case .part(let id, let part, let incarnation):
         parts[id, default: []].append(.init(part: part, incarnation: incarnation, key: key))
-      case .request(let id, let generation, let attempt, _):
-        // Every task in liveTasks was issued for, or adopted by, the current
-        // use of the id: a forget cancels and removes the held tasks.
-        replaceRequestTask(id, generation: generation, attempt: attempt, key: key)
+      case .request(let id, let generation, let attempt, let incarnation):
+        replaceRequestTask(id, generation: generation, attempt: attempt, incarnation: incarnation, key: key)
       }
     }
     for (id, replaced) in parts {
@@ -474,8 +472,12 @@ final class QueueCoordinator {
   /// A simple entry's current attempt, sent again from a new task. The
   /// attempt never sent its body, so it keeps its ordinal and request id.
   /// An empty body is left alone: 0 bytes sent cannot tell whether it went.
-  private func replaceRequestTask(_ id: String, generation: Int, attempt: Int, key: String) {
-    guard var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
+  /// The task must belong to this use of the id, as in every other reader
+  /// of a task's owner. A forget already cancels and drops the held tasks,
+  /// so this check is a guard, not the only one.
+  private func replaceRequestTask(_ id: String, generation: Int, attempt: Int, incarnation: String?, key: String) {
+    guard var e = index.entry(id), !e.legacy, !e.isChunked, e.ownsSimpleTask(incarnation: incarnation),
+          e.generation == generation,
           e.attempts == attempt, e.state == .queued || e.state == .running, e.totalBytes > 0,
           !settings.isPaused(e.key) else { return }
     let remaining = e.nextAttemptAt.map { Int($0 - now()) }.flatMap { $0 > 0 ? $0 : nil }

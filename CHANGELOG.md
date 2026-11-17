@@ -23,7 +23,9 @@ its row is forgotten (the ack of a `completed` or `cancelled` outcome, or
 body. Before, the end of the 10 s wait deleted every key of the waited
 attempt, including keys of tasks the library had cancelled (superseded or
 paused). Now such a key stays until its task's cancel callback removes it,
-or until the row is gone and the next launch prunes it.
+or until a later launch prunes it. A launch prunes a key whose task is not
+running when the row is gone, or when the id now belongs to a newer request
+(see the next fix).
 
 On iOS, a simple request's outcome now carries the `requestId` of the
 attempt whose result settled it, so its response and `requestId` belong to
@@ -47,10 +49,13 @@ replaced). Every simple upload task carries it, and a result, progress
 event or relaunch match from another use is ignored. iOS chunked parts
 already carried it.
 
-A task started by 11.3.0 or earlier carries no value. It still counts for
-the request it was started for, so a task in flight during the upgrade is
-not sent again. It is ignored by a request created after the upgrade, which
-can only be a later use of the id.
+A task started by 11.3.0 or earlier carries no value. A request created
+before the upgrade keeps the old behavior until it settles: it accepts any
+task with no value that has its id, generation and attempt. So its own task
+in flight during the upgrade is not sent again. A late result from an even
+earlier use of the id, also started by the old version, can still change
+it, as before. A request created after the upgrade ignores every task with
+no value: such a task can only come from an earlier use.
 
 Also on iOS: when the 10 s relaunch wait gave up on a task and the next
 attempt could not be saved, the next launch cancelled that task if it was

@@ -317,8 +317,9 @@ final class CoordinatorPerUseTests: XCTestCase {
     XCTAssertTrue(next.transport.created.isEmpty)
   }
 
-  /// A failure of an 11.3.0 task still counts for its entry, and the retry
-  /// is a tagged task.
+  /// A failure of an 11.3.0 task still counts for its entry. The retry is a
+  /// tagged task, and it drives the entry that 11.3.0 created: it begins,
+  /// and its 2xx completes the entry.
   func testAFailureOfATaskFrom113StillRetriesItsEntry() throws {
     let old = try entryAndTaskFrom113()
     let next = Harness(root: h.root)
@@ -330,6 +331,14 @@ final class CoordinatorPerUseTests: XCTestCase {
     XCTAssertEqual(ChunkedEngine.parseRequestDescription(retry.taskDescription)?.incarnation,
                    next.entry("a")?.incarnation)
     XCTAssertEqual(next.map.meta(forKey: retry.key)?.incarnation, next.entry("a")?.incarnation)
+    XCTAssertNil(next.entry("a")?.tasksCarryIncarnation, "the entry is still the one 11.3.0 created")
+    XCTAssertNotNil(next.coordinator.taskWillBegin(key: retry.key, description: retry.taskDescription),
+                    "the retry begins")
+    XCTAssertEqual(next.entry("a")?.state, .running)
+    next.complete(retry, status: 201, body: "RETRY")
+    XCTAssertEqual(next.entry("a")?.state, .completed)
+    XCTAssertEqual((next.sink.settled.last?["response"] as? [String: Any])?["body"] as? String, "RETRY")
+    XCTAssertEqual(next.sink.settled.count, 1)
   }
 
   /// After the upgrade the 11.3.0 entry completes and is acked, and the id
