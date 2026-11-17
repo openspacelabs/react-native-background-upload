@@ -167,6 +167,8 @@ extension QueueCoordinator {
     n.headerGeneration = settings.headerGeneration
     n.state = paused ? .paused : .queued
     try saveOrDiscard(n, staged: staged)
+    // A late result of the old body must not complete the new one.
+    removeLateResultKeys(p.id)
     store.removeV9Manifest(p.id)
     store.sweep(n) // deletes the old body
     publish(n)

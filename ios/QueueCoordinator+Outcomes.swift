@@ -63,7 +63,7 @@ extension QueueCoordinator {
       journaled = false
     }
     cancelTasks(id, purpose: .superseded)
-    removeOlderSupersededKeys(e)
+    removeLateResultKeys(id)
     chunked.stop(id)
     emitProgress(id, sent: e.bytesSent, total: e.totalBytes)
     e.settledEventId = event.eventId
@@ -109,24 +109,21 @@ extension QueueCoordinator {
     n.nextAttemptAt = nil
     n.authParked = false
     cancelTasks(e.id, purpose: .superseded)
-    removeOlderSupersededKeys(e)
+    removeLateResultKeys(e.id)
     chunked.stop(e.id)
     disarmExpiry(e.id)
     commit(n, emit: false)
     return n
   }
 
-  /// A simple entry keeps the keys of an older attempt that the relaunch
-  /// grace gave up on, so a late result can still complete it (withoutTask).
-  /// Once the entry settles, such a result is dropped anyway, so the keys
-  /// go. Keys of the current attempt stay: a task cancelled at this settle
-  /// reads its purpose in its cancel callback, which removes the key.
-  func removeOlderSupersededKeys(_ e: QueueEntry) {
-    guard !e.isChunked else { return }
-    taskMap.removeAll { _, m in
-      m.id == e.id && m.partIndex == nil && m.purpose == .superseded && m.generation == e.generation
-        && (m.attempt.map { $0 < e.attempts } ?? false)
-    }
+  /// Removes every late-result key of `id` (see withoutTask), whatever its
+  /// attempt or generation. Called when the id settles, is forgotten, or
+  /// gets a different body: a late result can then no longer complete what
+  /// the id holds, and a kept key must not reach a later use of the id. No
+  /// task in this process holds such a key, so none owes a cancel callback
+  /// that would read it. Keys of other purposes stay until their callback.
+  func removeLateResultKeys(_ id: String) {
+    taskMap.removeAll { _, m in m.id == id && m.purpose == .lateResult }
   }
 
   /// Relaunch, before any task is matched: every live row whose own
@@ -144,6 +141,7 @@ extension QueueCoordinator {
   /// unacked outcomes (cancel on a settled entry).
   func forget(_ id: String, dropEvents: Bool) {
     cancelTasks(id, purpose: .superseded)
+    removeLateResultKeys(id)
     chunked.stop(id)
     store.remove(id)
     index.remove(id)
@@ -178,6 +176,7 @@ extension QueueCoordinator {
     }
     pendingJournal = pendingJournal.filter { $0.value.id != id }
     cancelTasks(id, purpose: .superseded)
+    removeLateResultKeys(id)
     chunked.stop(id)
     index.remove(id)
     disarmExpiry(id)

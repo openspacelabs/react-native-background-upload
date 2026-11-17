@@ -111,8 +111,12 @@ extension QueueCoordinator {
       let meta = taskMap.meta(forKey: task.key)
       // A task the library replaced or dropped, still live because the
       // process died before the daemon applied the cancel. Never adopt it:
-      // its replacement, or the re-issue below, drives the entry.
-      if meta?.purpose == .superseded {
+      // its replacement, or the re-issue below, drives the entry. A kept
+      // late-result key on a live task becomes superseded: the task now owes
+      // a cancel callback, so its key must stay until that callback, and a
+      // settle removes only late-result keys.
+      if let purpose = meta?.purpose, purpose.isOutdated {
+        if purpose == .lateResult { taskMap.setPurpose(.superseded, forKey: task.key, id: meta?.id ?? "") }
         task.cancel()
         continue
       }
@@ -183,16 +187,19 @@ extension QueueCoordinator {
             current.generation == e.generation, current.attempts == e.attempts,
             !self.liveTasks.values.contains(where: { $0.id == e.id }) else { return }
       // No replay came in time. The task may be lost, or its result may
-      // still arrive later. Mark its keys superseded instead of deleting
-      // them. A late accepted result then completes the entry and cancels
-      // the new attempt's task, and a late failure or cancel is dropped
-      // (taskCompletedLocked). The wait covers only the current attempt, so
-      // once the re-issue below moves the entry to a new attempt, a later
-      // launch does not wait for these keys again. settle removes them.
+      // still arrive later. Keep its keys as late-result keys instead of
+      // deleting them. A late accepted result then completes the entry and
+      // cancels the new attempt's task, and a late failure or cancel is
+      // dropped (taskCompletedLocked). The wait covers only the current
+      // attempt, so once the re-issue below moves the entry to a new
+      // attempt, a later launch does not wait for these keys again. A key
+      // already marked superseded or pause keeps its purpose: its task may
+      // still owe a cancel callback.
       let stale = self.taskMap.keys(where: {
         $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
+          && ($0.purpose ?? .attempt) == .attempt
       })
-      self.taskMap.setPurpose(.superseded, for: stale.map { (key: $0, id: e.id) })
+      self.taskMap.setPurpose(.lateResult, for: stale.map { (key: $0, id: e.id) })
       // It may have run, so the next attempt gets a new ordinal and request id.
       self.reissue(current, advanceAttempt: true)
     }

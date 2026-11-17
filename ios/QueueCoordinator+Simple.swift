@@ -172,20 +172,26 @@ extension QueueCoordinator {
     // entry, or an older one the library replaced (see below).
     guard case .request(let id, let generation, let attempt) = owner,
           var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
-          e.attempts == attempt || (meta?.purpose == .superseded && attempt < e.attempts) else { return }
+          e.attempts == attempt || (meta?.purpose?.isOutdated == true && attempt < e.attempts) else { return }
 
     let cancelled = RetryClassifier.isCancellation(c.error)
-    if cancelled, meta?.purpose == .pause || meta?.purpose == .superseded { return }
+    if cancelled, meta?.purpose == .pause || meta?.purpose?.isOutdated == true { return }
     let accepted = c.error == nil
       && c.statusCode.map { UploadOutcome.isAccepted($0, body: c.body, accept: e.accept) } == true
     // A replaced task that finished before its cancel took effect, or an
     // older attempt whose result came after the relaunch grace gave up on it
-    // (withoutTask). The newer task drives the entry, unless this one landed
-    // while the entry is live. The server has the body then, so the entry
-    // completes and settle cancels the newer task, even when the entry moved
-    // to a later attempt. A failure is dropped: it must not disturb the
-    // newer attempt.
-    if meta?.purpose == .superseded && (!accepted || !e.isLive) { return }
+    // (a late-result key, see withoutTask). The newer task drives the entry,
+    // unless this one landed while the entry is live. The server has the
+    // body then, so the entry completes and settle cancels the newer task,
+    // even when the entry moved to a later attempt. A failure is dropped: it
+    // must not disturb the newer attempt.
+    if meta?.purpose?.isOutdated == true && (!accepted || !e.isLive) { return }
+    // The outcome names the request whose response settles it. A late
+    // result belongs to an older attempt than the entry's last one.
+    if let requestId = meta?.requestId, requestId != e.lastRequestId {
+      e.lastRequestId = requestId
+      index.upsert(e)
+    }
     // A delayed task that ended before its begin date, with no response and
     // no body byte sent, never reached the daemon: nsurlsessiond refused the
     // connection (a simulator build with no entitlements does this). It is

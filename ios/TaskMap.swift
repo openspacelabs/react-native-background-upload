@@ -18,6 +18,18 @@ final class TaskMap {
     case attempt
     case pause
     case superseded
+    /// A simple task the relaunch grace gave up on: it was not live, and
+    /// no result came in the wait. The entry moved to a new attempt, and the
+    /// key stays so a late accepted result can still complete the entry. No
+    /// task in this process holds it, so it owes no cancel callback, and
+    /// every key of this purpose for an id is removed when that id settles,
+    /// is forgotten, or gets a different body. An older build reads it as
+    /// nil and drops the late result.
+    case lateResult
+
+    /// A task that no longer drives its entry: its failure and its cancel
+    /// produce nothing, and only an accepted result on a live entry counts.
+    var isOutdated: Bool { self == .superseded || self == .lateResult }
   }
 
   struct Meta: Codable, Equatable {
