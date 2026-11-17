@@ -203,6 +203,11 @@ id that exists:
 - A completed entry whose outcome is not yet acknowledged: the journaled
   outcome is emitted again. The request does not run again.
 
+When the row is gone (its outcome was acknowledged, or `cancel()` removed
+it), the same id starts a new request. On iOS a result, progress event or
+cancel that arrives late from the earlier request is ignored: it never
+completes, fails or retries the new one.
+
 ### Silent uploads (Android)
 
 `android: { noNotification: true }` runs the request without a progress

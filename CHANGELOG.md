@@ -34,6 +34,29 @@ this. On Android a simple request's last attempt is always the one that
 settled it; a chunked request's `requestId` is the last part attempt that
 started. Android and iOS chunked parts are otherwise unchanged.
 
+Fixed (iOS): a late result from an earlier use of a request id could change
+a later request with the same id. An app may `mutate()` an id again after
+its row is gone (the outcome was acknowledged, or the row was cancelled). The
+new request starts again at attempt 1, so a result that arrived late from
+the earlier request could match it. A late 2xx then completed the new
+request with the old response and cancelled its task, so the new body was
+not sent. A late 4xx failed it, and a late 5xx counted as one of its failed
+attempts. Now each use of an id has its own value (the entry's
+`incarnation`, a random value made when the entry is created or its body is
+replaced). Every simple upload task carries it, and a result, progress
+event or relaunch match from another use is ignored. iOS chunked parts
+already carried it.
+
+A task started by 11.3.0 or earlier carries no value. It still counts for
+the request it was started for, so a task in flight during the upgrade is
+not sent again. It is ignored by a request created after the upgrade, which
+can only be a later use of the id.
+
+Also on iOS: when the 10 s relaunch wait gave up on a task and the next
+attempt could not be saved, the next launch cancelled that task if it was
+still running and sent the request again. It now keeps the task, which may
+already have sent the body.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
