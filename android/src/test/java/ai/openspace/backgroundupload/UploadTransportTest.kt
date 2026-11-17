@@ -118,3 +118,25 @@ class AwaitLandedTest {
     assertFalse(job.isActive)
   }
 }
+
+class TransferGateStopTest {
+  @Test
+  fun `the gate returns the block's value on a stopped job, in both lanes`() = runBlocking {
+    // EntryWorker sends inside transferGate.withPermit. A response that
+    // landed as the run stopped must come out of the gate: nothing in it may
+    // suspend after the block.
+    for (high in listOf(false, true)) {
+      val gate = TransferGate(total = 4, reserved = 1)
+      var got: String? = null
+      val job = launch {
+        got = gate.withPermit(high) {
+          currentCoroutineContext()[Job]!!.cancel()
+          "landed"
+        }
+      }
+      job.join()
+      assertEquals("landed", got)
+      assertEquals(4, gate.availableSlots)
+    }
+  }
+}
