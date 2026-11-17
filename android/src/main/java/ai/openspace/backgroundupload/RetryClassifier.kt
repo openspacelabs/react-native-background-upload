@@ -40,6 +40,25 @@ object RetryClassifier {
   /** A wait up to this long happens inside the worker. A longer one releases the worker. */
   const val IN_WORKER_BACKOFF_MAX_MS = 30_000L
 
+  /**
+   * The longest wait after a transport failure (no HTTP response). Every
+   * attempt starts on a network Android reports as validated, so the failure
+   * says little about the server, and a network change cannot wake a queued
+   * entry. HTTP failures keep the policy's maxMs.
+   */
+  const val TRANSPORT_FAILURE_MAX_MS = 15L * 60 * 1000
+
+  /**
+   * The highest backoff streak an entry keeps when the app clears its wait.
+   * Streak 5 is the last wait a worker sleeps out in place (16 s at the
+   * default base); the next failure waits about 32 s, then the wait doubles.
+   */
+  const val RETRY_NOW_MAX_STREAK = 5
+
+  /** [policy] for the wait after a transport failure: maxMs at most [TRANSPORT_FAILURE_MAX_MS]. */
+  fun transportFailurePolicy(policy: Policy): Policy =
+    policy.copy(maxMs = min(policy.maxMs, TRANSPORT_FAILURE_MAX_MS))
+
   fun policy(defaults: RetryDefaults, override: RetryOverride?): Policy = Policy(
     baseMs = override?.baseMs ?: defaults.baseMs,
     maxMs = override?.maxMs ?: defaults.maxMs,

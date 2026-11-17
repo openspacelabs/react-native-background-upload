@@ -318,8 +318,13 @@ class WorkerOps(
     return result
   }
 
-  /** A backoff longer than a worker waits: back to queued, woken at [nextAttemptAt]. */
-  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int): Boolean {
+  /**
+   * A backoff longer than a worker waits: back to queued, woken at
+   * [nextAttemptAt]. [wake] false saves the release with no wake row: the
+   * caller knows WorkManager starts the run's own row again at once, and
+   * that run makes the wake ([ensureWake]).
+   */
+  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int, wake: Boolean = true): Boolean {
     val now = clock()
     var applied = false
     val next = store.compute(id) { e ->
@@ -330,6 +335,7 @@ class WorkerOps(
     }
     if (!applied || next == null) return false
     events.state(next.toRow())
+    if (!wake) return true
     try {
       scheduler.scheduleWake(next, nextAttemptAt, replace = true)
     } catch (error: Exception) {
@@ -358,10 +364,10 @@ class WorkerOps(
    * running one moves. Never journals.
    *
    * [wake] true also schedules a fresh wake row, at the entry's
-   * nextAttemptAt or now. A time-limit stop needs it: WorkManager runs the
-   * stopped row again only after its own backoff, which grows with every
-   * start of that row (up to 5 hours), and while that row waits, schedule()
-   * adds no row. A fresh row starts its count at 0.
+   * nextAttemptAt or now. A time-limit stop needs it when WorkManager holds
+   * the stopped row back: it runs that row again only after its own
+   * backoff, which grows with every start of that row (up to 5 hours). A
+   * fresh row starts its count at 0.
    */
   fun stopped(id: String, generation: Int, wake: Boolean = false) {
     val now = clock()

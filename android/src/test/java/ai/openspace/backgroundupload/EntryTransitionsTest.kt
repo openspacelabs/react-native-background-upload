@@ -53,6 +53,14 @@ class EntryTransitionsTest {
   }
 
   @Test
+  fun `resume to queued starts the backoff over, resume to awaiting-auth keeps it`() {
+    val paused = entry(state = EntryState.PAUSED).copy(backoffStreak = 9)
+    assertEquals(0, EntryTransitions.toResumed(paused, 9).backoffStreak)
+    val parked = paused.copy(parkedGeneration = 3, headerGeneration = 3)
+    assertEquals(9, EntryTransitions.toResumed(parked, 9).backoffStreak)
+  }
+
+  @Test
   fun `pause keeps the parked generation and clears the wake time`() {
     val p = EntryTransitions.toPaused(entry(state = EntryState.AWAITING_AUTH, parkedGeneration = 2, nextAttemptAt = 50), 9)
     assertEquals(EntryState.PAUSED, p.state)

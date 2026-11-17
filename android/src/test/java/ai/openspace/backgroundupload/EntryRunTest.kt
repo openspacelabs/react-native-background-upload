@@ -87,6 +87,11 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
   }
 
   override fun stopKind() = stop
+
+  /** What rowRestartsBy() answers. Null: unknown. */
+  var restartsBy: Long? = null
+
+  override fun rowRestartsBy() = restartsBy
 }
 
 class EntryRunTest {
@@ -206,6 +211,38 @@ class EntryRunTest {
     assertEquals(listOf("network", null), host.attempts.map { it.errorKind })
     assertEquals("reset", host.attempts[0].errorMessage)
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `a transport failure waits at most 15 minutes, an HTTP failure keeps the 2 hour maximum`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, maxMs = 7_200_000, jitter = 0.0))
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 12))
+    host.handler = { _, _ -> throw IOException("connection reset") }
+    run()
+    // Streak 13 is 2^12 s, about 68 minutes, capped at 15.
+    assertEquals(host.clock + RetryClassifier.TRANSPORT_FAILURE_MAX_MS, store.load("e1")!!.nextAttemptAt)
+    assertEquals(13, store.load("e1")!!.backoffStreak)
+
+    controller.enqueue(parsed(id = "e2"))
+    store.save(store.load("e2")!!.copy(backoffStreak = 12))
+    respond(503)
+    run("e2")
+    assertEquals(host.clock + 4_096_000, store.load("e2")!!.nextAttemptAt)
+    store.save(store.load("e2")!!.copy(nextAttemptAt = null, backoffStreak = 13))
+    respond(503)
+    run("e2")
+    assertEquals(host.clock + 7_200_000, store.load("e2")!!.nextAttemptAt)
+  }
+
+  @Test
+  fun `a transport failure keeps a maximum below 15 minutes`() {
+    controller.configureRetry(RetryDefaults(baseMs = 1_000, maxMs = 60_000, jitter = 0.0))
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 12))
+    host.handler = { _, _ -> throw IOException("connection reset") }
+    run()
+    assertEquals(host.clock + 60_000, store.load("e1")!!.nextAttemptAt)
   }
 
   @Test
@@ -441,6 +478,54 @@ class EntryRunTest {
     assertEquals(emptyList<TransferRequest>(), host.requests)
     assertEquals(listOf("e1" to host.clock), scheduler.wakes)
     assertEquals(listOf(true), scheduler.wakeReplaces)
+  }
+
+  @Test
+  fun `an idle timeout stop adds no fresh row when WorkManager starts the stopped row again at once`() {
+    controller.enqueue(parsed())
+    host.stop = StopKind.TIME_LIMIT
+    host.restartsBy = host.clock // the stopped row is due now
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+    host.onSleep = { throw CancellationException("timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertNull(e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+  }
+
+  @Test
+  fun `an idle timeout stop adds a fresh row when WorkManager holds the stopped row back`() {
+    controller.enqueue(parsed())
+    host.stop = StopKind.TIME_LIMIT
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+    host.onSleep = {
+      host.restartsBy = host.clock + 1 // due a moment after the stop
+      throw CancellationException("timeout")
+    }
+    assertThrows(CancellationException::class.java) { run() }
+    assertEquals(listOf("e1" to host.clock), scheduler.wakes)
+  }
+
+  @Test
+  fun `a timeout stop that cut a request adds no wake when the stopped row starts again at once`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 6))
+    host.stop = StopKind.TIME_LIMIT
+    host.restartsBy = host.clock - 1
+    host.handler = { _, _ -> throw CancellationException("timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(7, e.backoffStreak)
+    val at = host.clock + 64_000
+    assertEquals(at, e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+
+    // The stopped row runs again, sees the long wait and makes the wake itself.
+    host.restartsBy = null
+    run()
+    assertEquals(listOf("e1" to at), scheduler.wakes)
   }
 
   @Test
@@ -908,6 +993,34 @@ class EntryRunTest {
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
     assertEquals(4, host.requests.size)
     assertEquals(listOf(1_000L), host.sleeps)
+  }
+
+  @Test
+  fun `a chunked entry stored at a long streak completes after 200, 503, 200 with no wake`() {
+    val src = File(tmp.newFolder(), "video.bin").apply { writeBytes(ByteArray(20) { it.toByte() }) }
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = src.path,
+      parts = listOf(part(0, 10), part(10, 20)))))
+    store.save(store.load("e1")!!.copy(backoffStreak = 9))
+    respond(200, 503, 200)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(3, host.requests.size)
+    // The 503 came after a part was accepted, so it waits 1 s in place, not 2^9 s.
+    assertEquals(listOf(1_000L), host.sleeps)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+  }
+
+  @Test
+  fun `a chunked part keeps the stored streak until a part is accepted in this run`() {
+    chunked()
+    store.save(store.load("e1")!!.copy(backoffStreak = 9))
+    respond(503)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(10, e.backoffStreak)
+    assertEquals(listOf("e1" to host.clock + 512_000), scheduler.wakes) // base 1 s * 2^(10-1)
   }
 
   /** Four 10-byte parts. [code] answers each request by its part index and how many times that part was sent. */

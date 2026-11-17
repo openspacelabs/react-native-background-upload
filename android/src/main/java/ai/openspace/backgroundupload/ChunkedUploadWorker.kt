@@ -68,8 +68,15 @@ internal class ChunkedTransfer(private val run: EntryRun) {
     return Settlement.Completed(null, lastAcceptedUrl ?: d0.reportUrl, d0.method)
   }
 
+  /**
+   * [initialStreak] is the entry's stored streak. A part uses it only until
+   * a part is accepted in this run. After that the server answers, so the
+   * part counts its own failures from 0. Without that, one failed part after
+   * a long backoff would release the whole entry for the next, longer wait.
+   */
   internal suspend fun executePart(index: Int, blob: File, initialStreak: Int) {
-    var streak = initialStreak
+    var base = initialStreak
+    var failures = 0
     while (true) {
       if (index in acceptedHere) return
       val latest = run.ops.latest(run.entryId, run.generation)
@@ -104,12 +111,14 @@ internal class ChunkedTransfer(private val run: EntryRun) {
         }
         is EntryRun.AttemptResult.Auth -> {
           if (!r.reissue) throw EntryRun.ParkException(r.headerGeneration)
-          streak = 0
+          base = 0
+          failures = 0
         }
         EntryRun.AttemptResult.Transient -> {
           onPartProgress(index, 0L)
-          streak++
-          run.backoffOrRelease(a.policy, streak, a.entry.expiresAt)
+          if (acceptedHere.isNotEmpty()) base = 0
+          failures++
+          run.backoffOrRelease(a.policy, base + failures, a.entry.expiresAt)
         }
         is EntryRun.AttemptResult.Terminal -> {
           onPartProgress(index, 0L)

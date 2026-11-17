@@ -202,21 +202,30 @@ internal class EntryRun(
    * attempt. A run that only waited (for the network, a slot, or a short
    * backoff) sent nothing, so it goes back to queued with no backoff step.
    *
-   * After any time-limit stop a fresh wake row starts the entry again.
-   * WorkManager also runs the stopped row again, but only after its own
-   * backoff, which grows with every start of that row. The other stop
-   * reasons say nothing about the server, and the system decides when their
-   * row runs again.
+   * After a time-limit stop a fresh wake row starts the entry again, unless
+   * WorkManager starts the stopped row again at once. WorkManager runs the
+   * stopped row again after its own backoff, which grows with every start
+   * of that row ([WorkManagerBackoff]). For the first few starts that wait
+   * is already over at the stop; a wake then would be a second row for the
+   * entry, and one of the two would wait at the per-id gate for the whole
+   * upload. The other stop reasons say nothing about the server, and the
+   * system decides when their row runs again.
    *
    * The state change is saved first, then the diagnostic record.
    */
   private fun afterStop(kind: StopKind) {
     when {
-      kind == StopKind.TIME_LIMIT && stopCutRequest -> releaseAfterTimeout()
-      kind == StopKind.TIME_LIMIT -> ops.stopped(entryId, generation, wake = true)
-      else -> ops.stopped(entryId, generation)
+      kind != StopKind.TIME_LIMIT -> ops.stopped(entryId, generation)
+      stopCutRequest -> releaseAfterTimeout(wake = !stoppedRowRestartsNow())
+      else -> ops.stopped(entryId, generation, wake = !stoppedRowRestartsNow())
     }
     if (kind.logged) Diag.countStop(kind.name, entryId)
+  }
+
+  /** WorkManager starts the stopped row again at once. False when unknown. */
+  private fun stoppedRowRestartsNow(): Boolean {
+    val by = host.rowRestartsBy() ?: return false
+    return by <= host.now()
   }
 
   /**
@@ -225,15 +234,17 @@ internal class EntryRun(
    * minutes, or to a foreground run whose service type used up its time.
    * Starting again at once would send the body from byte 0 on every run, so
    * this is one more transient failure: the next backoff step, then a wake.
+   * With [wake] false the stopped row, which WorkManager starts again at
+   * once, sleeps out a short wait or makes the wake itself ([waitUntilDue]).
    */
-  private fun releaseAfterTimeout() {
+  private fun releaseAfterTimeout(wake: Boolean) {
     runCatching {
       val e = store.load(entryId)
       if (!EntryTransitions.isOwnedRun(e, generation)) return
       val streak = e!!.backoffStreak + 1
       val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
-      ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak)
+      ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak, wake)
     }.onFailure {
       if (it is WorkerOps.WakeNotScheduledException) {
         Diag.error("released '$entryId' after a timeout stop, but could not schedule its wake", it.cause)
@@ -348,7 +359,9 @@ internal class EntryRun(
       val result = if (verdict is RetryClassifier.Verdict.Terminal) {
         AttemptResult.Terminal(verdict.errorKind, verdict.message, null)
       } else AttemptResult.Transient
-      return Attempt(entry, url, policy, result)
+      // The attempt started on a validated network (waitForNetwork), so a
+      // transport failure waits at most 15 minutes.
+      return Attempt(entry, url, RetryClassifier.transportFailurePolicy(policy), result)
     }
 
     // A part counts on its own, so each part gets a rule's full maxRetries.

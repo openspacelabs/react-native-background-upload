@@ -1,6 +1,7 @@
 package ai.openspace.backgroundupload
 
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * The state changes of one entry, as pure functions. [QueueController] and
@@ -69,14 +70,31 @@ object EntryTransitions {
    * resume(): back to awaiting-auth only when no updateHeaders() came in
    * between. It compares the entry's own headerGeneration, which
    * updateHeaders() saves with the new headers. The settings value can be
-   * older after a settings write that never landed.
+   * older after a settings write that never landed. Back to queued, the
+   * backoff starts over: the app asked for the entry to run.
    */
   fun toResumed(e: QueueEntry, now: Long): QueueEntry =
     if (e.parkedGeneration != null && e.parkedGeneration == e.headerGeneration) {
       e.copy(state = EntryState.AWAITING_AUTH, updatedAt = now)
     } else {
-      e.copy(state = EntryState.QUEUED, parkedGeneration = null, updatedAt = now)
+      e.copy(state = EntryState.QUEUED, parkedGeneration = null, backoffStreak = 0, updatedAt = now)
     }
+
+  /** Whether [e] is queued and waits for a backoff to end. */
+  fun waitsOnBackoff(e: QueueEntry) = e.state == EntryState.QUEUED && e.nextAttemptAt != null
+
+  /**
+   * The app started, resumed, or came to the foreground: a queued entry
+   * stops waiting for its backoff and runs now. The streak keeps at most
+   * [RetryClassifier.RETRY_NOW_MAX_STREAK] steps, so the entry sends once
+   * now, and a server that is still down is not asked again every few
+   * seconds.
+   */
+  fun toRetryNow(e: QueueEntry, now: Long) = e.copy(
+    nextAttemptAt = null,
+    backoffStreak = min(e.backoffStreak, RetryClassifier.RETRY_NOW_MAX_STREAK),
+    updatedAt = now,
+  )
 
   /**
    * A system stop of a running worker. No outcome. A nextAttemptAt that is

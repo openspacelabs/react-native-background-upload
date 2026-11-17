@@ -50,7 +50,11 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
   @Volatile
   private var showsNotification = false
 
+  /** When this run began. WorkManager set the row RUNNING before it. */
+  private var startedAt = 0L
+
   final override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    startedAt = System.currentTimeMillis()
     val id = inputData.getString(WorkManagerScheduler.ENTRY_ID_KEY) ?: return@withContext Result.success()
     // A headless run has no module, so it opens the log that its Diag calls write to.
     DiagnosticLog.get(context)
@@ -117,6 +121,9 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
     // every stop takes the plain path: back to queued, no backoff step.
     override fun stopKind() =
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) StopKind.of(stopReason) else StopKind.OTHER
+
+    // runAttemptCount is the row's count before this start.
+    override fun rowRestartsBy() = WorkManagerBackoff.restartBy(startedAt, runAttemptCount)
   }
 
   // MARK: - notification

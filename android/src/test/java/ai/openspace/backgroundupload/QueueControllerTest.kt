@@ -1143,8 +1143,9 @@ class QueueControllerTest {
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, expiresAt = now + 50))
     controller.sweep()
     assertEquals(EntryState.QUEUED, store.load("r")!!.state)
-    assertEquals(setOf("r", "q"), scheduler.scheduled.toSet())
-    assertEquals(setOf("w" to now + 3_600_000, "p" to now + 50), scheduler.wakes.toSet())
+    // "w" no longer waits for its backoff: the sweep runs it now.
+    assertEquals(setOf("r", "q", "w"), scheduler.scheduled.toSet())
+    assertEquals(setOf("p" to now + 50), scheduler.wakes.toSet())
   }
 
   @Test
@@ -1154,11 +1155,129 @@ class QueueControllerTest {
     store.save(entry(id = "far", state = EntryState.AWAITING_AUTH, expiresAt = FAR_FUTURE))
     store.save(entry(id = "near", state = EntryState.AWAITING_AUTH, expiresAt = now + EXPIRY_WAKE_HORIZON_MS))
     controller.sweep()
-    assertEquals(setOf("q", "far"), scheduler.cancelledWakes.toSet())
-    assertEquals(
-      setOf("w" to now + 3_600_000, "near" to now + EXPIRY_WAKE_HORIZON_MS),
-      scheduler.wakes.toSet(),
-    )
+    // The backoff wake of "w" is stale too: the sweep cleared its wait.
+    assertEquals(setOf("q", "w", "far"), scheduler.cancelledWakes.toSet())
+    assertEquals(setOf("near" to now + EXPIRY_WAKE_HORIZON_MS), scheduler.wakes.toSet())
+  }
+
+  @Test
+  fun `the boot sweep clears a long backoff and runs the entry now`() {
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
+    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 4_000).copy(backoffStreak = 3))
+    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 9))
+    controller.sweep()
+    for (id in listOf("w", "s", "r")) {
+      val e = store.load(id)!!
+      assertEquals(id, EntryState.QUEUED, e.state)
+      assertNull(id, e.nextAttemptAt)
+    }
+    // At most 5: the next failure waits about 32 s, not 2 hours.
+    assertEquals(5, store.load("w")!!.backoffStreak)
+    assertEquals(3, store.load("s")!!.backoffStreak)
+    assertEquals(5, store.load("r")!!.backoffStreak)
+    assertEquals(setOf("w", "s", "r"), scheduler.scheduled.toSet())
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertFalse(events.rows.any { it.toMap().containsKey("nextAttemptAt") })
+  }
+
+  @Test
+  fun `the boot sweep keeps the wait of an entry whose worker runs in this process`() {
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 20_000).copy(backoffStreak = 4))
+    running += "w"
+    controller.sweep()
+    assertEquals(now + 20_000, store.load("w")!!.nextAttemptAt)
+    assertEquals(4, store.load("w")!!.backoffStreak)
+  }
+
+  // MARK: - retryNow
+
+  @Test
+  fun `retryNow clears the wait of queued entries, keeps at most 5 steps, and runs them now`() {
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
+    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(backoffStreak = 2))
+    controller.retryNow()
+    assertNull(store.load("w")!!.nextAttemptAt)
+    assertEquals(5, store.load("w")!!.backoffStreak)
+    assertNull(store.load("s")!!.nextAttemptAt)
+    assertEquals(2, store.load("s")!!.backoffStreak)
+    assertEquals(setOf("w", "s"), scheduler.scheduled.toSet())
+    assertEquals(setOf("w", "s"), scheduler.cancelledWakes.toSet())
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(listOf("state:w:queued", "state:s:queued").sorted(), events.log.sorted())
+    assertFalse(events.rows.any { it.toMap().containsKey("nextAttemptAt") })
+  }
+
+  @Test
+  fun `retryNow leaves running, paused, parked and settled entries alone`() {
+    // A running entry waits out a short backoff in its own worker.
+    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 20_000).copy(backoffStreak = 4))
+    store.save(entry(id = "p", state = EntryState.PAUSED).copy(backoffStreak = 9))
+    store.save(entry(id = "a", state = EntryState.AWAITING_AUTH, parkedGeneration = 0, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "x", state = EntryState.ERROR, settledEventId = "gone"))
+    scheduler.startable += setOf("r", "p", "a", "x")
+    controller.retryNow()
+    assertEquals(now + 20_000, store.load("r")!!.nextAttemptAt)
+    assertEquals(4, store.load("r")!!.backoffStreak)
+    assertEquals(9, store.load("p")!!.backoffStreak)
+    assertEquals(now + 60_000, store.load("a")!!.nextAttemptAt)
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<String>(), events.log)
+  }
+
+  @Test
+  fun `retryNow with keys clears only the waits of those keys`() {
+    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    controller.retryNow(listOf("capture"))
+    assertNull(store.load("c")!!.nextAttemptAt)
+    assertEquals(now + 60_000, store.load("n")!!.nextAttemptAt)
+    assertEquals(listOf("c"), scheduler.scheduled)
+    controller.retryNow(emptyList())
+    assertEquals(now + 60_000, store.load("n")!!.nextAttemptAt)
+  }
+
+  @Test
+  fun `retryNow schedules a queued entry with no wait only when no row of it can start now`() {
+    store.save(entry(id = "has", state = EntryState.QUEUED))
+    store.save(entry(id = "none", state = EntryState.QUEUED))
+    scheduler.startable += "has"
+    controller.retryNow()
+    assertEquals(listOf("none"), scheduler.scheduled)
+    assertEquals(1, scheduler.startableQueries) // one WorkManager query for the whole queue
+    assertEquals(emptyList<String>(), events.log) // nothing changed on the rows
+  }
+
+  @Test
+  fun `retryNow saves the other entries when one can not be saved, and does not throw`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "x", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    withEntryUnwritable("x") { controller.retryNow() }
+    assertNull(store.load("q")!!.nextAttemptAt)
+    assertEquals(now + 60_000, store.load("x")!!.nextAttemptAt)
+    assertTrue("q" in scheduler.scheduled)
+  }
+
+  @Test
+  fun `resume clears the backoff of queued entries and resets the streak of the ones it resumes`() {
+    store.save(entry(id = "p", state = EntryState.PAUSED).copy(backoffStreak = 9))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
+    controller.resume()
+    assertEquals(EntryState.QUEUED, store.load("p")!!.state)
+    assertEquals(0, store.load("p")!!.backoffStreak)
+    assertNull(store.load("w")!!.nextAttemptAt)
+    assertEquals(5, store.load("w")!!.backoffStreak)
+    assertTrue(scheduler.scheduled.containsAll(listOf("p", "w")))
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+  }
+
+  @Test
+  fun `resume of some keys clears only the waits of those keys`() {
+    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    controller.resume(listOf("capture"))
+    assertNull(store.load("c")!!.nextAttemptAt)
+    assertEquals(now + 60_000, store.load("n")!!.nextAttemptAt)
+    assertEquals(listOf("n" to now + 60_000), scheduler.wakes)
   }
 
   @Test

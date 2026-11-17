@@ -55,6 +55,9 @@ class UploaderModule(context: ReactApplicationContext) :
   private val scheduler = WorkManagerScheduler(context)
   private val controller = QueueController(store, journal, settings, EventReporter, scheduler)
 
+  // Before init: the lifecycle listener it registers can fire at once.
+  private val foreground = ForegroundTask(queueExecutor, { settings.saveIfBehind() }, { controller.retryNow() })
+
   // The v9 import, then the v9 work cancel, then the boot sweep.
   // getRequests() waits for the import only (file reads and row saves), so
   // the first call after an upgrade already shows the legacy rows. The
@@ -79,11 +82,10 @@ class UploaderModule(context: ReactApplicationContext) :
 
   // A settings write that failed earlier is tried again each time the app
   // comes to the foreground, and when it leaves: the last chance before a
-  // relaunch with no JS reads the file. Off the UI thread, on the queue
-  // executor.
-  override fun onHostResume() {
-    queueExecutor.execute { settings.saveIfBehind() }
-  }
+  // relaunch with no JS reads the file. On the way in, queued entries also
+  // stop waiting for their backoff and run now. Off the UI thread, on the
+  // queue executor, after the boot sweep at the first launch.
+  override fun onHostResume() = foreground.onForeground()
 
   override fun onHostPause() {
     queueExecutor.execute { settings.saveIfBehind() }

@@ -210,6 +210,8 @@ class QueueController(
    * Undoes the pause of the same scope: [keys] null turns the gate off, a
    * list removes those keys from the set. A row comes back only when no
    * scope still pauses it, so the gate on + its key resumed stays paused.
+   * A resumed entry starts its backoff over. A queued entry of the same
+   * scope that waits for a backoff runs now, as with [retryNow].
    *
    * A failed entry save throws E_STORAGE after every other entry is moved
    * and every queued entry is scheduled. The entry that failed stays paused.
@@ -221,13 +223,70 @@ class QueueController(
     }
     val now = clock()
     val result = transformAll { e ->
-      if (e.state == EntryState.PAUSED && !s.isPaused(e.key)) EntryTransitions.toResumed(e, now) else e
+      when {
+        e.state == EntryState.PAUSED && !s.isPaused(e.key) -> EntryTransitions.toResumed(e, now)
+        inScope(e, keys) && EntryTransitions.waitsOnBackoff(e) -> EntryTransitions.toRetryNow(e, now)
+        else -> e
+      }
     }
     result.changed.forEach { events.state(it.toRow()) }
     // Every queued entry, not only the resumed ones: a run is idempotent.
     store.all().forEach { scheduleRun(it) }
     result.throwIfFailed("resume")
   }
+
+  /**
+   * The app started, came to the foreground, or resumed: queued entries in
+   * scope run now. [keys] null is every key; an empty list changes nothing.
+   *
+   * An entry that waits for a backoff stops waiting ([EntryTransitions.toRetryNow])
+   * and is scheduled. A queued entry with no wait is scheduled only when no
+   * row of it can start now ([WorkScheduler.startableIds], one query): a row
+   * that WorkManager holds back after a stop is replaced ([WorkScheduler.schedule]).
+   * Running, paused, parked and settled entries are left alone. A queued
+   * entry sends nothing, and the per-id gate holds any new row while a
+   * worker of the entry still winds down, so this never starts a second
+   * transfer next to one in progress.
+   *
+   * It reads the queue once, and saves only the entries that wait. Never
+   * throws: a failed entry save keeps that entry's wait and writes an
+   * error; the other entries go on.
+   */
+  fun retryNow(keys: List<String>? = null) {
+    if (keys != null && keys.isEmpty()) return
+    val now = clock()
+    val queued = store.all().filter { !it.legacy && it.state == EntryState.QUEUED && inScope(it, keys) }
+    val cleared = mutableListOf<QueueEntry>()
+    var failures = 0
+    var first: IOException? = null
+    store.locked {
+      queued.filter { EntryTransitions.waitsOnBackoff(it) }.forEach { e ->
+        try {
+          var next: QueueEntry? = null
+          // The snapshot can be stale: the store decides under the lock.
+          store.compute(e.id) { cur ->
+            if (cur != null && EntryTransitions.waitsOnBackoff(cur)) EntryTransitions.toRetryNow(cur, now).also { next = it } else cur
+          }
+          next?.let { cleared += it }
+        } catch (error: IOException) {
+          failures++
+          if (first == null) first = error
+        }
+      }
+    }
+    cleared.forEach { scheduleRun(it) }
+    val idle = queued.filter { it.nextAttemptAt == null }
+    if (idle.isNotEmpty()) {
+      val startable = runCatching { scheduler.startableIds() }
+        .onFailure { Diag.error("retryNow could not read WorkManager; it schedules every queued entry", it) }
+        .getOrNull()
+      idle.filter { startable == null || it.id !in startable }.forEach { scheduleRun(it) }
+    }
+    cleared.forEach { events.state(it.toRow()) }
+    first?.let { Diag.error("retryNow could not save $failures entries; they keep their wait", it) }
+  }
+
+  private fun inScope(e: QueueEntry, keys: List<String>?) = keys == null || e.key in keys
 
   /**
    * Live: journal a 'cancelled' (user) outcome, then forget after its ack.
@@ -428,11 +487,15 @@ class QueueController(
    * 2. A running entry with no worker: a process death mid-run. Queue it.
    *    A live row that disagrees with the paused settings, the gate or its
    *    key (a death partway through pause() or resume()): make it agree.
+   *    A queued entry that waits for a backoff runs now, with at most 5
+   *    backoff steps kept ([EntryTransitions.toRetryNow]).
    * 3. A settled entry with records of its generation other than its own:
    *    orphans from a cancel race. Ack them.
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
    * 5. Schedule every queued entry, and the expiry wake of every parked one.
+   *    A row that WorkManager holds back after a stop is replaced
+   *    ([WorkScheduler.schedule]), so each queued entry can start now.
    *
    * 6. Delete the orphan directories that hold only copied bodies and are
    *    older than [QueueStore.ORPHAN_MIN_AGE_MS] ([QueueStore.removeOrphans]).
@@ -485,6 +548,10 @@ class QueueController(
             cur = EntryTransitions.toPaused(cur, now)
           } else if (!paused && cur.state == EntryState.PAUSED) {
             cur = EntryTransitions.toResumed(cur, now)
+          }
+          // The app started: a queued entry no longer waits for its backoff.
+          if (EntryTransitions.waitsOnBackoff(cur)) {
+            cur = EntryTransitions.toRetryNow(cur, now)
           }
           if (cur !== e) {
             if (trySave(cur)) changed += cur else continue

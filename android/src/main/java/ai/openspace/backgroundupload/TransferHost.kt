@@ -39,6 +39,12 @@ internal interface TransferHost {
 
   /** Why the system stopped this run. Read it only after the run was cancelled. */
   fun stopKind(): StopKind
+
+  /**
+   * The latest time WorkManager starts this run's own row again after a
+   * system stop ([WorkManagerBackoff.restartBy]). Null when unknown.
+   */
+  fun rowRestartsBy(): Long?
 }
 
 /**
