@@ -1,10 +1,12 @@
 package ai.openspace.backgroundupload
 
+import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkInfo.State.BLOCKED
 import androidx.work.WorkInfo.State.CANCELLED
 import androidx.work.WorkInfo.State.ENQUEUED
 import androidx.work.WorkInfo.State.RUNNING
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -29,16 +31,41 @@ class MainChainTest {
   private lateinit var settings: QueueSettingsStore
   private lateinit var controller: QueueController
   private lateinit var scheduler: RowScheduler
+  private lateinit var journal: EventJournal
+  private val events = RecordingEvents()
+
+  /** WorkManager calls in order, and an enqueue that throws, as a process death before it lands. */
+  private inner class LoggedRows : WorkRows by work {
+    val log = mutableListOf<String>()
+    var enqueueFails = false
+
+    override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+      if (enqueueFails) throw IllegalStateException("the process died before the enqueue")
+      log += "enqueue:$name:$policy"
+      work.enqueue(name, policy, entry, delayMs)
+    }
+
+    override fun cancel(name: String) {
+      log += "cancel:$name"
+      work.cancel(name)
+    }
+  }
+
+  private val rows = LoggedRows()
 
   @Before
   fun setUp() {
     val root = tmp.newFolder("queue")
     store = QueueStore(root, RequestIndex())
-    val journal = EventJournal(tmp.newFolder("journal"), retryLater = { _, _ -> })
+    journal = EventJournal(tmp.newFolder("journal"), retryLater = { _, _ -> })
     settings = QueueSettingsStore(File(root, "settings.json"))
-    scheduler = RowScheduler(work, { it in running }, { work.now })
-    controller = QueueController(store, journal, settings, RecordingEvents(), scheduler, { it in running }, { work.now })
+    scheduler = RowScheduler(rows) { work.now }
+    controller = QueueController(store, journal, settings, events, scheduler, { it in running }, { work.now })
   }
+
+  /** A queued entry that waits after a transport failure 10 minutes ago. */
+  private fun transportWait(id: String = "e1", streak: Int = 12) = entry(id = id, state = EntryState.QUEUED, nextAttemptAt = work.now + 60 * minute)
+    .copy(backoffStreak = streak, waitCause = WaitCause.NO_RESPONSE, failedAt = work.now - 10 * minute)
 
   /** The rows of [id] WorkManager may start now, main chain and wake. */
   private fun startable(id: String = "e1") = work.startableNow().filter { it.entryId == id }
@@ -158,15 +185,19 @@ class MainChainTest {
   }
 
   @Test
-  fun `a held-back row is kept while a worker of the entry runs in this process`() {
-    // The wake row runs the entry; a new main row would only wait at the gate.
-    store.save(entry(state = EntryState.QUEUED))
-    val row = work.add("e1", runAttemptCount = 8, lastEnqueueTime = work.now - minute)
+  fun `a held-back main row is replaced while a wake worker of the entry runs`() {
+    // Probe P5. The wake's worker released the entry and still holds the
+    // gate. Then it schedules its wake at the old time and ends.
+    store.save(transportWait())
+    val held = work.add("e1", runAttemptCount = 8, lastEnqueueTime = work.now - minute)
     work.add("e1#wake", state = RUNNING, runAttemptCount = 1)
     running += "e1"
-    controller.resume()
-    assertEquals(ENQUEUED, row.state)
-    assertEquals(2, work.rows.size)
+    controller.retryNow()
+    scheduler.scheduleWake(store.load("e1")!!, work.now + 60 * minute, replace = true)
+    running -= "e1"
+    assertEquals(CANCELLED, held.state)
+    assertNull(store.load("e1")!!.nextAttemptAt)
+    assertEquals(listOf("e1"), startable().map { it.name })
   }
 
   @Test
@@ -178,6 +209,8 @@ class MainChainTest {
     work.add("blocked", state = BLOCKED)
     work.add("gone", state = CANCELLED)
     assertEquals(setOf("due", "run"), scheduler.startableIds())
+    // One query, and it asks only for the states that can start.
+    assertEquals(listOf(listOf(ENQUEUED, RUNNING)), work.libraryQueries)
   }
 
   @Test
@@ -192,5 +225,61 @@ class MainChainTest {
     val row = work.add("e1", runAttemptCount = 8, lastEnqueueTime = startedAt)
     assertEquals(work.nextScheduleAt(row), WorkManagerBackoff.restartBy(startedAt, 7))
     assertTrue(WorkManagerBackoff.restartBy(startedAt, 4) < startedAt + 10 * minute)
+  }
+
+  // MARK: - order, and cost
+
+  @Test
+  fun `the main row is made before the wake is cancelled`() {
+    store.save(transportWait())
+    work.add("e1#wake", initialDelay = 60 * minute)
+    controller.retryNow()
+    assertEquals(listOf("enqueue:e1:APPEND_OR_REPLACE", "cancel:e1#wake"), rows.log)
+  }
+
+  @Test
+  fun `a process death before the main row lands keeps the wake`() {
+    // Probe P3: with the wake cancelled first, the entry had no row at all.
+    store.save(transportWait())
+    work.add("e1#wake", initialDelay = 60 * minute)
+    rows.enqueueFails = true
+    controller.retryNow()
+    assertEquals(listOf("e1#wake"), work.rows.filter { !it.state.isFinished }.map { it.name })
+  }
+
+  @Test
+  fun `the boot sweep then an immediate return to the foreground clear a wait once`() {
+    store.save(transportWait())
+    work.add("e1#wake", initialDelay = 60 * minute)
+    controller.sweep()
+    controller.retryNow()
+    assertEquals(listOf("state:e1:queued"), events.log)
+    assertEquals(listOf("enqueue:e1:APPEND_OR_REPLACE", "cancel:e1#wake"), rows.log)
+    assertEquals(1, startable().size)
+  }
+
+  @Test
+  fun `retryNow costs no save and no WorkManager query for entries whose wait stays`() {
+    for (n in 1..3) {
+      store.save(transportWait("r$n").copy(waitCause = WaitCause.RESPONSE))
+    }
+    controller.retryNow()
+    assertEquals(0, work.nameQueries)
+    assertEquals(emptyList<List<androidx.work.WorkInfo.State>>(), work.libraryQueries)
+    assertEquals(emptyList<String>(), rows.log)
+    assertEquals(emptyList<String>(), events.log) // no save changed a row
+  }
+
+  @Test
+  fun `retryNow costs one save and two name queries per cleared entry, and one query for the idle ones`() {
+    for (n in 1..3) store.save(transportWait("t$n"))
+    for (n in 1..2) store.save(entry(id = "i$n", state = EntryState.QUEUED))
+    work.add("i1")
+    controller.retryNow()
+    assertEquals(3, events.log.size) // the three saves
+    assertEquals(1, work.libraryQueries.size)
+    // Cleared: schedule() and cancelWake() read one name each. Idle "i2"
+    // has no row that can start, so it is scheduled too; "i1" has one.
+    assertEquals(2 * 4, work.nameQueries)
   }
 }

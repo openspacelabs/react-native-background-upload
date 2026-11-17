@@ -41,17 +41,42 @@ object RetryClassifier {
   const val IN_WORKER_BACKOFF_MAX_MS = 30_000L
 
   /**
-   * The longest wait after a transport failure (no HTTP response). Every
-   * attempt starts on a network Android reports as validated, so the failure
-   * says little about the server, and a network change cannot wake a queued
-   * entry. HTTP failures keep the policy's maxMs.
+   * The longest wait after a failure in the connect phase
+   * ([reachedNoServer]). Every attempt starts on a network Android reports
+   * as validated, so such a failure says little about the server, and a
+   * network change cannot wake a queued entry. Every other failure keeps
+   * the policy's maxMs: a failure after the request went out may have
+   * reached the server, and a sooner repeat would make a duplicate likelier.
    */
   const val TRANSPORT_FAILURE_MAX_MS = 15L * 60 * 1000
 
+  /** The app clears a wait only this long after the failure that set it. */
+  const val CLEAR_MIN_AGE_MS = 30_000L
+
+  /**
+   * Whether [error] proves the request never reached the server: it failed
+   * before a connection was made or secured. From OkHttp 4.12.0:
+   * RealConnection.connectSocket throws ConnectException ("Failed to
+   * connect to"); the DNS lookup (Dns.SYSTEM) throws UnknownHostException;
+   * the socket connect can throw NoRouteToHostException or
+   * PortUnreachableException; the TLS handshake throws SSLHandshakeException,
+   * and connectTls throws SSLPeerUnverifiedException. RetryAndFollowUpInterceptor
+   * rethrows the first of these from a RouteException. A
+   * SocketTimeoutException is left out: a connect timeout and a read or
+   * write timeout throw the same class.
+   */
+  fun reachedNoServer(error: Throwable): Boolean =
+    error is java.net.ConnectException ||
+      error is java.net.UnknownHostException ||
+      error is java.net.NoRouteToHostException ||
+      error is java.net.PortUnreachableException ||
+      error is javax.net.ssl.SSLHandshakeException ||
+      error is javax.net.ssl.SSLPeerUnverifiedException
+
   /**
    * The highest backoff streak an entry keeps when the app clears its wait.
-   * Streak 5 is the last wait a worker sleeps out in place (16 s at the
-   * default base); the next failure waits about 32 s, then the wait doubles.
+   * Streak 5 is the last wait a worker sleeps out in place (16 times
+   * baseMs); the next failure waits 32 times baseMs, then the wait doubles.
    */
   const val RETRY_NOW_MAX_STREAK = 5
 

@@ -159,6 +159,7 @@ object EnqueueRules {
       updatedAt = now,
       nextAttemptAt = null,
       backoffStreak = 0,
+      backoffPartStart = null,
       headerGeneration = headerGeneration,
       parkedGeneration = null,
       generation = if (reopen) existing.generation + 1 else existing.generation,

@@ -47,7 +47,7 @@ internal class SimpleTransfer(private val run: EntryRun) {
         EntryRun.AttemptResult.Transient -> {
           run.reportProgress(0L, total)
           streak++
-          run.backoffOrRelease(a.policy, streak, a.entry.expiresAt)
+          run.backoffOrRelease(a.policy, streak, a.entry.expiresAt, a.cause)
         }
         is EntryRun.AttemptResult.Terminal ->
           return Settlement.Failed(r.errorKind, r.message, r.response, null, a.url, a.method, bytesSent = run.liveBytes)

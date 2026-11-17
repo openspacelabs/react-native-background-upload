@@ -214,21 +214,25 @@ class EntryRunTest {
   }
 
   @Test
-  fun `a transport failure waits at most 15 minutes, an HTTP failure keeps the 2 hour maximum`() {
+  fun `a connect failure waits at most 15 minutes, an HTTP failure keeps the 2 hour maximum`() {
     controller.configureRetry(RetryDefaults(baseMs = 1_000, maxMs = 7_200_000, jitter = 0.0))
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(backoffStreak = 12))
-    host.handler = { _, _ -> throw IOException("connection reset") }
+    host.handler = { _, _ -> throw java.net.ConnectException("Failed to connect to example.com/1.2.3.4:443") }
     run()
     // Streak 13 is 2^12 s, about 68 minutes, capped at 15.
-    assertEquals(host.clock + RetryClassifier.TRANSPORT_FAILURE_MAX_MS, store.load("e1")!!.nextAttemptAt)
-    assertEquals(13, store.load("e1")!!.backoffStreak)
+    val e = store.load("e1")!!
+    assertEquals(host.clock + RetryClassifier.TRANSPORT_FAILURE_MAX_MS, e.nextAttemptAt)
+    assertEquals(13, e.backoffStreak)
+    assertEquals(WaitCause.NO_RESPONSE, e.waitCause)
+    assertEquals(host.clock, e.failedAt)
 
     controller.enqueue(parsed(id = "e2"))
     store.save(store.load("e2")!!.copy(backoffStreak = 12))
     respond(503)
     run("e2")
     assertEquals(host.clock + 4_096_000, store.load("e2")!!.nextAttemptAt)
+    assertEquals(WaitCause.RESPONSE, store.load("e2")!!.waitCause)
     store.save(store.load("e2")!!.copy(nextAttemptAt = null, backoffStreak = 13))
     respond(503)
     run("e2")
@@ -236,13 +240,84 @@ class EntryRunTest {
   }
 
   @Test
-  fun `a transport failure keeps a maximum below 15 minutes`() {
+  fun `a failure after the request may have gone out keeps the 2 hour maximum`() {
+    // A read timeout, or a reset after the body left: the server may have
+    // the request, so a sooner repeat would make a duplicate likelier.
+    for ((n, error) in listOf(java.net.SocketTimeoutException("timeout"), IOException("connection reset")).withIndex()) {
+      controller.enqueue(parsed(id = "t$n"))
+      store.save(store.load("t$n")!!.copy(backoffStreak = 13))
+      host.handler = { _, _ -> throw error }
+      run("t$n")
+      assertEquals(error.message, host.clock + 7_200_000, store.load("t$n")!!.nextAttemptAt)
+      assertEquals(WaitCause.NO_RESPONSE, store.load("t$n")!!.waitCause)
+    }
+  }
+
+  @Test
+  fun `a connect failure keeps a maximum below 15 minutes`() {
     controller.configureRetry(RetryDefaults(baseMs = 1_000, maxMs = 60_000, jitter = 0.0))
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(backoffStreak = 12))
-    host.handler = { _, _ -> throw IOException("connection reset") }
+    host.handler = { _, _ -> throw java.net.UnknownHostException("example.com") }
     run()
     assertEquals(host.clock + 60_000, store.load("e1")!!.nextAttemptAt)
+  }
+
+  // MARK: - the app clears a wait (review probes P1 and P2)
+
+  @Test
+  fun `repeated returns to the foreground do not send again after a 503`() {
+    // Probe P1: before, 10 foregrounds gave 10 requests with 0 ms between.
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 13))
+    host.handler = { _, _ -> UploadResponse(503, "down", mapOf()) }
+    repeat(10) {
+      controller.retryNow()
+      run()
+    }
+    assertEquals(1, host.requests.size)
+    assertEquals(WaitCause.RESPONSE, store.load("e1")!!.waitCause)
+  }
+
+  @Test
+  fun `repeated returns to the foreground after a connect failure send at most once per 30 s`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 13))
+    val sentAt = mutableListOf<Long>()
+    host.handler = { _, _ ->
+      sentAt += host.clock
+      throw java.net.ConnectException("Failed to connect")
+    }
+    repeat(10) {
+      controller.retryNow()
+      run()
+      host.clock += 10_000
+    }
+    // The first clear comes 30 s after the failure (its own wait was 15
+    // minutes). Later requests come from a clear or from the entry's own
+    // backoff, and never less than 30 s apart.
+    assertEquals(sentAt.toString(), sentAt[0] + RetryClassifier.CLEAR_MIN_AGE_MS, sentAt[1])
+    assertTrue(sentAt.toString(), sentAt.zipWithNext().all { (a, b) -> b - a >= RetryClassifier.CLEAR_MIN_AGE_MS })
+    assertTrue(sentAt.toString(), sentAt.size < 10)
+  }
+
+  @Test
+  fun `returns to the foreground do not spend a transient rule's retries`() {
+    // Probe P2: before, six foregrounds used all 5 retries and the entry
+    // settled error with no time between.
+    controller.configureRetry(
+      RetryDefaults(baseMs = 60_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(409, maxRetries = 5))),
+    )
+    controller.enqueue(parsed())
+    host.handler = { _, _ -> UploadResponse(409, "not yet", mapOf()) }
+    repeat(20) {
+      controller.retryNow()
+      run()
+    }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(1, host.requests.size)
+    assertEquals(1, e.transientHitsByRule!!.values.sum())
   }
 
   @Test
@@ -1021,6 +1096,78 @@ class EntryRunTest {
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(10, e.backoffStreak)
     assertEquals(listOf("e1" to host.clock + 512_000), scheduler.wakes) // base 1 s * 2^(10-1)
+  }
+
+  @Test
+  fun `the part whose failures set the streak goes on from it, the others start from 0`() {
+    chunked()
+    // Part 1 (start 10) set streak 9 in an earlier run.
+    store.save(store.load("e1")!!.copy(backoffStreak = 9, backoffPartStart = 10))
+    host.handler = { r, _ ->
+      UploadResponse(if (r.url.endsWith("start=10")) 503 else 200, "", mapOf())
+    }
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    // Part 1's next failure is step 10: 2^9 s. The accepted siblings did not reset it.
+    assertEquals(10, e.backoffStreak)
+    assertEquals(10L, e.backoffPartStart)
+    assertEquals(listOf("e1" to host.clock + 512_000), scheduler.wakes)
+    assertTrue(e.descriptor!!.parts!![0].accepted)
+    assertFalse(e.descriptor!!.parts!![1].accepted)
+  }
+
+  @Test
+  fun `a part other than the one that set the streak counts its own failures from 0`() {
+    chunked()
+    store.save(store.load("e1")!!.copy(backoffStreak = 9, backoffPartStart = 10))
+    var failed = false
+    host.handler = { r, _ ->
+      if (r.url.endsWith("start=0") && !failed) {
+        failed = true
+        UploadResponse(503, "", mapOf())
+      } else UploadResponse(200, "", mapOf())
+    }
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(listOf(1_000L), host.sleeps) // step 1, not step 10
+  }
+
+  @Test
+  fun `a part that always fails backs off further in each run while its siblings are accepted`() {
+    // Probe P6: before, part 0 started from step 1 in every run: 48
+    // attempts in 8 runs, a 32 s wait every time.
+    val n = 40
+    val src = File(tmp.newFolder(), "video.bin").apply { writeBytes(ByteArray(n * 10) { it.toByte() }) }
+    controller.enqueue(
+      parsed(descriptor = desc(url = null, method = "PUT", file = src.path, parts = (0 until n).map { part(it * 10L, it * 10L + 10) })),
+    )
+    var part0 = 0
+    var acceptedThisRun = 0
+    host.handler = { r, _ ->
+      val index = r.url.substringAfter("start=").toInt() / 10
+      if (index == 0) {
+        kotlinx.coroutines.yield()
+        part0++
+        UploadResponse(503, "", mapOf())
+      } else if (acceptedThisRun++ == 0) {
+        UploadResponse(200, "", mapOf())
+      } else {
+        awaitCancellation()
+      }
+    }
+    val streaks = mutableListOf<Int>()
+    repeat(8) {
+      acceptedThisRun = 0
+      run()
+      val e = store.load("e1")!!
+      streaks += e.backoffStreak
+      host.clock = e.nextAttemptAt ?: host.clock
+    }
+    // Six attempts in the first run (1, 2, 4, 8, 16 s in place, then 32 s),
+    // then one per run, each wait twice the one before.
+    assertEquals(6 + 7, part0)
+    assertEquals((6..13).toList(), streaks)
   }
 
   /** Four 10-byte parts. [code] answers each request by its part index and how many times that part was sent. */

@@ -1139,7 +1139,7 @@ class QueueControllerTest {
   fun `sweep queues a running entry with no worker and schedules queued work`() {
     store.save(entry(id = "r", state = EntryState.RUNNING))
     store.save(entry(id = "q", state = EntryState.QUEUED))
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, expiresAt = now + 50))
     controller.sweep()
     assertEquals(EntryState.QUEUED, store.load("r")!!.state)
@@ -1151,7 +1151,7 @@ class QueueControllerTest {
   @Test
   fun `sweep cancels the stale wakes of due work and of a parked entry with a far expiry`() {
     store.save(entry(id = "q", state = EntryState.QUEUED))
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
     store.save(entry(id = "far", state = EntryState.AWAITING_AUTH, expiresAt = FAR_FUTURE))
     store.save(entry(id = "near", state = EntryState.AWAITING_AUTH, expiresAt = now + EXPIRY_WAKE_HORIZON_MS))
     controller.sweep()
@@ -1162,9 +1162,9 @@ class QueueControllerTest {
 
   @Test
   fun `the boot sweep clears a long backoff and runs the entry now`() {
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
-    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 4_000).copy(backoffStreak = 3))
-    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 9))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 13))
+    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 4_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 3))
+    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 7_200_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 9))
     controller.sweep()
     for (id in listOf("w", "s", "r")) {
       val e = store.load(id)!!
@@ -1182,7 +1182,7 @@ class QueueControllerTest {
 
   @Test
   fun `the boot sweep keeps the wait of an entry whose worker runs in this process`() {
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 20_000).copy(backoffStreak = 4))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 20_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 4))
     running += "w"
     controller.sweep()
     assertEquals(now + 20_000, store.load("w")!!.nextAttemptAt)
@@ -1193,8 +1193,8 @@ class QueueControllerTest {
 
   @Test
   fun `retryNow clears the wait of queued entries, keeps at most 5 steps, and runs them now`() {
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
-    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(backoffStreak = 2))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 13))
+    store.save(entry(id = "s", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 2))
     controller.retryNow()
     assertNull(store.load("w")!!.nextAttemptAt)
     assertEquals(5, store.load("w")!!.backoffStreak)
@@ -1210,7 +1210,7 @@ class QueueControllerTest {
   @Test
   fun `retryNow leaves running, paused, parked and settled entries alone`() {
     // A running entry waits out a short backoff in its own worker.
-    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 20_000).copy(backoffStreak = 4))
+    store.save(entry(id = "r", state = EntryState.RUNNING, nextAttemptAt = now + 20_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 4))
     store.save(entry(id = "p", state = EntryState.PAUSED).copy(backoffStreak = 9))
     store.save(entry(id = "a", state = EntryState.AWAITING_AUTH, parkedGeneration = 0, nextAttemptAt = now + 60_000))
     store.save(entry(id = "x", state = EntryState.ERROR, settledEventId = "gone"))
@@ -1226,8 +1226,8 @@ class QueueControllerTest {
 
   @Test
   fun `retryNow with keys clears only the waits of those keys`() {
-    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
-    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
+    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
     controller.retryNow(listOf("capture"))
     assertNull(store.load("c")!!.nextAttemptAt)
     assertEquals(now + 60_000, store.load("n")!!.nextAttemptAt)
@@ -1249,8 +1249,8 @@ class QueueControllerTest {
 
   @Test
   fun `retryNow saves the other entries when one can not be saved, and does not throw`() {
-    store.save(entry(id = "q", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
-    store.save(entry(id = "x", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "q", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
+    store.save(entry(id = "x", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
     withEntryUnwritable("x") { controller.retryNow() }
     assertNull(store.load("q")!!.nextAttemptAt)
     assertEquals(now + 60_000, store.load("x")!!.nextAttemptAt)
@@ -1258,12 +1258,12 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `resume clears the backoff of queued entries and resets the streak of the ones it resumes`() {
+  fun `resume clears the backoff of queued entries and caps the streak of the ones it resumes`() {
     store.save(entry(id = "p", state = EntryState.PAUSED).copy(backoffStreak = 9))
-    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(backoffStreak = 13))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 7_200_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000, backoffStreak = 13))
     controller.resume()
     assertEquals(EntryState.QUEUED, store.load("p")!!.state)
-    assertEquals(0, store.load("p")!!.backoffStreak)
+    assertEquals(5, store.load("p")!!.backoffStreak)
     assertNull(store.load("w")!!.nextAttemptAt)
     assertEquals(5, store.load("w")!!.backoffStreak)
     assertTrue(scheduler.scheduled.containsAll(listOf("p", "w")))
@@ -1272,13 +1272,99 @@ class QueueControllerTest {
 
   @Test
   fun `resume of some keys clears only the waits of those keys`() {
-    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
-    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000))
+    store.save(entry(id = "c", key = "capture", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
+    store.save(entry(id = "n", key = "note", state = EntryState.QUEUED, nextAttemptAt = now + 60_000).copy(waitCause = WaitCause.NO_RESPONSE, failedAt = now - 60_000))
     controller.resume(listOf("capture"))
     assertNull(store.load("c")!!.nextAttemptAt)
     assertEquals(now + 60_000, store.load("n")!!.nextAttemptAt)
     assertEquals(listOf("n" to now + 60_000), scheduler.wakes)
   }
+  // MARK: - which waits are cleared
+
+  private fun waitAfter(id: String, cause: String?, age: Long, at: Long = now + 3_600_000) =
+    entry(id = id, state = EntryState.QUEUED, nextAttemptAt = at)
+      .copy(backoffStreak = 9, waitCause = cause, failedAt = if (cause == null) null else now - age)
+
+  /** Each of the three triggers, on a fresh copy of [saved]. */
+  private fun eachTrigger(saved: () -> Unit, check: (trigger: String) -> Unit) {
+    for (trigger in listOf("sweep", "resume", "foreground")) {
+      saved()
+      when (trigger) {
+        "sweep" -> controller.sweep()
+        "resume" -> controller.resume()
+        else -> controller.retryNow()
+      }
+      check(trigger)
+    }
+  }
+
+  @Test
+  fun `a wait after a server response keeps its time at the boot sweep, resume and a return to the foreground`() {
+    val at = now + 3_600_000
+    eachTrigger({ store.save(waitAfter("e1", WaitCause.RESPONSE, age = 3_600_000, at = at)) }) { trigger ->
+      assertEquals(trigger, at, store.load("e1")!!.nextAttemptAt)
+      assertEquals(trigger, 9, store.load("e1")!!.backoffStreak)
+    }
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+  }
+
+  @Test
+  fun `a transport-failure wait 30 s or older is cleared by each trigger`() {
+    eachTrigger({ store.save(waitAfter("e1", WaitCause.NO_RESPONSE, age = 30_000)) }) { trigger ->
+      assertNull(trigger, store.load("e1")!!.nextAttemptAt)
+      assertEquals(trigger, 5, store.load("e1")!!.backoffStreak)
+    }
+  }
+
+  @Test
+  fun `a transport-failure wait younger than 30 s keeps its time at each trigger`() {
+    val at = now + 3_600_000
+    eachTrigger({ store.save(waitAfter("e1", WaitCause.NO_RESPONSE, age = 29_999, at = at)) }) { trigger ->
+      assertEquals(trigger, at, store.load("e1")!!.nextAttemptAt)
+    }
+  }
+
+  @Test
+  fun `a wait an older version saved is cleared by each trigger`() {
+    now = 100_000 // the entry was saved at 1_000
+    eachTrigger({ store.save(waitAfter("e1", cause = null, age = 0)) }) { trigger ->
+      assertNull(trigger, store.load("e1")!!.nextAttemptAt)
+    }
+  }
+
+  @Test
+  fun `retryNow goes on past an entry whose scheduling fails, emits what it saved, and writes one error`() {
+    // Probe P4.
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    var calls = 0
+    val failing = object : WorkScheduler by scheduler {
+      override fun schedule(entry: QueueEntry) {
+        if (calls++ == 0) throw IllegalStateException("WorkManager failed")
+        scheduler.schedule(entry)
+      }
+    }
+    val c = QueueController(store, journal, settings, events, failing, { false }, { now })
+    store.save(waitAfter("a", WaitCause.NO_RESPONSE, age = 60_000))
+    store.save(waitAfter("b", WaitCause.NO_RESPONSE, age = 60_000))
+    c.retryNow()
+    assertEquals(1, scheduler.scheduled.size)
+    assertEquals(listOf("state:a:queued", "state:b:queued"), events.log.sorted())
+    val errors = DiagnosticLog(file).drain()
+    assertEquals(1, errors.size)
+    assertTrue(errors.single().message, errors.single().message.startsWith("retryNow: 1 entry saves or WorkManager calls failed"))
+  }
+
+  @Test
+  fun `a sweep whose clear can not be saved schedules the entry as found, and its wake is made again`() {
+    val at = now + 3_600_000
+    store.save(waitAfter("w", WaitCause.NO_RESPONSE, age = 60_000, at = at))
+    withEntryUnwritable("w") { controller.sweep() }
+    assertEquals(at, store.load("w")!!.nextAttemptAt)
+    assertEquals(listOf("w" to at), scheduler.wakes)
+    assertEquals(listOf(false), scheduler.wakeReplaces) // KEEP: a wake that exists stays
+  }
+
 
   @Test
   fun `sweep skips an entry whose worker runs in this process`() {

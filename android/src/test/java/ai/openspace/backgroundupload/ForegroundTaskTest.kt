@@ -49,10 +49,10 @@ class ForegroundTaskTest {
     Diag.log = DiagnosticLog(file)
     val executor = HeldExecutor()
     var retried = false
-    val task = ForegroundTask(executor, { throw IllegalStateException("settings") }) {
+    val task = ForegroundTask(executor, { throw IllegalStateException("settings") }, retryNow = {
       retried = true
       throw IllegalStateException("work")
-    }
+    })
     task.onForeground()
     executor.runAll()
     assertEquals(true, retried)
@@ -61,5 +61,22 @@ class ForegroundTaskTest {
       listOf("could not save the settings on return to the foreground", "retryNow on return to the foreground failed"),
       errors.map { it.message },
     )
+  }
+
+  @Test
+  fun `retryNow runs at most once per 30 s, the settings save every time`() {
+    val executor = HeldExecutor()
+    var now = 1_000_000L
+    val calls = mutableListOf<String>()
+    val task = ForegroundTask(executor, { calls += "save" }, { calls += "retryNow" }) { now }
+    task.onForeground()
+    executor.runAll()
+    now += 29_999 // a permission dialog, a picker, a share sheet
+    task.onForeground()
+    executor.runAll()
+    now += 1
+    task.onForeground()
+    executor.runAll()
+    assertEquals(listOf("save", "retryNow", "save", "save", "retryNow"), calls)
   }
 }

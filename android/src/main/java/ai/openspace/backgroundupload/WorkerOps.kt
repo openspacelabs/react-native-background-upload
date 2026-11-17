@@ -117,31 +117,47 @@ class WorkerOps(
    * and carries [nextAttemptAt]. It also saves the failure's backoff
    * [streak], so a stop during the wait keeps that step. Best effort; a
    * lost write hides the time and loses the step. For a chunked entry, a
-   * sibling part's next attempt clears the time.
+   * sibling part's next attempt clears the time. [cause] is a [WaitCause];
+   * [partStart] names the chunked part that failed.
    */
-  fun backingOff(id: String, generation: Int, nextAttemptAt: Long, streak: Int) {
+  fun backingOff(
+    id: String,
+    generation: Int,
+    nextAttemptAt: Long,
+    streak: Int,
+    cause: String? = null,
+    partStart: Long? = null,
+  ) {
     val now = clock()
     var applied = false
     val next = store.update(id) { e ->
       if (EntryTransitions.isOwnedRun(e, generation)) {
         applied = true
-        EntryTransitions.toBackingOff(e, nextAttemptAt, streak, now)
+        EntryTransitions.toBackingOff(e, nextAttemptAt, streak, now, cause, partStart)
       } else e
     }
     if (applied && next != null) events.state(next.toRow())
   }
 
-  /** A chunked part the server accepted. Best effort, as v9: a lost flag only re-sends that part later. */
+  /**
+   * A chunked part the server accepted. Best effort, as v9: a lost flag only
+   * re-sends that part later. The stored streak goes back to 0 only when
+   * this part set it, or no part is named: a part that keeps failing keeps
+   * its streak while its siblings are accepted.
+   */
   fun markAccepted(id: String, generation: Int, index: Int): QueueEntry? =
     store.update(id) { e ->
       val parts = e.descriptor?.parts
       if (e.generation != generation || parts == null || index !in parts.indices) e
       else {
         val next = ChunkedParts.withAccepted(parts, index)
+        val owner = e.backoffPartStart
+        val resets = owner == null || owner == parts[index].start
         e.copy(
           descriptor = e.descriptor.copy(parts = next),
           bytesSent = ChunkedParts.acceptedBytes(next),
-          backoffStreak = 0,
+          backoffStreak = if (resets) 0 else e.backoffStreak,
+          backoffPartStart = if (resets) null else owner,
         )
       }
     }
@@ -324,13 +340,21 @@ class WorkerOps(
    * caller knows WorkManager starts the run's own row again at once, and
    * that run makes the wake ([ensureWake]).
    */
-  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int, wake: Boolean = true): Boolean {
+  fun release(
+    id: String,
+    generation: Int,
+    nextAttemptAt: Long,
+    streak: Int,
+    wake: Boolean = true,
+    cause: String? = null,
+    partStart: Long? = null,
+  ): Boolean {
     val now = clock()
     var applied = false
     val next = store.compute(id) { e ->
       if (EntryTransitions.isOwnedRun(e, generation)) {
         applied = true
-        EntryTransitions.toReleased(e!!, nextAttemptAt, streak, now)
+        EntryTransitions.toReleased(e!!, nextAttemptAt, streak, now, cause, partStart)
       } else e
     }
     if (!applied || next == null) return false

@@ -6,6 +6,7 @@ import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.WorkQuery
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -55,31 +56,40 @@ internal enum class MainChainStep { NONE, APPEND, REPLACE }
 
 /**
  * The step for a "run now" on a main chain with [rows] (its unfinished
- * rows). [workerRunning]: a worker of the entry runs in this process.
+ * rows).
  *
  * - No row: a fresh chain (APPEND_OR_REPLACE starts one).
- * - A run in progress (a RUNNING row, or a worker in this process): a
- *   queued row after it is enough; with none, append one.
- * - No run in progress: a row WorkManager starts now is enough. When every
+ * - A RUNNING row: a row BLOCKED behind it runs after it, so that is
+ *   enough; with none, append one.
+ * - No RUNNING row: a row WorkManager starts now is enough. When every
  *   queued row waits, REPLACE them with a fresh row. That is a row a stop
  *   left on WorkManager's backoff (see [WorkManagerBackoff]), and the rows
- *   blocked behind it. Nothing runs, so the replace cuts no request.
- *   WorkManager does not start a row before its time, and a row due within
- *   [START_MARGIN_MS] counts as starting now, so no row starts between the
- *   read and the replace.
+ *   blocked behind it. A worker of the entry that runs under the wake name
+ *   does not change this: when it ends it may leave no row that can start.
+ *   The fresh row then waits at the per-id gate until that worker ends.
+ *
+ * WorkManager does not start a row before its time, and a row due within
+ * [START_MARGIN_MS] counts as starting now. That margin is the protection
+ * against replacing a row that just started: the query, the enqueue and
+ * the cancel run one after the other on WorkManager's executor, and the
+ * enqueue is not awaited. It is a margin, not a guarantee.
  */
-internal fun mainChainStep(rows: List<WorkRow>, workerRunning: Boolean, now: Long): MainChainStep {
+internal fun mainChainStep(rows: List<WorkRow>, now: Long): MainChainStep {
   val open = rows.filter { !it.state.isFinished }
   if (open.isEmpty()) return MainChainStep.APPEND
-  if (workerRunning || open.any { it.state == WorkInfo.State.RUNNING }) {
-    return if (WorkManagerScheduler.hasQueuedSuccessor(open.map { it.state })) MainChainStep.NONE else MainChainStep.APPEND
+  if (open.any { it.state == WorkInfo.State.RUNNING }) {
+    val after = open.any { it.state == WorkInfo.State.BLOCKED || it.startsBy(now) }
+    return if (after) MainChainStep.NONE else MainChainStep.APPEND
   }
   if (open.any { it.startsBy(now) }) return MainChainStep.NONE
   return MainChainStep.REPLACE
 }
 
-/** A row due this soon counts as one that starts now. */
-internal const val START_MARGIN_MS = 5_000L
+/**
+ * A row due this soon counts as one that starts now. 30 s is WorkManager's
+ * shortest backoff, so the margin delays an entry by at most that much.
+ */
+internal const val START_MARGIN_MS = 30_000L
 
 /** An ENQUEUED row that WorkManager may start now, or within [START_MARGIN_MS]. */
 internal fun WorkRow.startsBy(now: Long) = state == WorkInfo.State.ENQUEUED && nextScheduleAt <= now + START_MARGIN_MS
@@ -151,8 +161,8 @@ interface WorkRows {
   /** The unfinished rows of one unique name. */
   fun unfinished(name: String): List<WorkRow>
 
-  /** Every unfinished row of the library, main chains and wakes. */
-  fun library(): List<WorkRow>
+  /** Every row of the library, main chains and wakes, in one of [states]. One query. */
+  fun library(states: List<WorkInfo.State>): List<WorkRow>
 
   fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long)
 
@@ -178,16 +188,18 @@ interface WorkRows {
  */
 open class RowScheduler(
   private val rows: WorkRows,
-  private val isWorkerRunning: (id: String) -> Boolean = WorkerGate::isRunning,
   private val clock: () -> Long = System::currentTimeMillis,
 ) : WorkScheduler {
+  private companion object {
+    val UNFINISHED = listOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)
+  }
 
   /**
    * Makes sure the entry has a row that starts now or after the run in
    * progress. See [mainChainStep].
    */
   override fun schedule(entry: QueueEntry) {
-    when (mainChainStep(rows.unfinished(entry.id), isWorkerRunning(entry.id), clock())) {
+    when (mainChainStep(rows.unfinished(entry.id), clock())) {
       MainChainStep.NONE -> Unit
       MainChainStep.APPEND -> rows.enqueue(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L)
       MainChainStep.REPLACE -> rows.enqueue(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L)
@@ -219,7 +231,7 @@ open class RowScheduler(
   // One query for every row, not one per entry: the boot sweep runs this on
   // the queue's only thread.
   override fun libraryRuns(): List<PendingRun> =
-    rows.library().map { row ->
+    rows.library(UNFINISHED).map { row ->
       PendingRun(
         entryId = row.entryId,
         state = row.state.name,
@@ -231,7 +243,7 @@ open class RowScheduler(
 
   override fun startableIds(): Set<String> {
     val now = clock()
-    return rows.library()
+    return rows.library(listOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING))
       .filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }
       .mapNotNull { it.entryId }
       .toSet()
@@ -273,8 +285,11 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
   override fun unfinished(name: String): List<WorkRow> =
     workManager.getWorkInfosForUniqueWork(name).get().filter { !it.state.isFinished }.map(::row)
 
-  override fun library(): List<WorkRow> =
-    workManager.getWorkInfosByTag(WorkManagerScheduler.WORK_TAG).get().filter { !it.state.isFinished }.map(::row)
+  // The states are filtered in the query, so finished rows are never loaded.
+  override fun library(states: List<WorkInfo.State>): List<WorkRow> =
+    workManager.getWorkInfos(
+      WorkQuery.Builder.fromTags(listOf(WorkManagerScheduler.WORK_TAG)).addStates(states).build(),
+    ).get().map(::row)
 
   override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
     workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue()

@@ -50,7 +50,7 @@ internal class ChunkedTransfer(private val run: EntryRun) {
     run.progressStarted(total, acceptedBytes.get())
 
     try {
-      ChunkedEngine.run(pending) { index -> executePart(index, blob, start.backoffStreak) }
+      ChunkedEngine.run(pending) { index -> executePart(index, blob, start.backoffStreak, start.backoffPartStart) }
     } catch (failed: PartFailed) {
       return failed.settlement
     }
@@ -69,13 +69,17 @@ internal class ChunkedTransfer(private val run: EntryRun) {
   }
 
   /**
-   * [initialStreak] is the entry's stored streak. A part uses it only until
-   * a part is accepted in this run. After that the server answers, so the
-   * part counts its own failures from 0. Without that, one failed part after
-   * a long backoff would release the whole entry for the next, longer wait.
+   * [initialStreak] is the entry's stored streak, and [streakPart] the start
+   * of the part whose failures set it. That part goes on from the stored
+   * streak, so a part that keeps failing keeps backing off across runs. The
+   * other parts count their own failures from 0, so an old streak does not
+   * slow the parts that work. When no part is named (an older version, or a
+   * stop that cut the run), every part uses the stored streak until a part
+   * is accepted in this run.
    */
-  internal suspend fun executePart(index: Int, blob: File, initialStreak: Int) {
-    var base = initialStreak
+  internal suspend fun executePart(index: Int, blob: File, initialStreak: Int, streakPart: Long?) {
+    val partStart = run.ops.latest(run.entryId, run.generation).descriptor!!.parts!![index].start
+    var base = if (streakPart == null || streakPart == partStart) initialStreak else 0
     var failures = 0
     while (true) {
       if (index in acceptedHere) return
@@ -116,9 +120,9 @@ internal class ChunkedTransfer(private val run: EntryRun) {
         }
         EntryRun.AttemptResult.Transient -> {
           onPartProgress(index, 0L)
-          if (acceptedHere.isNotEmpty()) base = 0
+          if (streakPart == null && acceptedHere.isNotEmpty()) base = 0
           failures++
-          run.backoffOrRelease(a.policy, base + failures, a.entry.expiresAt)
+          run.backoffOrRelease(a.policy, base + failures, a.entry.expiresAt, a.cause, partStart)
         }
         is EntryRun.AttemptResult.Terminal -> {
           onPartProgress(index, 0L)

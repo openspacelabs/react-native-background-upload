@@ -53,11 +53,47 @@ class EntryTransitionsTest {
   }
 
   @Test
-  fun `resume to queued starts the backoff over, resume to awaiting-auth keeps it`() {
+  fun `resume to queued keeps at most 5 backoff steps, resume to awaiting-auth keeps them all`() {
     val paused = entry(state = EntryState.PAUSED).copy(backoffStreak = 9)
-    assertEquals(0, EntryTransitions.toResumed(paused, 9).backoffStreak)
+    assertEquals(5, EntryTransitions.toResumed(paused, 9).backoffStreak)
+    assertEquals(3, EntryTransitions.toResumed(paused.copy(backoffStreak = 3), 9).backoffStreak)
     val parked = paused.copy(parkedGeneration = 3, headerGeneration = 3)
     assertEquals(9, EntryTransitions.toResumed(parked, 9).backoffStreak)
+  }
+
+  @Test
+  fun `a wait is cleared only after a failure with no response, or of unknown cause, 30 s or more ago`() {
+    val now = 100_000L
+    val wait = entry(state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000)
+    fun clears(cause: String?, failedAt: Long?) =
+      EntryTransitions.clearsWait(wait.copy(waitCause = cause, failedAt = failedAt), now)
+    assertTrue(clears(WaitCause.NO_RESPONSE, now - 30_000))
+    assertFalse(clears(WaitCause.NO_RESPONSE, now - 29_999))
+    assertFalse(clears(WaitCause.RESPONSE, now - 3_600_000))
+    // An older version saved it: the cause is unknown, and its time is updatedAt.
+    assertTrue(clears(null, null))
+    assertFalse(EntryTransitions.clearsWait(wait.copy(updatedAt = now - 1_000), now))
+    assertFalse(EntryTransitions.clearsWait(entry(state = EntryState.QUEUED), now))
+    assertFalse(EntryTransitions.clearsWait(wait.copy(state = EntryState.RUNNING, failedAt = 0), now))
+  }
+
+  @Test
+  fun `a failure saves its cause and time, and the part that holds the highest streak`() {
+    val chunked = entry(state = EntryState.RUNNING)
+    val first = EntryTransitions.toBackingOff(chunked, 9_000, 6, now = 5, cause = WaitCause.RESPONSE, partStart = 0)
+    assertEquals(WaitCause.RESPONSE, first.waitCause)
+    assertEquals(5L, first.failedAt)
+    assertEquals(0L, first.backoffPartStart)
+    // A sibling's lower streak keeps the part that holds 6.
+    val sibling = EntryTransitions.toBackingOff(first, 9_500, 1, now = 6, cause = WaitCause.NO_RESPONSE, partStart = 10)
+    assertEquals(6, sibling.backoffStreak)
+    assertEquals(0L, sibling.backoffPartStart)
+    assertEquals(WaitCause.NO_RESPONSE, sibling.waitCause)
+    val released = EntryTransitions.toReleased(sibling, 40_000, 2, now = 7, cause = WaitCause.RESPONSE, partStart = 10)
+    assertEquals(6, released.backoffStreak)
+    assertEquals(0L, released.backoffPartStart)
+    // A simple entry's release sets the streak it is given, as before.
+    assertEquals(2, EntryTransitions.toReleased(chunked.copy(backoffStreak = 6), 40_000, 2, now = 7).backoffStreak)
   }
 
   @Test

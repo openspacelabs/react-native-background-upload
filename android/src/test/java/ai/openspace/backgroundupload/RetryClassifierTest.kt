@@ -182,4 +182,26 @@ class RetryClassifierTest {
     assertEquals(rules, RetryClassifier.policy(defaults, RetryOverride(null, null, null, null, transient = rules)).transient)
     assertEquals(emptyList<UploadOutcome.TransientRule>(), RetryClassifier.policy(RetryDefaults(transient = rules), RetryOverride(null, null, null, null, transient = emptyList())).transient)
   }
+
+  @Test
+  fun `only a failure before the connection is made or secured proves the request never reached the server`() {
+    assertTrue(RetryClassifier.reachedNoServer(java.net.ConnectException("Failed to connect to example.com")))
+    assertTrue(RetryClassifier.reachedNoServer(java.net.UnknownHostException("example.com")))
+    assertTrue(RetryClassifier.reachedNoServer(java.net.NoRouteToHostException()))
+    assertTrue(RetryClassifier.reachedNoServer(java.net.PortUnreachableException()))
+    assertTrue(RetryClassifier.reachedNoServer(javax.net.ssl.SSLHandshakeException("handshake")))
+    assertTrue(RetryClassifier.reachedNoServer(javax.net.ssl.SSLPeerUnverifiedException("hostname")))
+    // A connect timeout and a read or write timeout throw the same class.
+    assertFalse(RetryClassifier.reachedNoServer(java.net.SocketTimeoutException("timeout")))
+    assertFalse(RetryClassifier.reachedNoServer(IOException("unexpected end of stream")))
+    assertFalse(RetryClassifier.reachedNoServer(java.net.SocketException("Connection reset")))
+    assertFalse(RetryClassifier.reachedNoServer(javax.net.ssl.SSLException("Read error")))
+  }
+
+  @Test
+  fun `only a connect failure caps the policy at 15 minutes`() {
+    val policy = RetryClassifier.Policy(1_000, 7_200_000, 0.0, listOf(404))
+    assertEquals(RetryClassifier.TRANSPORT_FAILURE_MAX_MS, RetryClassifier.transportFailurePolicy(policy).maxMs)
+    assertEquals(60_000L, RetryClassifier.transportFailurePolicy(policy.copy(maxMs = 60_000)).maxMs)
+  }
 }

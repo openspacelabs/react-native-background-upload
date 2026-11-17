@@ -28,7 +28,14 @@ internal class EntryRun(
   class ParkException(val headerGeneration: Int) : Exception("awaiting auth")
 
   /** A backoff too long to wait here. */
-  class BackoffException(val nextAttemptAt: Long, val streak: Int) : Exception("released for backoff")
+  class BackoffException(
+    val nextAttemptAt: Long,
+    val streak: Int,
+    /** [WaitCause] of the failure. */
+    val waitCause: String,
+    /** The chunked part whose failure it was; null for a simple entry. */
+    val partStart: Long?,
+  ) : Exception("released for backoff")
 
   class ExpiredException : Exception("expired before completion")
 
@@ -61,6 +68,8 @@ internal class EntryRun(
     val url: String,
     val policy: RetryClassifier.Policy,
     val result: AttemptResult,
+    /** [WaitCause]: whether the server answered. */
+    val cause: String,
   ) {
     val method: String get() = entry.descriptor!!.method
   }
@@ -132,7 +141,7 @@ internal class EntryRun(
         if (ops.park(entryId, generation, park.headerGeneration) != WorkerOps.ParkResult.REISSUE) return
       } catch (backoff: BackoffException) {
         endProgress(completed = false)
-        ops.release(entryId, generation, backoff.nextAttemptAt, backoff.streak)
+        ops.release(entryId, generation, backoff.nextAttemptAt, backoff.streak, cause = backoff.waitCause, partStart = backoff.partStart)
         return
       } catch (error: ExpiredException) {
         endProgress(completed = false)
@@ -244,7 +253,11 @@ internal class EntryRun(
       val streak = e!!.backoffStreak + 1
       val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
-      ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak, wake)
+      // A cut request has no response. Which part it cut is not known.
+      ops.release(
+        entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak, wake,
+        cause = WaitCause.NO_RESPONSE, partStart = null,
+      )
     }.onFailure {
       if (it is WorkerOps.WakeNotScheduledException) {
         Diag.error("released '$entryId' after a timeout stop, but could not schedule its wake", it.cause)
@@ -359,9 +372,11 @@ internal class EntryRun(
       val result = if (verdict is RetryClassifier.Verdict.Terminal) {
         AttemptResult.Terminal(verdict.errorKind, verdict.message, null)
       } else AttemptResult.Transient
-      // The attempt started on a validated network (waitForNetwork), so a
-      // transport failure waits at most 15 minutes.
-      return Attempt(entry, url, RetryClassifier.transportFailurePolicy(policy), result)
+      // The attempt started on a validated network (waitForNetwork). A
+      // failure that proves the request never reached the server waits at
+      // most 15 minutes; any other keeps the entry's maximum.
+      val waitPolicy = if (RetryClassifier.reachedNoServer(error)) RetryClassifier.transportFailurePolicy(policy) else policy
+      return Attempt(entry, url, waitPolicy, result, WaitCause.NO_RESPONSE)
     }
 
     // A part counts on its own, so each part gets a rule's full maxRetries.
@@ -388,23 +403,29 @@ internal class EntryRun(
       is RetryClassifier.Verdict.Transient -> AttemptResult.Transient
       is RetryClassifier.Verdict.Terminal -> AttemptResult.Terminal("http", verdict.message, response)
     }
-    return Attempt(entry, url, policy, result)
+    return Attempt(entry, url, policy, result, WaitCause.RESPONSE)
   }
 
   /**
    * A short backoff waits here, with the row still running and showing
    * nextAttemptAt; a long one throws [BackoffException] to release the run.
    */
-  suspend fun backoffOrRelease(policy: RetryClassifier.Policy, streak: Int, expiresAt: Long) {
+  suspend fun backoffOrRelease(
+    policy: RetryClassifier.Policy,
+    streak: Int,
+    expiresAt: Long,
+    cause: String,
+    partStart: Long? = null,
+  ) {
     val backoff = RetryClassifier.backoffMs(policy, streak)
     val now = host.now()
     if (backoff <= RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
       val wait = min(backoff, max(0L, expiresAt - now))
-      ops.backingOff(entryId, generation, now + wait, streak)
+      ops.backingOff(entryId, generation, now + wait, streak, cause, partStart)
       host.sleep(wait)
       return
     }
-    throw BackoffException(RetryClassifier.nextAttemptAt(now, backoff, expiresAt), streak)
+    throw BackoffException(RetryClassifier.nextAttemptAt(now, backoff, expiresAt), streak, cause, partStart)
   }
 
   fun progressStarted(total: Long, sent: Long) {

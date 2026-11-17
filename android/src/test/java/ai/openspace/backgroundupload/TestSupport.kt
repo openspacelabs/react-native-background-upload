@@ -210,9 +210,21 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   fun startableNow(): List<Row> =
     rows.filter { it.state == WorkInfo.State.ENQUEUED && nextScheduleAt(it) <= now }
 
-  override fun unfinished(name: String): List<WorkRow> = open(name).map(::view)
+  override fun unfinished(name: String): List<WorkRow> {
+    nameQueries++
+    return open(name).map(::view)
+  }
 
-  override fun library(): List<WorkRow> = rows.filter { !it.state.isFinished }.map(::view)
+  /** How many library() queries were made, and the states each asked for. */
+  val libraryQueries = mutableListOf<List<WorkInfo.State>>()
+
+  /** How many unfinished(name) queries were made. */
+  var nameQueries = 0
+
+  override fun library(states: List<WorkInfo.State>): List<WorkRow> {
+    libraryQueries += states
+    return rows.filter { it.state in states }.map(::view)
+  }
 
   override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
     val open = open(name)

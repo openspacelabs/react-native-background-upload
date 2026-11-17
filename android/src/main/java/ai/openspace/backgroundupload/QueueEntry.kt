@@ -88,6 +88,15 @@ data class StagedBody(
   }
 }
 
+/** The values of [QueueEntry.waitCause]. Strings, because they are persisted. */
+object WaitCause {
+  /** The server answered (a 5xx, 408, 429, or a status a rule retries). */
+  const val RESPONSE = "response"
+
+  /** No response: a transport failure, or a stop that cut the request. */
+  const val NO_RESPONSE = "no-response"
+}
+
 /** One queue entry. [QueueStore] persists it as `entry.json` with Gson. */
 data class QueueEntry(
   val id: String,
@@ -129,6 +138,20 @@ data class QueueEntry(
    * name `transientHits`; Gson skips that unknown name, so it reads as no hits.
    */
   val transientHitsByRule: Map<String, Int>? = null,
+  /**
+   * What made the last failure wait for [nextAttemptAt]: [WaitCause.RESPONSE]
+   * (the server answered) or [WaitCause.NO_RESPONSE]. Null when an older
+   * version saved the entry: unknown.
+   */
+  val waitCause: String? = null,
+  /** When that failure happened. Null when an older version saved the entry. */
+  val failedAt: Long? = null,
+  /**
+   * A chunked entry: the start of the part whose failures set
+   * [backoffStreak]. Null when unknown (an older version, or a stop that cut
+   * the run); then every part uses the streak until a part is accepted.
+   */
+  val backoffPartStart: Long? = null,
 ) {
   val isLive get() = state.isLive
   val isSettled get() = !state.isLive
