@@ -175,6 +175,31 @@ class MainChainTest {
   }
 
   @Test
+  fun `a row due in 20 s is kept`() {
+    store.save(entry(state = EntryState.QUEUED))
+    val soon = work.add("e1", runAttemptCount = 1, lastEnqueueTime = work.now - 10_000)
+    controller.resume()
+    assertEquals(listOf(soon), work.rows)
+  }
+
+  @Test
+  fun `the main-chain step for each set of rows`() {
+    val now = work.now
+    fun row(state: androidx.work.WorkInfo.State, next: Long = Long.MAX_VALUE) = WorkRow("e1", state, 1, next, false)
+    val due = row(ENQUEUED, now)
+    val held = row(ENQUEUED, now + 60 * minute)
+    assertEquals(MainChainStep.APPEND, mainChainStep(emptyList(), now))
+    assertEquals(MainChainStep.APPEND, mainChainStep(listOf(row(RUNNING)), now))
+    assertEquals(MainChainStep.NONE, mainChainStep(listOf(row(RUNNING), row(BLOCKED)), now))
+    // A held-back row is not "the row after the run in progress".
+    assertEquals(MainChainStep.APPEND, mainChainStep(listOf(row(RUNNING), held), now))
+    assertEquals(MainChainStep.NONE, mainChainStep(listOf(due), now))
+    assertEquals(MainChainStep.REPLACE, mainChainStep(listOf(held), now))
+    assertEquals(MainChainStep.REPLACE, mainChainStep(listOf(held, row(BLOCKED)), now))
+    assertEquals(MainChainStep.APPEND, mainChainStep(listOf(row(CANCELLED)), now))
+  }
+
+  @Test
   fun `a running row is never replaced`() {
     store.save(entry(state = EntryState.QUEUED))
     val row = work.add("e1", state = RUNNING, runAttemptCount = 3)
