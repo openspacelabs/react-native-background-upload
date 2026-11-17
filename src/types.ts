@@ -170,10 +170,14 @@ export type OutcomeError = {
 };
 
 /**
- * Handler context. `at` is the native outcome time. `requestId` is the last
- * attempt's X-Request-Id. A handler that keeps throwing sees `deliveries`
- * grow. The library never gives up on its own, so the app decides a poison
- * policy from this number.
+ * Handler context. `at` is the native outcome time. `requestId` is an
+ * X-Request-Id. On iOS, and for a simple request on Android, it is the one
+ * of the attempt whose result settled the entry. An outcome that no attempt
+ * settled (a cancel, an expiry) has the last attempt's. For a chunked
+ * request on Android it is the last part attempt that started, which can be
+ * another part than the one whose response settled the entry. A handler
+ * that keeps throwing sees `deliveries` grow. The library never gives up on
+ * its own, so the app decides a poison policy from this number.
  */
 export type Meta = {
   id: string;

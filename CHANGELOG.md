@@ -2,22 +2,35 @@
 
 Behavior change (iOS): a late 2xx now completes an entry that earlier
 versions left running and sent again. After a relaunch, iOS waits 10 s for
-the result of an upload that finished while the app was not running. When
-no result came in that time, earlier versions sent the request again as a
-new attempt and dropped the first attempt's result if it arrived later. So
-a first attempt that the server accepted was always followed by a second
-send. Now the library keeps the first attempt's task key, marked as
-replaced. When that result arrives later and is accepted (a 2xx, or a
-status the definition's `accept` rules allow), the entry completes with the first attempt's response and the second attempt's
-task is cancelled. If the second task had not started yet, nothing is sent
-twice. If it already sent its request, the server still gets two requests,
-as before. A late failure or cancel of the first attempt is ignored, and
-the second attempt goes on. A first attempt's result that arrives after
-the entry already settled is ignored, so the app gets one outcome. The
-kept keys are removed when the entry settles. The `attempt` event of the
-late result names the first attempt and its `X-Request-Id`; the settled
-outcome's `attempts` and `requestId` still name the last attempt. Android
-and chunked parts are unchanged.
+the result of an upload that finished while the app was not running. When no
+result came in that time, earlier versions sent the request again as a new
+attempt and dropped the first attempt's result if it arrived later. So a
+first attempt that the server accepted was always followed by a second send.
+
+Now the library keeps the first attempt's task key, marked as a late-result
+key. When that result arrives later and is accepted (a 2xx, or a status the
+definition's `accept` rules allow), the entry completes with the first
+attempt's response, and the second attempt's task is cancelled. If the
+second task had not started yet, nothing is sent twice. If it already sent
+its request, the server still gets two requests, as before. A late failure
+or cancel of the first attempt is ignored, and the second attempt goes on. A
+first attempt's result that arrives after the entry settled is ignored, so
+the app gets one outcome.
+
+Every late-result key of a request is removed when the request settles, when
+its row is forgotten (the ack of a `completed` or `cancelled` outcome, or
+`cancel()` on a settled row), and when a same-id `mutate()` replaces its
+body. Keys of tasks that still owe a cancel callback stay until that
+callback, as before.
+
+On iOS, a simple request's outcome now carries the `requestId` of the
+attempt whose result settled it, so its response and `requestId` belong to
+the same request. Before, it carried the last attempt's `requestId`, which
+after a late result could be a task that was cancelled before it began.
+`attempts` still counts every attempt. iOS chunked requests already did
+this. On Android a simple request's last attempt is always the one that
+settled it; a chunked request's `requestId` is the last part attempt that
+started. Android and iOS chunked parts are otherwise unchanged.
 
 ## 11.3.0
 

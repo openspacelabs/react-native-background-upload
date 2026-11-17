@@ -284,9 +284,11 @@ completion may still be in flight from the daemon, the library waits up to
 10 s for it before it sends again. This is what stops a request that finished
 while the app was dead from being sent twice. On iOS, when that result comes
 after the wait, it still counts: an accepted result completes the entry with
-the first attempt's response and cancels the new attempt's task. A failure
-that comes late is ignored, and the new attempt goes on. If the new task
-already sent its request, the server gets the request twice.
+the first attempt's response and cancels the new attempt's task. The
+outcome's response and `requestId` then both belong to the first attempt;
+`attempts` counts every attempt. A failure that comes late is ignored, and
+the new attempt goes on. If the new task already sent its request, the server
+gets the request twice.
 
 # Reliable delivery
 
@@ -371,8 +373,11 @@ its place in the list:
 - A same-id `mutate()` that reopens a settled entry starts every count at 0.
   A same-id `mutate()` on a live entry keeps the counts.
 
-Every attempt sends an `X-Request-Id` header, minted per attempt. `Meta.requestId`
-carries the last one.
+Every attempt sends an `X-Request-Id` header, minted per attempt.
+`Meta.requestId` carries the one of the attempt whose result settled the
+entry, or the last attempt's when no attempt settled it (a cancel, an
+expiry). For a chunked request on Android it is the last part attempt that
+started.
 
 # API
 
