@@ -1348,9 +1348,9 @@ describe('late definitions with onWarning and the row cache', () => {
   });
 
   it('forgets held outcomes and drops a settled row on cancel()', async () => {
-    const fake = createFakeNative();
+    const fake = createFakeNative({ ackTimeoutMs: 100 });
     const id = await queuedEarlier(fake, 'late');
-    void fake.settle(id, { kind: 'completed' });
+    const acked = fake.settle(id, { kind: 'completed' });
     const client = createUploadClient({ native: fake });
     const subscription = client.addRequestsListener(() => {});
     client.configure({});
@@ -1363,6 +1363,9 @@ describe('late definitions with onWarning and the row cache', () => {
     expect(client.getCachedRequests({ id, includeCancelled: true })).toEqual(
       [],
     );
+    // The cancel dropped the outcome, so no ack ever comes.
+    await expect(acked).rejects.toThrow(/was not acknowledged/);
+    expect(fake.ackedEventIds).toEqual([]);
     subscription.remove();
   });
 });
