@@ -393,6 +393,21 @@ class WorkerOpsTest {
     assertEquals(0, e.backoffStreak)
   }
 
+  @Test
+  fun `an accepted part resets the stored streak only when that part set it`() {
+    store.save(entry(
+      state = EntryState.RUNNING,
+      descriptor = desc(url = null, file = "/f", parts = listOf(part(0, 10), part(10, 25))),
+      body = StagedBody(StagedBody.CHUNKED, "blob", null, 25),
+    ).copy(backoffStreak = 9, backoffPartStart = 10))
+    ops.markAccepted("e1", 1, 0)
+    assertEquals(9, store.load("e1")!!.backoffStreak)
+    assertEquals(10L, store.load("e1")!!.backoffPartStart)
+    ops.markAccepted("e1", 1, 1)
+    assertEquals(0, store.load("e1")!!.backoffStreak)
+    assertEquals(null, store.load("e1")!!.backoffPartStart)
+  }
+
   // MARK: - header generation of an attempt
 
   @Test

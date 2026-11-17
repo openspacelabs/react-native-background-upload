@@ -1309,6 +1309,15 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `retryNow writes no entry file whose wait stays`() {
+    store.save(waitAfter("r", WaitCause.RESPONSE, age = 3_600_000))
+    store.save(waitAfter("y", WaitCause.NO_RESPONSE, age = 1_000))
+    val files = listOf("r", "y").map { File(store.entryDir(it), QueueStore.ENTRY_FILE).apply { setLastModified(1_000) } }
+    controller.retryNow()
+    assertEquals(listOf(1_000L, 1_000L), files.map { it.lastModified() })
+  }
+
+  @Test
   fun `a transport-failure wait 30 s or older is cleared by each trigger`() {
     eachTrigger({ store.save(waitAfter("e1", WaitCause.NO_RESPONSE, age = 30_000)) }) { trigger ->
       assertNull(trigger, store.load("e1")!!.nextAttemptAt)
