@@ -2,9 +2,9 @@ package ai.openspace.backgroundupload
 
 import android.app.NotificationManager
 import android.content.Context
+import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
-import androidx.work.WorkInfo
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -77,8 +77,11 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
 
     override suspend fun sleep(ms: Long) = delay(ms)
 
+    override suspend fun <T> withSlot(highPriority: Boolean, block: suspend () -> T): T =
+      transferGate.withPermit(highPriority, block)
+
     override suspend fun send(request: TransferRequest, onProgress: (Long) -> Unit): UploadResponse =
-      transferGate.withPermit(request.highPriority) { okhttpSend(uploadHttpClient, request, onProgress) }
+      okhttpSend(uploadHttpClient, request, onProgress)
 
     override fun connectivity(wifiOnly: Boolean): Connectivity {
       connectivity = validateConnectivity(context, wifiOnly)
@@ -110,7 +113,10 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
 
     override fun attempt(event: AttemptEvent) = EventReporter.attempt(event)
 
-    override fun stoppedByTimeout() = stopReason == WorkInfo.STOP_REASON_TIMEOUT
+    // getStopReason() needs API 31. Below that the reason is unknown, and
+    // every stop takes the plain path: back to queued, no backoff step.
+    override fun stopKind() =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) StopKind.of(stopReason) else StopKind.OTHER
   }
 
   // MARK: - notification

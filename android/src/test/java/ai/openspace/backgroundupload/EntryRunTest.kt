@@ -1,7 +1,14 @@
 package ai.openspace.backgroundupload
 
+import androidx.work.WorkInfo
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -23,7 +30,10 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
   var handler: suspend (TransferRequest, (Long) -> Unit) -> UploadResponse = { _, _ -> UploadResponse(200, "ok", mapOf()) }
   var onSleep: () -> Unit = {}
   var network = ArrayDeque<Connectivity>()
-  var timeout = false
+  /** What stopKind() answers after a cancel. */
+  var stop = StopKind.OTHER
+  /** Runs while a request waits for a transmit slot, before it holds one. */
+  var beforeSlot: suspend () -> Unit = {}
   var foregroundError: Throwable? = null
   /** The wifiOnly value of every connectivity check, in order. */
   val wifiChecks = mutableListOf<Boolean>()
@@ -34,6 +44,13 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
     sleeps += ms
     clock += ms
     onSleep()
+    // A real delay throws here when the run's job was cancelled.
+    currentCoroutineContext().ensureActive()
+  }
+
+  override suspend fun <T> withSlot(highPriority: Boolean, block: suspend () -> T): T {
+    beforeSlot()
+    return block()
   }
 
   override suspend fun send(request: TransferRequest, onProgress: (Long) -> Unit): UploadResponse {
@@ -66,7 +83,7 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
     attempts += event
   }
 
-  override fun stoppedByTimeout() = timeout
+  override fun stopKind() = stop
 }
 
 class EntryRunTest {
@@ -93,6 +110,12 @@ class EntryRunTest {
     controller = QueueController(store, journal, settings, events, scheduler, { false }, { host.clock })
     controller.configureRetry(RetryDefaults(baseMs = 1_000, jitter = 0.0))
     journal.drain(Any())
+    Diag.log = null
+  }
+
+  @After
+  fun tearDown() {
+    Diag.log = null
   }
 
   private fun run(id: String = "e1") = runBlocking { EntryRun(id, store, ops, host).run() }
@@ -370,15 +393,129 @@ class EntryRunTest {
   @Test
   fun `a timeout stop takes one more backoff step instead of restarting at once`() {
     controller.enqueue(parsed())
+    // Streak 7 waits 64 s, longer than a worker waits in place, so it needs a wake.
+    store.save(store.load("e1")!!.copy(backoffStreak = 6))
+    host.stop = StopKind.TIME_LIMIT
+    host.handler = { _, _ -> throw CancellationException("timeout") } // the stop cuts the request
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(7, e.backoffStreak)
+    assertEquals(1, e.attempts)
+    assertEquals(host.clock + 64_000, e.nextAttemptAt) // base 1 s * 2^(7-1)
+    assertEquals(listOf("e1" to host.clock + 64_000), scheduler.wakes)
+  }
+
+  @Test
+  fun `a foreground-service timeout that cut a request takes one backoff step`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 6))
+    host.stop = StopKind.of(WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT)
+    host.handler = { _, _ -> throw CancellationException("fgs timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(7, e.backoffStreak)
+    assertEquals(listOf("e1" to host.clock + 64_000), scheduler.wakes)
+  }
+
+  @Test
+  fun `a timeout stop while it waits for the network is not a failed attempt`() {
+    controller.enqueue(parsed())
+    host.stop = StopKind.TIME_LIMIT
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+    host.onSleep = { throw CancellationException("timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(0, e.backoffStreak)
+    assertNull(e.nextAttemptAt)
+    assertEquals(0, e.attempts)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<TransferRequest>(), host.requests)
+  }
+
+  @Test
+  fun `a timeout stop while it waits for a transmit slot counts no attempt`() {
+    controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(backoffStreak = 2))
-    host.timeout = true
+    host.stop = StopKind.TIME_LIMIT
+    host.beforeSlot = { throw CancellationException("timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(0, e.attempts)
+    assertNull(e.lastRequestId)
+    assertEquals(2, e.backoffStreak)
+    assertNull(e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<AttemptEvent>(), host.attempts)
+  }
+
+  @Test
+  fun `the attempt is written ahead inside the slot`() {
+    controller.enqueue(parsed())
+    var attemptsWhileWaiting = -1
+    host.beforeSlot = { attemptsWhileWaiting = store.load("e1")!!.attempts }
+    respond(200)
+    run()
+    assertEquals(0, attemptsWhileWaiting)
+    assertEquals(1, store.load("e1")!!.attempts)
+  }
+
+  @Test
+  fun `a timeout stop with a short backoff schedules no wake, and the re-run sleeps it out`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 2))
+    host.stop = StopKind.TIME_LIMIT
     host.handler = { _, _ -> throw CancellationException("timeout") }
     assertThrows(CancellationException::class.java) { run() }
     val e = store.load("e1")!!
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(3, e.backoffStreak)
-    assertEquals(host.clock + 4_000, e.nextAttemptAt) // base 1 s * 2^(3-1)
-    assertEquals(listOf("e1" to host.clock + 4_000), scheduler.wakes)
+    assertEquals(host.clock + 4_000, e.nextAttemptAt) // base 1 s * 2^(3-1), at most 30 s
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+
+    // WorkManager runs the stopped row again. That run waits out the 4 s.
+    respond(200)
+    run()
+    assertEquals(listOf(4_000L), host.sleeps)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `a quota stop goes back to queued with no backoff step and one persisted warning`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 2))
+    host.stop = StopKind.QUOTA
+    host.handler = { _, _ -> throw CancellationException("quota") } // even when it cut a request
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(2, e.backoffStreak)
+    assertNull(e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    val warning = DiagnosticLog(file).drain().single()
+    assertEquals(DiagnosticLog.WARN, warning.level)
+    assertTrue(warning.message, warning.message.contains("QUOTA"))
+  }
+
+  @Test
+  fun `a network-constraint stop is never a failure and writes no warning`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    controller.enqueue(parsed())
+    host.stop = StopKind.NETWORK
+    host.handler = { _, _ -> throw CancellationException("network lost") }
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(0, e.backoffStreak)
+    assertNull(e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<DiagnosticLog.Record>(), DiagnosticLog(file).drain())
   }
 
   @Test
@@ -714,6 +851,36 @@ class EntryRunTest {
     host.clock += 120_000
     run()
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `a part cut by a sibling's park does not make a later idle stop a failure`() {
+    chunked()
+    lateinit var job: Job
+    host.stop = StopKind.TIME_LIMIT
+    host.handler = { r, _ ->
+      if (r.url.endsWith("start=0")) {
+        try {
+          awaitCancellation() // in flight when part 1 parks the entry
+        } finally {
+          // New headers land before the park, so the run goes on for a second pass.
+          controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+          // In that pass the network is gone and the system stops the run at its time limit.
+          host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+          host.onSleep = { job.cancel(CancellationException("timeout")) }
+        }
+      } else UploadResponse(401, "", mapOf())
+    }
+    runBlocking {
+      job = launch { EntryRun("e1", store, ops, host).run() }
+      job.join()
+    }
+    assertEquals(listOf(EntryRun.CONNECTIVITY_POLL_MS), host.sleeps) // the second pass waited for the network
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(0, e.backoffStreak)
+    assertNull(e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
   }
 
   @Test

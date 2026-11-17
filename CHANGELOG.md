@@ -1,3 +1,24 @@
+## Unreleased
+
+Android: a system stop now counts as a failed attempt only when it cut a
+request. Before, every stop at the job's time limit added one backoff step,
+up to 2 hours, also for a run that only waited for the network or for a free
+transmit slot and sent nothing. Now a run that only waited goes back to
+`queued` with no backoff step. A time-limit stop that cut a request still
+takes one backoff step. The foreground-service time limit (Android 15 and
+later) now counts as a time-limit stop. Stops for quota, standby bucket,
+background restriction, device state and the user write one warning to
+`takeDiagnostics()` that names the reason. Android 10 and 11 (API 29 and 30)
+cannot read stop reasons, so every stop there goes back to `queued` with no
+backoff step, as before.
+
+**Behavior change:** the attempt is now written ahead after the request
+gets a transmit slot, not before. A run that waits for a slot and is stopped
+counts no attempt. So `attempts` and the attempt events are lower for
+uploads that only waited. That is the correct count. A time-limit stop with
+a backoff of 30 s or less no longer schedules a wake: WorkManager runs the
+stopped row again, and that run waits out the rest.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

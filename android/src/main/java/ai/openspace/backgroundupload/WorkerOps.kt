@@ -316,8 +316,12 @@ class WorkerOps(
     return result
   }
 
-  /** A backoff longer than a worker waits: back to queued, woken at [nextAttemptAt]. */
-  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int): Boolean {
+  /**
+   * A backoff longer than a worker waits: back to queued, woken at
+   * [nextAttemptAt]. [wake] false schedules no wake: the caller knows a run
+   * of the row comes back soon and waits out the rest itself.
+   */
+  fun release(id: String, generation: Int, nextAttemptAt: Long, streak: Int, wake: Boolean = true): Boolean {
     val now = clock()
     var applied = false
     val next = store.compute(id) { e ->
@@ -328,7 +332,7 @@ class WorkerOps(
     }
     if (!applied || next == null) return false
     events.state(next.toRow())
-    scheduler.scheduleWake(next, nextAttemptAt, replace = true)
+    if (wake) scheduler.scheduleWake(next, nextAttemptAt, replace = true)
     return true
   }
 

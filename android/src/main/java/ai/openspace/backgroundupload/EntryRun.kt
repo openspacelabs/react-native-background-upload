@@ -79,6 +79,10 @@ internal class EntryRun(
   var liveBytes = 0L
     private set
 
+  /** A cancel reached a request after its write-ahead. Chunked parts set it from their own coroutines. */
+  @Volatile
+  private var stopCutRequest = false
+
   /**
    * Returns when the run is over. Throws a CancellationException after it
    * handled a stop, or an IOException after a store write failed (the
@@ -105,6 +109,8 @@ internal class EntryRun(
     var first = true
     while (true) {
       try {
+        // A part cancelled by a sibling's park in the last pass does not count.
+        stopCutRequest = false
         if (!first) current = ops.latest(entryId, generation)
         first = false
         host.foreground(current)
@@ -134,7 +140,7 @@ internal class EntryRun(
         // A system stop moves a running entry back to queued. A pause or a
         // cancel already moved it; then this does nothing.
         endProgress(completed = false)
-        if (host.stoppedByTimeout()) releaseAfterTimeout() else ops.stopped(entryId, generation)
+        afterStop(host.stopKind())
         throw error
       } catch (error: IOException) {
         // A store write failed (disk full, directory briefly unwritable).
@@ -183,11 +189,28 @@ internal class EntryRun(
   )
 
   /**
-   * The system stopped the run at its time limit. That happens to a
-   * headless run whose foreground start was denied (API 31+), after about
-   * 10 minutes. Starting again at once would send the body from byte 0 on
-   * every run, so this is one more transient failure: the next backoff
-   * step, then a wake.
+   * A system stop. Only a time-limit stop that cut a request is a failed
+   * attempt. A run that only waited (for the network, a slot, or a short
+   * backoff) sent nothing, so it goes back to queued with no backoff step.
+   * No other stop reason says anything about the server. The run ends here,
+   * so a [StopKind.logged] kind writes at most one warning per run.
+   */
+  private fun afterStop(kind: StopKind) {
+    if (kind.logged) Diag.warn("run of '$entryId' stopped by the system: $kind")
+    if (kind == StopKind.TIME_LIMIT && stopCutRequest) releaseAfterTimeout() else ops.stopped(entryId, generation)
+  }
+
+  /**
+   * The system stopped the run at its time limit while a request was on its
+   * way. That happens to a run with no foreground mode after about 10
+   * minutes, or to a foreground run whose service type used up its time.
+   * Starting again at once would send the body from byte 0 on every run, so
+   * this is one more transient failure: the next backoff step.
+   *
+   * WorkManager runs a stopped row again by itself. A wait short enough for
+   * [waitUntilDue] gets no wake: that re-run sleeps it out. A wake as well
+   * would start a second run that waits on the per-id gate for the whole
+   * upload.
    */
   private fun releaseAfterTimeout() {
     runCatching {
@@ -196,7 +219,8 @@ internal class EntryRun(
       val streak = e!!.backoffStreak + 1
       val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
-      ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak)
+      val at = RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt)
+      ops.release(entryId, generation, at, streak, wake = at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS)
     }.onFailure { Diag.error("could not release '$entryId' after a timeout stop", it) }
   }
 
@@ -239,11 +263,15 @@ internal class EntryRun(
     RetryClassifier.policy(ops.settings().retry, entry.descriptor?.retry)
 
   /**
-   * One HTTP attempt, the step both transfers share: write the attempt
-   * ahead (attempts + 1, its X-Request-Id), send, emit the attempt event,
-   * and classify. [partIndex] is null for a simple entry. [body] builds the
-   * request body from the entry the attempt runs under. [fileExists] tells a
-   * missing payload from a network failure.
+   * One HTTP attempt, the step both transfers share: take a transmit slot,
+   * write the attempt ahead (attempts + 1, its X-Request-Id), send, emit the
+   * attempt event, and classify. [partIndex] is null for a simple entry.
+   * [body] builds the request body from the entry the attempt runs under.
+   * [fileExists] tells a missing payload from a network failure.
+   *
+   * The write-ahead happens inside the slot. A run that only waits for a
+   * slot sends nothing, so it counts no attempt, and the request takes the
+   * headers that are current when it starts to send.
    */
   suspend fun attempt(
     partIndex: Int?,
@@ -252,7 +280,32 @@ internal class EntryRun(
     fileExists: () -> Boolean,
   ): Attempt {
     val requestId = UUID.randomUUID().toString()
-    val entry = ops.recordAttempt(entryId, generation, requestId)
+    val highPriority = ops.latest(entryId, generation).descriptor!!.highPriority
+    var written: QueueEntry? = null
+    var failure: Throwable? = null
+    val response = try {
+      host.withSlot(highPriority) {
+        val e = ops.recordAttempt(entryId, generation, requestId)
+        written = e
+        val d = e.descriptor!!
+        val part = partIndex?.let { d.parts!![it] }
+        host.send(
+          TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part), d.highPriority),
+          onProgress,
+        )
+      }
+    } catch (error: CancellationException) {
+      // A stop after the write-ahead cut a request that was on its way.
+      if (written != null) stopCutRequest = true
+      throw error
+    } catch (error: Throwable) {
+      // With no write-ahead, the store write failed: not a network attempt.
+      if (written == null) throw error
+      failure = error
+      null
+    }
+
+    val entry = written!!
     // The generation of the headers this attempt sends: both come from the same entry.
     val headerGeneration = entry.headerGeneration
     val d = entry.descriptor!!
@@ -260,11 +313,8 @@ internal class EntryRun(
     val url = part?.url ?: d.url!!
     val policy = policy(entry)
 
-    val response = try {
-      host.send(TransferRequest(url, d.method, headersFor(d, part, requestId), body(d, part), d.highPriority), onProgress)
-    } catch (error: CancellationException) {
-      throw error
-    } catch (error: Throwable) {
+    if (response == null) {
+      val error = failure!!
       // A failed probe reads as present, so a flaky check is a retryable
       // network error and not a terminal "file gone".
       val verdict = RetryClassifier.classifyFailure(error, runCatching(fileExists).getOrDefault(true))
