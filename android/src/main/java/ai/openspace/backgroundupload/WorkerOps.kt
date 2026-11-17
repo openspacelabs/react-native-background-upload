@@ -330,8 +330,27 @@ class WorkerOps(
     }
     if (!applied || next == null) return false
     events.state(next.toRow())
-    scheduler.scheduleWake(next, nextAttemptAt, replace = true)
+    try {
+      scheduler.scheduleWake(next, nextAttemptAt, replace = true)
+    } catch (error: Exception) {
+      throw WakeNotScheduledException(id, error)
+    }
     return true
+  }
+
+  /** The release was saved, but its wake was not scheduled. A later run makes it again ([ensureWake]). */
+  class WakeNotScheduledException(id: String, cause: Throwable) :
+    Exception("released '$id', but could not schedule its wake", cause)
+
+  /**
+   * A run found [entry] queued with a wait too long to sleep out. Makes its
+   * wake at [at] if none is pending, and keeps one that is (KEEP). A wake
+   * goes missing when its enqueue threw, or the process died between the
+   * entry save and WorkManager's commit. Never throws.
+   */
+  fun ensureWake(entry: QueueEntry, at: Long) {
+    runCatching { scheduler.scheduleWake(entry, at, replace = false) }
+      .onFailure { Diag.error("could not schedule a wake for '${entry.id}'", it) }
   }
 
   /**

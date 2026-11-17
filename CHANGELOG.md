@@ -11,10 +11,21 @@ later) now counts as a time-limit stop.
 After every time-limit stop, the library schedules a fresh WorkManager row
 for the entry: at once after a run that only waited, or when its backoff
 ends, also for a short backoff. WorkManager runs the stopped row again too,
-but only after its own backoff, which grows with each start of that row and
-reaches hours after a few stops. A fresh row does not have that wait. Stops
-for other reasons go back to `queued`, and the system decides when the row
-runs again, as before.
+but only after its own backoff, which doubles with each start of that row.
+By the WorkManager 2.12.0 code that wait is 64 minutes at the 8th start and
+128 minutes at the 9th, so it passes an hour after about 9 starts. A fresh
+row does not have that wait. Stops for other reasons go back to `queued`
+with no new row, as before: the stopped row runs again when the system
+allows it and after WorkManager's own backoff.
+
+A run that finds its entry waiting longer than it can sleep out now makes
+sure the entry's wake row exists, and keeps one that does. Before, a wake
+lost to a failed enqueue or a process death left the entry waiting for the
+next boot sweep, `resume()` or `mutate()` of the same id.
+
+A chunked run no longer settles `completed` while a part is not accepted.
+If a part ends without an answer and without a failure, the run goes back
+to `queued` with no outcome and the worker is retried.
 
 Stops for quota, standby bucket, background restriction, device state and
 the user write a warning to `takeDiagnostics()`, only when the run had

@@ -575,6 +575,63 @@ class EntryRunTest {
   }
 
   @Test
+  fun `a run that finds a long wait makes its wake again, and keeps a wake that exists`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(nextAttemptAt = host.clock + 60_000))
+    scheduler.wakes.clear()
+    scheduler.wakeReplaces.clear()
+    run()
+    assertEquals(emptyList<TransferRequest>(), host.requests)
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    assertEquals(listOf("e1" to host.clock + 60_000), scheduler.wakes)
+    assertEquals(listOf(false), scheduler.wakeReplaces) // KEEP: a pending wake stays as it is
+  }
+
+  @Test
+  fun `a wake lost after a timeout release is made again by the stopped row's re-run`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 6))
+    host.stop = StopKind.TIME_LIMIT
+    host.handler = { _, _ -> throw CancellationException("timeout") }
+    scheduler.wakeFailures = 1
+    assertThrows(CancellationException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(7, e.backoffStreak)
+    val at = host.clock + 64_000
+    assertEquals(at, e.nextAttemptAt)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    val error = DiagnosticLog(file).drain().single()
+    assertEquals(DiagnosticLog.ERROR, error.level)
+    assertEquals("released 'e1' after a timeout stop, but could not schedule its wake", error.message)
+
+    // WorkManager runs the stopped row again. It sees the long wait and makes the wake.
+    run()
+    assertEquals(1, host.requests.size)
+    assertEquals(listOf("e1" to at), scheduler.wakes)
+    assertEquals(listOf(false), scheduler.wakeReplaces)
+  }
+
+  @Test
+  fun `a wake that fails after an idle timeout stop leaves the entry queued and writes one error`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    controller.enqueue(parsed())
+    host.stop = StopKind.TIME_LIMIT
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet))
+    host.onSleep = { throw CancellationException("timeout") }
+    scheduler.wakeFailures = 1
+    val thrown = assertThrows(CancellationException::class.java) { run() }
+    assertEquals("timeout", thrown.message) // the stop ends as a stop, not with the enqueue error
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    val error = DiagnosticLog(file).drain().single()
+    assertEquals(DiagnosticLog.ERROR, error.level)
+    assertEquals("could not schedule a wake for 'e1' after a stop", error.message)
+  }
+
+  @Test
   fun `a store write that fails mid-run throws with no outcome`() {
     controller.enqueue(parsed())
     respond(503, 200)
@@ -966,6 +1023,48 @@ class EntryRunTest {
     assertEquals(cutRequestId, e.lastRequestId)
     assertEquals(listOf("e1" to host.clock + 1_000), scheduler.wakes)
     assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
+  fun `a part that ends with a cancel of its own does not let the entry complete`() {
+    chunked()
+    host.handler = { r, _ ->
+      // Not the run's cancel: only this part's coroutine ends.
+      if (r.url.endsWith("start=10")) throw CancellationException("part only")
+      UploadResponse(200, "", mapOf())
+    }
+    assertThrows(EntryRun.PartsNotAcceptedException::class.java) { run() }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(listOf(true, false, true), e.descriptor!!.parts!!.map { it.accepted })
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
+  fun `the entry keeps the highest backoff step of its concurrent parts`() {
+    chunked()
+    lateinit var job: Job
+    var sleeps = 0
+    var part0Calls = 0
+    host.stop = StopKind.TIME_LIMIT
+    host.handler = { r, _ ->
+      when {
+        // Part 0: two 503s (streak 2), then its third request is on its way at the stop.
+        r.url.endsWith("start=0") -> if (++part0Calls <= 2) UploadResponse(503, "", mapOf()) else awaitCancellation()
+        // Part 1: one 503 (streak 1), saved after part 0's streak 2.
+        r.url.endsWith("start=10") -> UploadResponse(503, "", mapOf())
+        else -> UploadResponse(200, "", mapOf())
+      }
+    }
+    // The stop lands in part 1's wait, the third wait of the run.
+    host.onSleep = { if (++sleeps == 3) job.cancel(CancellationException("timeout")) }
+    runBlocking {
+      job = launch { EntryRun("e1", store, ops, host).run() }
+      job.join()
+    }
+    assertEquals(listOf(1_000L, 2_000L, 1_000L), host.sleeps)
+    // Part 0's request was cut, so one step on top of the highest saved streak: 2 + 1.
+    assertEquals(3, store.load("e1")!!.backoffStreak)
   }
 
   @Test

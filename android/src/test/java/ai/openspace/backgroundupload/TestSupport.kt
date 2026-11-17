@@ -113,6 +113,8 @@ internal class FakeScheduler : WorkScheduler {
   val wakes = mutableListOf<Pair<String, Long>>()
   /** The replace argument of every scheduleWake, in order. REPLACE makes a fresh row. */
   val wakeReplaces = mutableListOf<Boolean>()
+  /** How many of the next scheduleWake calls throw, as a failed WorkManager enqueue. */
+  var wakeFailures = 0
   val cancelled = mutableListOf<String>()
   val cancelledWakes = mutableListOf<String>()
   /** What libraryRuns() returns. */
@@ -123,6 +125,10 @@ internal class FakeScheduler : WorkScheduler {
   }
 
   override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
+    if (wakeFailures > 0) {
+      wakeFailures--
+      throw IllegalStateException("enqueue failed")
+    }
     wakes += entry.id to at
     wakeReplaces += replace
   }

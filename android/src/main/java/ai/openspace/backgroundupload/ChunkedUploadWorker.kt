@@ -55,7 +55,16 @@ internal class ChunkedTransfer(private val run: EntryRun) {
       return failed.settlement
     }
     // Every executor returned, and an executor returns only when its part was
-    // accepted: the server's auto-publish condition.
+    // accepted: the server's auto-publish condition. A part that ended with a
+    // CancellationException while the run was not cancelled also returns, so
+    // check before completing.
+    var missing = pending.filterNot { it in acceptedHere }
+    if (missing.isNotEmpty()) {
+      // A part can also return when the store already shows it accepted.
+      val stored = run.ops.latest(run.entryId, run.generation).descriptor!!.parts!!
+      missing = missing.filterNot { stored[it].accepted }
+      if (missing.isNotEmpty()) throw EntryRun.PartsNotAcceptedException(missing)
+    }
     return Settlement.Completed(null, lastAcceptedUrl ?: d0.reportUrl, d0.method)
   }
 

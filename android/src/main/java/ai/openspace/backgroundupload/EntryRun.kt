@@ -35,6 +35,14 @@ internal class EntryRun(
   /** The entry was paused (whole queue or its key) between the module's pause and the work cancel reaching us. */
   class PausedException : Exception("paused")
 
+  /**
+   * A chunked run ended with [indexes] not accepted, and no part failed.
+   * An IOException, so the run takes the store-failure path: back to queued
+   * with no outcome, and the worker returns retry.
+   */
+  class PartsNotAcceptedException(val indexes: List<Int>) :
+    IOException("chunked run ended with parts $indexes not accepted")
+
   /** How one attempt ended, after the retry table. */
   sealed class AttemptResult {
     data class Accepted(val response: UploadResponse) : AttemptResult()
@@ -143,10 +151,11 @@ internal class EntryRun(
         afterStop(host.stopKind())
         throw error
       } catch (error: IOException) {
-        // A store write failed (disk full, directory briefly unwritable).
-        // The attempt step classifies every network IOException itself, so
-        // one that lands here is storage: transient, no outcome. Back to
-        // queued; the caller returns retry.
+        // A store write failed (disk full, directory briefly unwritable), or
+        // a chunked run ended with a part not accepted. The attempt step
+        // classifies every network IOException itself, so one that lands here
+        // is not a network failure: transient, no outcome. Back to queued;
+        // the caller returns retry.
         endProgress(completed = false)
         ops.stopped(entryId, generation)
         throw error
@@ -225,12 +234,20 @@ internal class EntryRun(
       val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
       ops.release(entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak)
-    }.onFailure { Diag.error("could not release '$entryId' after a timeout stop", it) }
+    }.onFailure {
+      if (it is WorkerOps.WakeNotScheduledException) {
+        Diag.error("released '$entryId' after a timeout stop, but could not schedule its wake", it.cause)
+      } else {
+        Diag.error("could not release '$entryId' after a timeout stop", it)
+      }
+    }
   }
 
   /**
    * Sleeps out a short backoff remainder. False when the wait is long (the
-   * wake run comes back for it) or the entry is no longer queued.
+   * wake run comes back for it) or the entry is no longer queued. For a long
+   * wait it first makes sure a wake is pending, so a lost wake does not
+   * leave the entry waiting for the next boot sweep.
    */
   private suspend fun waitUntilDue(initial: QueueEntry): Boolean {
     var e = initial
@@ -238,7 +255,10 @@ internal class EntryRun(
       val at = e.nextAttemptAt ?: return true
       val remaining = at - host.now()
       if (remaining <= 0) return true
-      if (remaining > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) return false
+      if (remaining > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
+        if (e.state == EntryState.QUEUED) ops.ensureWake(e, at)
+        return false
+      }
       host.sleep(min(remaining, WAIT_POLL_MS))
       e = store.load(entryId) ?: return false
       if (e.state != EntryState.QUEUED && e.state != EntryState.RUNNING) return false
