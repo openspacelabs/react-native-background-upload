@@ -143,10 +143,11 @@ private suspend fun awaitResponse(client: OkHttpClient, request: Request): Uploa
  * Why: a plain suspendCancellableCoroutine drops a value when the stop comes
  * after the resume and before the coroutine runs again. Its docs say it "will
  * not resume successfully, even if CancellableContinuation.resume was already
- * invoked". For an upload, that throws away a response the server already
- * sent. The entry then goes back to queued and the server gets the request a
- * second time. So the result is saved before the resume, and a stop returns
- * it when it is there.
+ * invoked". For an upload, that throws away a response OkHttp already read,
+ * and the request is sent again (at once after a system stop, at resume()
+ * after a pause). So the result is saved before the resume, and a stop
+ * returns it when it is there. A response not yet read when the stop lands
+ * is still lost: the stop cancels the call.
  *
  * A failure that landed first is thrown as it is (kotlinx delivers it).
  *

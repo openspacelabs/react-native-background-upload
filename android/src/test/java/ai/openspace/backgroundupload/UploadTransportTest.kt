@@ -18,8 +18,8 @@ import java.util.concurrent.TimeUnit
 
 class UploadHttpClientTest {
   @Test
-  fun `the client sets connect 30 s, read 60 s, write 60 s, and keeps the 24 h call cap`() {
-    assertEquals(30_000, uploadHttpClient.connectTimeoutMillis)
+  fun `the client sets connect 15 s, read 60 s, write 60 s, and keeps the 24 h call cap`() {
+    assertEquals(15_000, uploadHttpClient.connectTimeoutMillis)
     assertEquals(60_000, uploadHttpClient.readTimeoutMillis)
     assertEquals(60_000, uploadHttpClient.writeTimeoutMillis)
     assertEquals(TimeUnit.HOURS.toMillis(24).toInt(), uploadHttpClient.callTimeoutMillis)

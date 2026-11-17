@@ -13,8 +13,12 @@ import java.util.concurrent.TimeUnit
 // silence is too short: a server that takes longer to answer still stores
 // the request, the phone sends it again, and the server can store it twice.
 
-// The time to open a TCP connection.
-private const val CONNECT_TIMEOUT_SECONDS = 30L
+// The time to open a TCP connection to one address. OkHttp tries the next
+// address of the host when one does not answer only after this time, so a
+// host with several addresses that do not answer (for example a broken IPv6
+// path) holds a transfer slot for that many times this value. Nothing was sent yet, so a connect timeout cannot make a duplicate.
+// That is why it is shorter than the read and write timeouts.
+private const val CONNECT_TIMEOUT_SECONDS = 15L
 
 // The longest silence while reading. This includes the wait for the server's
 // answer after the last body byte. 60 s matches iOS's default request timeout.
