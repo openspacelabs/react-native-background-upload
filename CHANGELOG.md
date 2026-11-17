@@ -1,4 +1,4 @@
-## Unreleased
+## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
 hooks that return the queue rows for display, and
