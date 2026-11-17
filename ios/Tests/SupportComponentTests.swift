@@ -227,12 +227,15 @@ final class TaskMapTests: XCTestCase {
   }
 
   func testOwnerResolution() {
-    let desc = ChunkedEngine.taskDescription(id: "a:b/c", attempt: 2, generation: 3)
-    XCTAssertEqual(TaskOwner.resolve(description: desc, meta: nil), .request(id: "a:b/c", generation: 3, attempt: 2))
+    let desc = ChunkedEngine.taskDescription(id: "a:b/c", attempt: 2, generation: 3, incarnation: "use")
+    XCTAssertEqual(TaskOwner.resolve(description: desc, meta: nil),
+                   .request(id: "a:b/c", generation: 3, attempt: 2, incarnation: "use"))
     XCTAssertEqual(TaskOwner.resolve(description: nil, meta: .init(id: "m", generation: 1, purpose: nil)), nil,
                    "a meta without attempt has no v10 owner")
     XCTAssertEqual(TaskOwner.resolve(description: nil, meta: .init(id: "m", attempt: 1, generation: 1)),
-                   .request(id: "m", generation: 1, attempt: 1))
+                   .request(id: "m", generation: 1, attempt: 1, incarnation: nil))
+    XCTAssertEqual(TaskOwner.resolve(description: nil, meta: .init(id: "m", incarnation: "use", attempt: 1, generation: 1)),
+                   .request(id: "m", generation: 1, attempt: 1, incarnation: "use"), "the key carries the use too")
     XCTAssertEqual(TaskOwner.resolve(description: "legacy-bare-id", meta: .init(id: "legacy-bare-id")), nil)
     XCTAssertEqual(TaskOwner.resolve(description: nil, meta: .init(id: "p", partIndex: 2, incarnation: "i")),
                    .part(id: "p", part: 2, incarnation: "i"))
@@ -265,9 +268,10 @@ final class ChunkedEngineTests: XCTestCase {
     XCTAssertEqual(ChunkedEngine.parsePartDescription(part)?.id, id)
     XCTAssertEqual(ChunkedEngine.parsePartDescription(part)?.part, 7)
     XCTAssertNil(ChunkedEngine.parseRequestDescription(part))
-    let req = ChunkedEngine.taskDescription(id: id, attempt: 4, generation: 2)
+    let req = ChunkedEngine.taskDescription(id: id, attempt: 4, generation: 2, incarnation: "inc")
     XCTAssertEqual(ChunkedEngine.parseRequestDescription(req)?.id, id)
     XCTAssertEqual(ChunkedEngine.parseRequestDescription(req)?.attempt, 4)
+    XCTAssertEqual(ChunkedEngine.parseRequestDescription(req)?.incarnation, "inc")
     XCTAssertNil(ChunkedEngine.parsePartDescription(req))
     XCTAssertNil(ChunkedEngine.parsePartDescription("bare-v9-id"))
   }

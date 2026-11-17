@@ -310,8 +310,8 @@ final class CoordinatorLateResultTests: XCTestCase {
   /// a new attempt is added: the kept key has the entry's current attempt.
   /// It still goes, so a later use of the id cannot take its late result.
   /// The later use is on attempt 2 here. On attempt 1 the task description
-  /// alone matches it, with or without a key: that needs a per-use value,
-  /// which this change does not add.
+  /// alone would match it by id, generation and attempt; the incarnation in
+  /// the description drops it (CoordinatorPerUseTests).
   func testAnEntryThatSettlesInsideTheGraceReissueDropsItsKeptKey() throws {
     h.boot()
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()

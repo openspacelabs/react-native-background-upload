@@ -108,7 +108,18 @@ extension QueueCoordinator {
     let liveKeys = Set(tasks.filter(\.isLive).map(\.key))
 
     for task in tasks where task.isLive {
-      let meta = taskMap.meta(forKey: task.key)
+      var meta = taskMap.meta(forKey: task.key)
+      let owner = TaskOwner.resolve(description: task.taskDescription, meta: meta)
+      let entry = owner.flatMap { index.entry($0.id) }
+      // A late-result key whose task is live and is the entry's current
+      // attempt. The wait gave up on this attempt, but the re-issue after it
+      // was never saved (a failed write-ahead), so the entry is still on this
+      // attempt. Adopt the task: it may have sent the body already.
+      if meta?.purpose == .lateResult, case .request(let id, let generation, let attempt, let incarnation)? = owner,
+         let e = entry, isCurrentSimpleTask(e, generation: generation, attempt: attempt, incarnation: incarnation) {
+        taskMap.setPurpose(.attempt, forKey: task.key, id: id)
+        meta?.purpose = .attempt
+      }
       // A task the library replaced or dropped, still live because the
       // process died before the daemon applied the cancel. Never adopt it:
       // its replacement, or the re-issue below, drives the entry. A kept
@@ -120,27 +131,33 @@ extension QueueCoordinator {
         task.cancel()
         continue
       }
-      let owner = TaskOwner.resolve(description: task.taskDescription, meta: meta)
-      let entry = owner.flatMap { index.entry($0.id) }
       let runnable = entry.map { !$0.legacy && ($0.state == .queued || $0.state == .running) } ?? false
       switch owner {
       case .part(let id, let part, let incarnation)? where runnable && entry?.isChunked == true:
         partTasks[id, default: []].append(.init(task: task, part: part, incarnation: incarnation))
-      case .request(let id, let generation, let attempt)?
-        where runnable && entry?.isChunked == false && entry?.generation == generation
-          && entry?.attempts == attempt && !simpleLive.contains(id):
+      case .request(let id, let generation, let attempt, let incarnation)?
+        where entry.map { isCurrentSimpleTask($0, generation: generation, attempt: attempt, incarnation: incarnation) }
+          == true && !simpleLive.contains(id):
         simpleLive.insert(id)
         liveTasks[task.key] = (id, task)
       default:
-        // No v10 owner (a v9 task), an older generation or attempt, a
-        // duplicate, or an entry that must have no task. Drop its callback.
+        // No v10 owner (a v9 task), an older generation or attempt, an
+        // earlier use of the id, a duplicate, or an entry that must have no
+        // task. Drop its callback.
         taskMap.setPurpose(.superseded, forKey: task.key, id: owner?.id ?? "")
         task.cancel()
       }
     }
-    // A key whose id has no entry belongs to nothing. A live task keeps its
-    // key until its cancel callback, which reads the purpose.
-    taskMap.removeAll { key, meta in !liveKeys.contains(key) && index.entry(meta.id) == nil }
+    // A key whose id has no entry belongs to nothing, and a simple key of an
+    // earlier use of the id belongs to nothing now. A live task keeps its key
+    // until its cancel callback, which reads the purpose. A task listed as
+    // finished may still report: its description names its use, so the
+    // report is dropped without the key.
+    taskMap.removeAll { key, meta in
+      guard !liveKeys.contains(key) else { return false }
+      guard let e = index.entry(meta.id) else { return true }
+      return meta.partIndex == nil && meta.generation != nil && !e.ownsSimpleTask(incarnation: meta.incarnation)
+    }
 
     for e in index.entries() where e.isLive && !e.legacy {
       armExpiry(e)
@@ -174,7 +191,8 @@ extension QueueCoordinator {
   /// completion is handled.
   private func withoutTask(_ e: QueueEntry) {
     let pending = taskMap.keys(where: {
-      $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
+      $0.id == e.id && e.ownsSimpleTask(incarnation: $0.incarnation)
+        && $0.generation == e.generation && $0.attempt == e.attempts
     })
     guard !pending.isEmpty else {
       // No task was ever made for a waiting attempt: it never ran, so it
@@ -203,6 +221,13 @@ extension QueueCoordinator {
       // It may have run, so the next attempt gets a new ordinal and request id.
       self.reissue(current, advanceAttempt: true)
     }
+  }
+
+  /// Whether a simple task with this identity is the current attempt of `e`,
+  /// a simple entry that may have a task.
+  private func isCurrentSimpleTask(_ e: QueueEntry, generation: Int, attempt: Int, incarnation: String?) -> Bool {
+    !e.legacy && !e.isChunked && (e.state == .queued || e.state == .running)
+      && e.ownsSimpleTask(incarnation: incarnation) && e.generation == generation && e.attempts == attempt
   }
 
   /// Issues again, keeping what is left of a wait.

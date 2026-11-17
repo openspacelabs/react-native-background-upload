@@ -92,7 +92,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
   func testReconcileDropsKeysWhoseIdHasNoEntry() throws {
     h.boot()
     h.map.set(.init(id: "ghost", attempt: 1, generation: 1, purpose: .attempt), forKey: "any:77")
-    let live = FakeTask(key: "any:78", description: ChunkedEngine.taskDescription(id: "ghost2", attempt: 1, generation: 1))
+    let live = FakeTask(key: "any:78", description: ChunkedEngine.taskDescription(id: "ghost2", attempt: 1, generation: 1, incarnation: "i"))
     h.map.set(.init(id: "ghost2", attempt: 1, generation: 1, purpose: .attempt), forKey: live.key)
     let fresh = Harness(root: h.root)
     fresh.relaunch(daemonTasks: [live])
@@ -373,7 +373,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
 
   func testUnownedAndStaleTasksAreCancelled() throws {
     let v9 = FakeTask(key: "any:90", description: "bare-v9-id")
-    let orphan = FakeTask(key: "any:91", description: ChunkedEngine.taskDescription(id: "gone", attempt: 1, generation: 1))
+    let orphan = FakeTask(key: "any:91", description: ChunkedEngine.taskDescription(id: "gone", attempt: 1, generation: 1, incarnation: "i"))
     h.relaunch(daemonTasks: [v9, orphan])
     h.boot()
     XCTAssertTrue(v9.cancelled)

@@ -460,7 +460,9 @@ final class QueueCoordinator {
       switch resolved {
       case .part(let id, let part, let incarnation):
         parts[id, default: []].append(.init(part: part, incarnation: incarnation, key: key))
-      case .request(let id, let generation, let attempt):
+      case .request(let id, let generation, let attempt, _):
+        // Every task in liveTasks was issued for, or adopted by, the current
+        // use of the id: a forget cancels and removes the held tasks.
         replaceRequestTask(id, generation: generation, attempt: attempt, key: key)
       }
     }

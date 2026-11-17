@@ -55,8 +55,13 @@ struct QueueEntry: Codable, Equatable {
   /// The body identity for the same-id rules. See EnqueueParser.fingerprint.
   var bodyFingerprint: String
   var parts: [Part]
-  /// The parts-plan identity. Rotates when the body is replaced. Part tasks
-  /// carry it, so a late callback from a replaced plan is dropped.
+  /// The parts-plan identity, and the identity of this use of the id. A new
+  /// random value at create and when the body is replaced, so no two uses of
+  /// an id share one. Part tasks and simple tasks carry it, so a late
+  /// callback from a replaced plan or from an earlier use of the id is
+  /// dropped. A same-body reopen keeps it: the generation tells those apart.
+  /// A v9 chunked upload that create() resumes keeps its v9 value; its
+  /// manifest is removed then, so a later use gets a new one.
   var incarnation: String
   /// The merged request headers. updateHeaders() patches them.
   var headers: [String: String]
@@ -90,6 +95,12 @@ struct QueueEntry: Codable, Equatable {
   var legacy: Bool
   let createdAt: Double
   var updatedAt: Double
+  /// true when this use of the id started in a build that writes
+  /// `incarnation` into every simple task. Then a simple task with no
+  /// incarnation comes from an earlier use. nil in an entry that an older
+  /// build created or saved: its tasks may carry no incarnation. An older
+  /// build ignores the field and drops it at its next save of the entry.
+  var tasksCarryIncarnation: Bool? = nil
 }
 
 extension QueueEntry {
@@ -101,6 +112,17 @@ extension QueueEntry {
   }
 
   var isSettled: Bool { !isLive }
+
+  /// Whether a simple task that carries `incarnation` (nil: none) belongs
+  /// to this use of the id. A task with a value must carry this entry's. A
+  /// task with none is from a build before the value. It matches only an
+  /// entry such a build created or saved, as every task did before, so a
+  /// task in flight across the upgrade still drives its entry and is not
+  /// sent again.
+  func ownsSimpleTask(incarnation task: String?) -> Bool {
+    guard let task else { return tasksCarryIncarnation != true }
+    return task == incarnation
+  }
   var isChunked: Bool { bodyKind == .parts }
 
   var acceptedBytes: Int64 { parts.filter(\.accepted).reduce(0) { $0 + $1.size } }
@@ -158,7 +180,7 @@ extension QueueEntry {
   /// Rule 2: a new entry.
   static func created(from p: ParsedEnqueue, staged: StagedBody, headerGeneration: Int,
                       paused: Bool, now: Double, createdAt: Double? = nil) -> QueueEntry {
-    QueueEntry(
+    var e = QueueEntry(
       id: p.id, key: p.key, varsJSON: p.varsJSON, url: p.url, method: p.method, accept: p.accept, retry: p.retry,
       wifiOnly: p.wifiOnly, bodyKind: staged.kind, bodyPath: staged.relativePath,
       bodyContentType: staged.contentType, forceContentType: staged.forceContentType,
@@ -168,6 +190,8 @@ extension QueueEntry {
       bytesSent: 0, totalBytes: staged.totalBytes, expiresAt: p.expiresAt,
       nextAttemptAt: nil, settledEventId: nil, lastRequestId: nil, lastUrl: nil,
       lastPartIndex: nil, legacy: false, createdAt: createdAt ?? now, updatedAt: now)
+    e.tasksCarryIncarnation = true
+    return e
   }
 
   /// Rule 3, same body: the new vars, headers, expiresAt and descriptor

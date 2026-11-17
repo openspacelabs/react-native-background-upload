@@ -46,10 +46,14 @@ enum ChunkedEngine {
     var inc: String?
   }
 
+  /// `inc` is the entry's incarnation: one value per use of the id (see
+  /// QueueEntry.incarnation). nil in a task from a build before it. An
+  /// older build decodes a description with `inc` and ignores the field.
   private struct RequestRef: Codable {
     let id: String
     let gen: Int
     let att: Int
+    var inc: String?
   }
 
   /// A chunked part task: (id, part index, incarnation).
@@ -62,14 +66,16 @@ enum ChunkedEngine {
     return (ref.id, ref.part, ref.inc)
   }
 
-  /// A simple attempt: (id, entry generation, attempt ordinal).
-  static func taskDescription(id: String, attempt: Int, generation: Int) -> String {
-    requestPrefix + encode(RequestRef(id: id, gen: generation, att: attempt))
+  /// A simple attempt: (id, entry generation, attempt ordinal, the
+  /// entry's incarnation).
+  static func taskDescription(id: String, attempt: Int, generation: Int, incarnation: String) -> String {
+    requestPrefix + encode(RequestRef(id: id, gen: generation, att: attempt, inc: incarnation))
   }
 
-  static func parseRequestDescription(_ description: String?) -> (id: String, generation: Int, attempt: Int)? {
+  static func parseRequestDescription(_ description: String?)
+    -> (id: String, generation: Int, attempt: Int, incarnation: String?)? {
     guard let ref: RequestRef = decode(description, requestPrefix) else { return nil }
-    return (ref.id, ref.gen, ref.att)
+    return (ref.id, ref.gen, ref.att, ref.inc)
   }
 
   private static func encode<T: Encodable>(_ value: T) -> String {

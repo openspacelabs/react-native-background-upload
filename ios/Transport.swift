@@ -69,13 +69,15 @@ struct TaskCompletion {
 }
 
 /// Who a task belongs to. From taskDescription first, TaskMap second.
+/// `incarnation` names the use of the id the task belongs to (see
+/// QueueEntry.incarnation). nil in a task from a build before it.
 enum TaskOwner: Equatable {
-  case request(id: String, generation: Int, attempt: Int)
+  case request(id: String, generation: Int, attempt: Int, incarnation: String?)
   case part(id: String, part: Int, incarnation: String?)
 
   var id: String {
     switch self {
-    case .request(let id, _, _), .part(let id, _, _): return id
+    case .request(let id, _, _, _), .part(let id, _, _): return id
     }
   }
 
@@ -84,12 +86,12 @@ enum TaskOwner: Equatable {
       return .part(id: p.id, part: p.part, incarnation: p.incarnation)
     }
     if let r = ChunkedEngine.parseRequestDescription(description) {
-      return .request(id: r.id, generation: r.generation, attempt: r.attempt)
+      return .request(id: r.id, generation: r.generation, attempt: r.attempt, incarnation: r.incarnation)
     }
     guard let meta else { return nil }
     if let part = meta.partIndex { return .part(id: meta.id, part: part, incarnation: meta.incarnation) }
     if let generation = meta.generation, let attempt = meta.attempt {
-      return .request(id: meta.id, generation: generation, attempt: attempt)
+      return .request(id: meta.id, generation: generation, attempt: attempt, incarnation: meta.incarnation)
     }
     // A v9 simple task: a bare id with no generation. No v10 owner.
     return nil
