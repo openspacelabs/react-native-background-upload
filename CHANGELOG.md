@@ -20,8 +20,10 @@ the app gets one outcome.
 Every late-result key of a request is removed when the request settles, when
 its row is forgotten (the ack of a `completed` or `cancelled` outcome, or
 `cancel()` on a settled row), and when a same-id `mutate()` replaces its
-body. Keys of tasks that still owe a cancel callback stay until that
-callback, as before.
+body. Before, the end of the 10 s wait deleted every key of the waited
+attempt, including keys of tasks the library had cancelled (superseded or
+paused). Now such a key stays until its task's cancel callback removes it,
+or until the row is gone and the next launch prunes it.
 
 On iOS, a simple request's outcome now carries the `requestId` of the
 attempt whose result settled it, so its response and `requestId` belong to

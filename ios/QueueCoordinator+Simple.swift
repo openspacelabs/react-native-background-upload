@@ -187,8 +187,10 @@ extension QueueCoordinator {
     // must not disturb the newer attempt.
     if meta?.purpose?.isOutdated == true && (!accepted || !e.isLive) { return }
     // The outcome names the request whose response settles it. A late
-    // result belongs to an older attempt than the entry's last one.
-    if let requestId = meta?.requestId, requestId != e.lastRequestId {
+    // result belongs to an older attempt than the entry's last one. Only an
+    // accepted result settles the entry as completed, so only it may change
+    // the entry's request id.
+    if accepted, let requestId = meta?.requestId, requestId != e.lastRequestId {
       e.lastRequestId = requestId
       index.upsert(e)
     }
@@ -269,8 +271,10 @@ extension QueueCoordinator {
         return chunked.partWillBegin(id: id, part: part, incarnation: incarnation, key: key, meta: meta)
       }
       // A task the library already replaced (a session move keeps the
-      // attempt ordinal, so the ordinal alone cannot tell them apart).
-      guard meta?.purpose != .superseded,
+      // attempt ordinal, so the ordinal alone cannot tell them apart), or
+      // one the relaunch grace gave up on. Cancel it: its key becomes
+      // superseded below, because it now owes a cancel callback.
+      guard meta?.purpose?.isOutdated != true,
             case .request(let id, let generation, let attempt) = owner,
             var e = index.entry(id), !e.isChunked, e.generation == generation,
             e.attempts == attempt, e.state == .queued || e.state == .running, !settings.isPaused(e.key),
@@ -294,7 +298,7 @@ extension QueueCoordinator {
   /// a delayed retry that began while the app was dead to running.
   func taskProgress(key: String, description: String?, sent: Int64, expected: Int64) {
     let meta = taskMap.meta(forKey: key)
-    guard meta?.purpose != .superseded, let owner = TaskOwner.resolve(description: description, meta: meta),
+    guard meta?.purpose?.isOutdated != true, let owner = TaskOwner.resolve(description: description, meta: meta),
           throttle.shouldEmit(owner.id, now: now()) else { return }
     queue.async {
       switch owner {

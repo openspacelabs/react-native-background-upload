@@ -454,7 +454,7 @@ final class QueueCoordinator {
     var parts: [String: [ChunkedCoordinator.Replaced]] = [:]
     for (key, owner) in liveTasks {
       let meta = taskMap.meta(forKey: key)
-      guard meta?.foreground != true, meta?.purpose != .superseded, owner.task.isLive,
+      guard meta?.foreground != true, meta?.purpose?.isOutdated != true, owner.task.isLive,
             owner.task.bytesSent == 0, !owner.task.hasResponse,
             let resolved = TaskOwner.resolve(description: owner.task.taskDescription, meta: meta) else { continue }
       switch resolved {

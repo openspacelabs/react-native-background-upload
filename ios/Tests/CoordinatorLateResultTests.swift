@@ -203,6 +203,31 @@ final class CoordinatorLateResultTests: XCTestCase {
       error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
   }
 
+  func testALateNonAcceptedResultLeavesTheRequestIdAlone() throws {
+    let (fresh, original, b) = try reissuedAfterTheGrace()
+    XCTAssertEqual(fresh.entry("a")?.lastRequestId, b.header("X-Request-Id"))
+    fresh.complete(replay(original), status: 409)
+    XCTAssertEqual(fresh.entry("a")?.lastRequestId, b.header("X-Request-Id"))
+    XCTAssertEqual(fresh.store.load("a")?.lastRequestId, b.header("X-Request-Id"))
+  }
+
+  /// The entry's request id changes only for an accepted result. Here the
+  /// task's TaskMap request id is set by hand to differ from the entry's,
+  /// and a 401 parks the entry: the parked row keeps its own request id.
+  func testOnlyAnAcceptedResultChangesTheEntrysRequestId() throws {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    let task = h.transport.live[0]
+    var meta = try XCTUnwrap(h.map.meta(forKey: task.key))
+    let own = h.entry("a")?.lastRequestId
+    meta.requestId = "another-request"
+    h.map.set(meta, forKey: task.key)
+    h.complete(task, status: 401)
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    XCTAssertEqual(h.entry("a")?.lastRequestId, own)
+    XCTAssertEqual(h.store.load("a")?.lastRequestId, own)
+  }
+
   func testALate2xxAfterTheNewAttemptCompletedIsDropped() throws {
     let (fresh, original, b) = try reissuedAfterTheGrace()
     fresh.complete(b, status: 200)
