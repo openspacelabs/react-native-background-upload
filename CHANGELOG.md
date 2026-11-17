@@ -8,13 +8,16 @@ transmit slot and sent nothing. Now a run that only waited goes back to
 takes one backoff step. The foreground-service time limit (Android 15 and
 later) now counts as a time-limit stop.
 
-After every time-limit stop, the library schedules a fresh WorkManager row
-for the entry: at once after a run that only waited, or when its backoff
-ends, also for a short backoff. WorkManager runs the stopped row again too,
-but only after its own backoff, which doubles with each start of that row.
-By the WorkManager 2.12.0 code that wait is 64 minutes at the 8th start and
-128 minutes at the 9th, so it passes an hour after about 9 starts. A fresh
-row does not have that wait. Stops for other reasons go back to `queued`
+After a time-limit stop, the library schedules a fresh WorkManager row for
+the entry: at once after a run that only waited, or when its backoff ends,
+also for a short backoff. WorkManager runs the stopped row again too, but
+only after its own backoff, which doubles with each start of that row and
+counts from the row's last enqueue time. By the WorkManager 2.12.0 code that
+wait is 64 minutes at the 8th start and 128 minutes at the 9th, so it passes
+an hour after about 9 starts. A fresh row does not have that wait. When that
+wait is already over at the stop (for a 10-minute run, up to the 5th start),
+the stopped row runs again at once and the library adds no fresh row, so
+the entry does not get two rows. Stops for other reasons go back to `queued`
 with no new row, as before: the stopped row runs again when the system
 allows it and after WorkManager's own backoff.
 
@@ -45,6 +48,32 @@ gets a transmit slot, not before. A run that waits for a slot and is stopped
 counts no attempt. So `attempts`, and the `attempt` field of later attempt
 events, are lower for uploads that only waited. The number of attempt
 events does not change. That is the correct count.
+
+**Behavior change:** on Android, the boot sweep, `resume()` and a return to
+the foreground now clear a backoff wait and start queued uploads at once.
+Before, an entry on a long backoff (up to 2 hours) kept its wait when the
+app opened, and `resume()` kept it too. `resume({ keys })` clears the waits
+of those keys only. The entry keeps at most 5 backoff steps, so if the
+server still fails, the next wait is about 32 s, then it doubles. A paused
+entry that `resume()` moves back to `queued` starts its backoff over. The
+app needs no code for this.
+
+Android: the boot sweep, `resume()`, a return to the foreground,
+`updateHeaders()` and a same-id `mutate()` now replace a WorkManager row
+that WorkManager holds back after a system stop, so the entry can start at
+once. Before, the library added no row while that stopped row waited, and
+the entry waited for WorkManager's own backoff (up to 5 hours). The library
+replaces the row only when no run of the entry is in progress.
+
+Android: a transport failure (no HTTP response) now waits at most 15
+minutes. Every attempt starts on a network that Android reports as
+validated. HTTP failures keep the retry policy's `maxMs` (2 hours by
+default).
+
+Android: a chunked entry uses its stored backoff only until a part is
+accepted in the run. After that each part counts its own failures from 0.
+Before, one failed part after a long backoff sent the whole entry back for
+the next, longer wait.
 
 ## 11.3.0
 
