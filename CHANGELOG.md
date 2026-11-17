@@ -1,3 +1,24 @@
+## Unreleased
+
+Android now sets its HTTP timeouts: connect 30 s, read 60 s, write 60 s.
+Before, only the 24 h call cap was set, so OkHttp's 10 s defaults applied.
+A server that took more than 10 s to answer after the body was sent made the
+phone give up while the server still stored the request. The phone then sent
+it again, and the server could store it twice. The 24 h call cap is
+unchanged.
+
+Behavior change: the read timeout now allows 60 s of silence after the
+body, before the attempt fails as a transport failure. A dead connection is
+found after 60 s, not 10 s, and holds its transfer slot for that time.
+
+Android now keeps a response that arrived in the same instant as a stop (a
+system stop, or `pause()`). Before, the response was dropped, the entry went
+back to queued, and the server got the request again. Now the response goes
+through the usual rules: an accepted response settles the entry, and an
+accepted chunked part keeps its accepted flag. A stop with no response still
+cancels the call, as before. `cancel()` is unchanged: a cancelled entry
+still settles `cancelled`.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

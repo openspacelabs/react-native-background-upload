@@ -9,12 +9,28 @@ import java.util.concurrent.TimeUnit
 // chunked workers share them. Thus "requests transmitting at one time" means
 // one thing across all uploads.
 
-// Max total time for a single request to complete
-// This is 24hrs so plenty of time for large uploads
-// Worst case is the time maxes out and the upload gets restarted.
-// Not using unlimited time to prevent unexpected behaviors.
-private const val REQUEST_TIMEOUT = 24L
-private val REQUEST_TIMEOUT_UNIT = TimeUnit.HOURS
+// OkHttp's defaults for the three timeouts below are 10 s each. 10 s of
+// silence is too short: a server that takes longer to answer still stores
+// the request, the phone sends it again, and the server can store it twice.
+
+// The time to open a TCP connection.
+private const val CONNECT_TIMEOUT_SECONDS = 30L
+
+// The longest silence while reading. This includes the wait for the server's
+// answer after the last body byte. 60 s matches iOS's default request timeout.
+// A dead connection is found after this time, and holds its transfer slot
+// until then.
+private const val READ_TIMEOUT_SECONDS = 60L
+
+// The longest a single write of the body may block.
+private const val WRITE_TIMEOUT_SECONDS = 60L
+
+// A cap on the whole call: DNS, connect, the body, the server's work, and the
+// response. OkHttp counts any retries it makes on its own inside the same cap.
+// It is not a silence limit; the read and write timeouts above are. 24 h lets
+// a large body finish on a slow network and still ends a call that never
+// finishes. When it expires, the attempt fails and the retry rules apply.
+private const val CALL_TIMEOUT_HOURS = 24L
 
 // The number of requests transmitting at one time across ALL uploads, chunked
 // parts included. This is the design's library-wide cap of 4. Every request,
@@ -53,5 +69,8 @@ internal val transferGate = TransferGate(MAX_TRANSFER_CONCURRENCY, HIGH_PRIORITY
 
 // Use Okhttp as it provides the most standard behaviors even though it's not coroutine friendly
 internal val uploadHttpClient = OkHttpClient.Builder()
-  .callTimeout(REQUEST_TIMEOUT, REQUEST_TIMEOUT_UNIT)
+  .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+  .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+  .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+  .callTimeout(CALL_TIMEOUT_HOURS, TimeUnit.HOURS)
   .build()

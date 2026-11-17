@@ -39,6 +39,8 @@ internal class SimpleTransfer(private val run: EntryRun) {
         fileExists = { file == null || file.exists() },
       )
       when (val r = a.result) {
+        // No suspension between here and ops.settle: the response may have
+        // landed as the run was stopped (see awaitLanded).
         is EntryRun.AttemptResult.Accepted -> return Settlement.Completed(r.response, a.url, a.method)
         is EntryRun.AttemptResult.Auth -> {
           if (!r.reissue) throw EntryRun.ParkException(r.headerGeneration)

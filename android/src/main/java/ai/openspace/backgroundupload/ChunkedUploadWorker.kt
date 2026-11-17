@@ -90,6 +90,8 @@ internal class ChunkedTransfer(private val run: EntryRun) {
       )
       when (val r = a.result) {
         is EntryRun.AttemptResult.Accepted -> {
+          // No suspension before this save: the part may have landed as the
+          // run was stopped (see awaitLanded).
           markAccepted(index, a.entry.descriptor!!.parts!![index])
           return
         }

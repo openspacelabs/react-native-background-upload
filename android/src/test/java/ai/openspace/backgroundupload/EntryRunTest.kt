@@ -1,6 +1,8 @@
 package ai.openspace.backgroundupload
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -365,6 +367,44 @@ class EntryRunTest {
     assertEquals(emptyList<AttemptEvent>(), host.attempts)
     assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
     assertEquals("end:false", host.progress.last())
+  }
+
+  /**
+   * Runs e1 in its own job. [stopOn] decides, per request, whether the send
+   * stops that job (as WorkManager stops a worker) and then still returns
+   * its response: what awaitLanded does when a response landed before the stop.
+   */
+  private fun runStoppedAt(stopOn: (TransferRequest) -> Boolean) = runBlocking {
+    var job: Job? = null
+    host.handler = { r, _ ->
+      if (stopOn(r)) job!!.cancel()
+      UploadResponse(200, "ok", mapOf())
+    }
+    job = launch { EntryRun("e1", store, ops, host).run() }
+    job.join()
+  }
+
+  @Test
+  fun `a response that lands as the run is stopped still settles completed`() {
+    // Pins that nothing suspends between the send's return and ops.settle.
+    // A suspension there throws on a stopped job, and the entry would go
+    // back to queued and be sent again.
+    controller.enqueue(parsed())
+    runStoppedAt { true }
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(EventJournal.KIND_COMPLETED, outcome().kind)
+    assertEquals(listOf("completed"), host.attempts.map { it.outcome })
+  }
+
+  @Test
+  fun `a part that lands as the run is stopped keeps its accepted flag`() {
+    // The same pin for a part: nothing suspends between the send's return and markAccepted.
+    chunked()
+    runStoppedAt { it.url.endsWith("start=0") }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(listOf(true, false, false), e.descriptor!!.parts!!.map { it.accepted })
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
 
   @Test
