@@ -3,7 +3,6 @@ package ai.openspace.backgroundupload
 import android.content.Context
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.os.Build
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -57,31 +56,26 @@ internal object WorkManagerBackoff {
 }
 
 /**
- * The network a wake row waits for, as a WorkManager constraint. Both
- * network rules need a validated network, as the in-worker check does.
- *
- * - NONE: no constraint.
- * - CONNECTED: NetworkType.CONNECTED. WorkManager 2.12.0 turns it into a
- *   request with INTERNET and VALIDATED (NetworkTypeCompatKt.toNetworkRequest).
- * - WIFI: a NetworkRequest with TRANSPORT_WIFI, INTERNET and VALIDATED.
+ * The network a queued entry waits for, and the doorbell row that waits for
+ * it. NONE: the entry does not wait for a network (it is not queued, or it
+ * waits for a backoff). CONNECTED and WIFI need a validated network, as the
+ * in-worker check does.
  */
 enum class RequiredNetwork { NONE, CONNECTED, WIFI }
 
 /**
- * The network rule of a wake row for [entry], as saved.
- *
- * - A parked entry's wake only settles its expiry: NONE.
- * - A backoff wait (nextAttemptAt set): CONNECTED. The run checks the Wi-Fi
- *   rule and hands over again when it must, so a backoff wake never keeps a
- *   stale Wi-Fi rule.
- * - Otherwise the entry waits for the network its run needs: WIFI when its
- *   own wifiOnly, else the queue's setting, says so; else CONNECTED.
+ * The doorbell [entry] waits for when no run of it can start: WIFI when its
+ * own wifiOnly, else the queue's setting, says so; else CONNECTED. NONE for
+ * an entry that is not queued, and for one whose wait is longer than a
+ * worker sleeps out: its wake row starts it ([RetryClassifier.IN_WORKER_BACKOFF_MAX_MS]).
+ * A short wait, such as a chunked sibling's backoff pending at a hand-over,
+ * does not change the rule.
  */
-internal fun requiredNetwork(entry: QueueEntry, settings: QueueSettings): RequiredNetwork = when {
-  entry.state == EntryState.AWAITING_AUTH -> RequiredNetwork.NONE
-  entry.nextAttemptAt != null -> RequiredNetwork.CONNECTED
-  settings.wifiOnlyFor(entry) -> RequiredNetwork.WIFI
-  else -> RequiredNetwork.CONNECTED
+internal fun requiredNetwork(entry: QueueEntry, settings: QueueSettings, now: Long): RequiredNetwork {
+  if (entry.legacy || entry.state != EntryState.QUEUED) return RequiredNetwork.NONE
+  val at = entry.nextAttemptAt
+  if (at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) return RequiredNetwork.NONE
+  return if (settings.wifiOnlyFor(entry)) RequiredNetwork.WIFI else RequiredNetwork.CONNECTED
 }
 
 /** What [RowScheduler.schedule] does to an entry's main chain. */
@@ -141,22 +135,26 @@ interface WorkScheduler {
   fun schedule(entry: QueueEntry)
 
   /**
-   * A run at [at] under a second unique name. Used for long backoffs, for
-   * the expiry of a parked entry, and for an entry that waits for the
-   * network ([network], see [requiredNetwork]). [replace] false keeps a wake
-   * that already exists (the boot sweep).
+   * A run at [at] under a second unique name. Used for long backoffs and for
+   * the expiry of a parked entry. [replace] false keeps a wake that already
+   * exists (the boot sweep).
    */
-  fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean, network: RequiredNetwork)
+  fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean)
 
   /** Cancels the main chain and the wake. */
   fun cancel(id: String)
 
+  /** Cancels the wake only. A wake that is no longer needed still holds a WorkManager slot. */
+  fun cancelWake(id: String)
+
   /**
-   * Cancels the wake only. A wake that is no longer needed still holds a
-   * WorkManager slot. [keepNetworkWake] keeps a wake with no delay that
-   * waits for a network: the wake of an entry that waits for the network.
+   * Makes sure the doorbell row for [network] (CONNECTED or WIFI) exists: one
+   * row for the whole queue, with that WorkManager network rule. When the
+   * network is up, WorkManager runs it, and its worker ([DoorbellWorker])
+   * starts the entries that wait for a network. It runs no upload. Returns
+   * once WorkManager has stored the row; throws when it could not.
    */
-  fun cancelWake(id: String, keepNetworkWake: Boolean = false)
+  fun ensureDoorbell(network: RequiredNetwork)
 
   /** Every unfinished WorkManager run of the library, main chains and wakes. For the boot snapshot. */
   fun libraryRuns(): List<PendingRun>
@@ -166,24 +164,17 @@ interface WorkScheduler {
 }
 
 /**
- * [startable]: the ids with a run in progress, or a row with no network rule
- * that WorkManager may start now. [networkWait]: the ids with a due wake
- * that waits for a network ([isNetworkWake]); WorkManager starts it once
- * its network is up, which the summary cannot see. [withWake]: the ids with
- * an unfinished delayed row or network wake. Only a wake has an initial
- * delay or a network constraint; a main-chain row has neither.
+ * [startable]: the ids with a run in progress, or a row WorkManager may
+ * start now. [withWake]: the ids with an unfinished delayed row. Only a wake
+ * has an initial delay; a main-chain row never does.
  */
-data class RowSummary(
-  val startable: Set<String>,
-  val withWake: Set<String>,
-  val networkWait: Set<String> = emptySet(),
-)
+data class RowSummary(val startable: Set<String>, val withWake: Set<String>)
 
 /**
  * One unfinished WorkManager run. [entryId] comes from the run's id tag.
  * [delayed] is a run enqueued with an initial delay, which only a wake has.
- * [nextScheduleAt] is null when WorkManager reports none. [network] is its
- * network constraint; only a wake has one.
+ * [nextScheduleAt] is null when WorkManager reports none. [doorbell] is the
+ * network of a doorbell row, which has no entry id; null for any other run.
  */
 data class PendingRun(
   val entryId: String?,
@@ -191,16 +182,16 @@ data class PendingRun(
   val runAttemptCount: Int,
   val nextScheduleAt: Long?,
   val delayed: Boolean,
-  val network: RequiredNetwork = RequiredNetwork.NONE,
+  val doorbell: RequiredNetwork? = null,
 )
 
 /**
  * One unfinished WorkManager row. [nextScheduleAt] is the earliest time
  * WorkManager starts it (`WorkInfo.nextScheduleTimeMillis`): Long.MAX_VALUE
- * for a row that is not ENQUEUED. WorkManager 2.12.0 leaves the network
- * constraint out of that time (WorkSpec.WorkInfoPojo.calculateNextRunTimeMillis):
- * a constrained row reports its enqueue time plus its delay, and starts
- * once that time has come and its [network] is up.
+ * for a row that is not ENQUEUED. WorkManager 2.12.0 leaves a network rule
+ * out of that time (WorkSpec.WorkInfoPojo.calculateNextRunTimeMillis): a
+ * doorbell reports its enqueue time, and starts once its network is up.
+ * [doorbell]: the network of a doorbell row; null for an entry's row.
  */
 data class WorkRow(
   val entryId: String?,
@@ -208,11 +199,8 @@ data class WorkRow(
   val runAttemptCount: Int,
   val nextScheduleAt: Long,
   val delayed: Boolean,
-  val network: RequiredNetwork = RequiredNetwork.NONE,
+  val doorbell: RequiredNetwork? = null,
 )
-
-/** A wake with no delay that waits for a network: an entry that waits for the network sleeps on it. */
-internal val WorkRow.isNetworkWake get() = !delayed && network != RequiredNetwork.NONE
 
 /** The WorkManager calls [RowScheduler] makes. Tests run the same rules against a fake. */
 interface WorkRows {
@@ -222,7 +210,13 @@ interface WorkRows {
   /** Every row of the library, main chains and wakes, in one of [states]. One query. */
   fun library(states: List<WorkInfo.State>): List<WorkRow>
 
-  fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork)
+  fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long)
+
+  /**
+   * Enqueues the doorbell row [name] with [network] as its rule, and waits
+   * until WorkManager has stored it. Throws when it did not.
+   */
+  fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork)
 
   fun cancel(name: String)
 }
@@ -241,22 +235,24 @@ interface WorkRows {
  * back every later "run now" appended behind it. They use the wake name
  * (`<id>#wake`) with an initial delay instead.
  *
- * Main-chain rows carry no WorkManager constraint. A constrained row does
- * not start while the app is visible and offline, so it could not take
- * foreground mode then; its constraint is fixed when it is made, so a
- * setWifiOnly() change would leave stale rows; and on API 29 WorkManager
- * registers one network callback per constrained row. Only a wake row
- * carries a network rule ([RequiredNetwork]): a backoff wake, and the wake
- * of an entry whose run found no network ([EntryRun.waitForNetwork]). The
- * worker checks the network itself before every attempt, also on a row a
- * constraint started.
+ * No row that runs an upload carries a WorkManager constraint. WorkManager
+ * enforces a constraint while the worker runs: it stops the worker when the
+ * network loses the rule, also in the middle of a request, and the stopped
+ * row keeps its run count, so WorkManager then holds it back (see
+ * [WorkManagerBackoff]). A constrained row also does not start while the app
+ * is visible and offline, so it could not take foreground mode then. The
+ * worker checks the network itself before every attempt.
  *
- * Earlier versions used no constraint at all, because the constraint path
- * was unreliable. The WorkManager release notes for 2.10.1 to 2.12.0 list
- * fixes for network constraints that were not met while the network was
- * up, a stale capability set, an identical second constraint, and a
- * blocked network (Android 15) that passed the constraint. The library is
- * on 2.12.0.
+ * The network rule lives on two doorbell rows for the whole queue
+ * ([ensureDoorbell]). A doorbell runs no upload: it only starts the entries
+ * that wait for a network. Earlier versions used no constraint at all,
+ * because the constraint path was unreliable. The WorkManager release notes
+ * for 2.10.1 to 2.12.0 list fixes for network constraints that were not met
+ * while the network was up, re-added capabilities, an identical second
+ * constraint, and a blocked network (Android 15) that passed the
+ * constraint. The library is on 2.12.0. Even so, no start depends on the
+ * doorbell alone: the app's start, resume() and return to the foreground
+ * start an entry whose network fits.
  */
 open class RowScheduler(
   private val rows: WorkRows,
@@ -264,6 +260,9 @@ open class RowScheduler(
 ) : WorkScheduler {
   private companion object {
     val UNFINISHED = listOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)
+
+    /** The module's scheduler and a doorbell worker's are separate objects in one process. */
+    val DOORBELL_LOCK = Any()
   }
 
   /**
@@ -273,19 +272,18 @@ open class RowScheduler(
   override fun schedule(entry: QueueEntry) {
     when (mainChainStep(rows.unfinished(entry.id), clock())) {
       MainChainStep.NONE -> Unit
-      MainChainStep.APPEND -> rows.enqueue(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L, RequiredNetwork.NONE)
-      MainChainStep.REPLACE -> rows.enqueue(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L, RequiredNetwork.NONE)
+      MainChainStep.APPEND -> rows.enqueue(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L)
+      MainChainStep.REPLACE -> rows.enqueue(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L)
     }
   }
 
-  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean, network: RequiredNetwork) {
+  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
     val delay = WorkManagerScheduler.initialDelayMs(at, clock())
     rows.enqueue(
       WorkManagerScheduler.wakeName(entry.id),
       if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
       entry,
       delay,
-      network,
     )
   }
 
@@ -294,14 +292,32 @@ open class RowScheduler(
     rows.cancel(WorkManagerScheduler.wakeName(id))
   }
 
+  /**
+   * The same rule as an entry's main chain ([mainChainStep]): a doorbell
+   * that waits for its network, or a running one with one queued behind
+   * it, is enough. A running doorbell with none behind it gets one appended,
+   * so an entry that hands over while the doorbell answers is not missed.
+   * A doorbell that WorkManager holds back after stops is replaced. One lock
+   * for the process, and the enqueue is awaited, so two callers do not both
+   * append.
+   */
+  override fun ensureDoorbell(network: RequiredNetwork) {
+    require(network != RequiredNetwork.NONE) { "a doorbell needs a network" }
+    val name = WorkManagerScheduler.doorbellName(network)
+    synchronized(DOORBELL_LOCK) {
+      when (mainChainStep(rows.unfinished(name), clock())) {
+        MainChainStep.NONE -> Unit
+        MainChainStep.APPEND -> rows.enqueueDoorbell(name, ExistingWorkPolicy.APPEND_OR_REPLACE, network)
+        MainChainStep.REPLACE -> rows.enqueueDoorbell(name, ExistingWorkPolicy.REPLACE, network)
+      }
+    }
+  }
+
   // A cancel reschedules all pending work even when the name has none, and
   // the boot sweep calls this for every queued entry.
-  override fun cancelWake(id: String, keepNetworkWake: Boolean) {
+  override fun cancelWake(id: String) {
     val name = WorkManagerScheduler.wakeName(id)
-    val open = rows.unfinished(name)
-    if (open.isEmpty()) return
-    if (keepNetworkWake && open.any { it.isNetworkWake }) return
-    rows.cancel(name)
+    if (rows.unfinished(name).isNotEmpty()) rows.cancel(name)
   }
 
   // One query for every row, not one per entry: the boot sweep runs this on
@@ -314,7 +330,7 @@ open class RowScheduler(
         runAttemptCount = row.runAttemptCount,
         nextScheduleAt = row.nextScheduleAt.takeIf { it != Long.MAX_VALUE },
         delayed = row.delayed,
-        network = row.network,
+        doorbell = row.doorbell,
       )
     }
 
@@ -322,10 +338,8 @@ open class RowScheduler(
     val now = clock()
     val open = rows.library(UNFINISHED)
     return RowSummary(
-      startable = open.filter { it.state == WorkInfo.State.RUNNING || (it.startsBy(now) && !it.isNetworkWake) }
-        .mapNotNull { it.entryId }.toSet(),
-      withWake = open.filter { it.delayed || it.network != RequiredNetwork.NONE }.mapNotNull { it.entryId }.toSet(),
-      networkWait = open.filter { it.isNetworkWake && it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
+      startable = open.filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
+      withWake = open.filter { it.delayed }.mapNotNull { it.entryId }.toSet(),
     )
   }
 }
@@ -345,6 +359,16 @@ class WorkManagerScheduler private constructor(private val workManager: WorkMana
     const val V9_WORK_TAG = "RNFileUploader"
 
     fun wakeName(id: String) = "$id#wake"
+
+    /** The unique name of the doorbell for [network]. */
+    fun doorbellName(network: RequiredNetwork) = "RNFileUploader.doorbell:${network.name}"
+
+    const val DOORBELL_TAG_PREFIX = "RNFileUploaderDoorbell:"
+    /** A string literal, because WorkManager persists it across builds. */
+    const val DOORBELL_NETWORK_KEY = "network"
+
+    /** How long a doorbell enqueue may take before it counts as failed. */
+    const val DOORBELL_ENQUEUE_TIMEOUT_MS = 10_000L
 
     /** Milliseconds from [now] until [at]; never negative. */
     fun initialDelayMs(at: Long?, now: Long): Long = if (at == null) 0L else (at - now).coerceAtLeast(0L)
@@ -371,12 +395,51 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
       WorkQuery.Builder.fromTags(listOf(WorkManagerScheduler.WORK_TAG)).addStates(states).build(),
     ).get().map(::row)
 
-  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork) {
-    workManager.beginUniqueWork(name, policy, request(entry, delayMs, network)).enqueue()
+  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+    workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue()
   }
 
   override fun cancel(name: String) {
     workManager.cancelUniqueWork(name)
+  }
+
+  // Waits for the insert: an enqueue that fails later is otherwise not seen.
+  // The callers run on the queue executor or a worker thread, never on the
+  // main thread.
+  override fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork) {
+    val request = OneTimeWorkRequestBuilder<DoorbellWorker>()
+      .addTag(WorkManagerScheduler.WORK_TAG)
+      .addTag(WorkManagerScheduler.DOORBELL_TAG_PREFIX + network.name)
+      .setInputData(workDataOf(WorkManagerScheduler.DOORBELL_NETWORK_KEY to network.name))
+      .setConstraints(constraints(network))
+      .build()
+    workManager.beginUniqueWork(name, policy, request).enqueue().result
+      .get(WorkManagerScheduler.DOORBELL_ENQUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+  }
+
+  /**
+   * CONNECTED: NetworkType.CONNECTED, which WorkManager 2.12.0 turns into a
+   * request for INTERNET and VALIDATED (NetworkTypeCompatKt.toNetworkRequest).
+   * WIFI: the in-worker check's rule, a validated Wi-Fi network. WorkManager
+   * uses the request on API 28 and later; UNMETERED is its fallback below.
+   * A new NetworkRequest.Builder also asks for NOT_VPN and NOT_RESTRICTED;
+   * WorkManager removes both from its own CONNECTED request, and so does
+   * this one, so a VPN over Wi-Fi counts.
+   */
+  private fun constraints(network: RequiredNetwork): Constraints = when (network) {
+    RequiredNetwork.WIFI -> Constraints.Builder()
+      .setRequiredNetworkRequest(
+        NetworkRequest.Builder()
+          .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+          .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+          .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+          .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+          .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+          .build(),
+        NetworkType.UNMETERED,
+      )
+      .build()
+    else -> Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
   }
 
   private fun row(info: WorkInfo) = WorkRow(
@@ -386,21 +449,12 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
     runAttemptCount = info.runAttemptCount,
     nextScheduleAt = info.nextScheduleTimeMillis,
     delayed = info.initialDelayMillis > 0,
-    network = networkOf(info.constraints),
+    doorbell = info.tags.firstOrNull { it.startsWith(WorkManagerScheduler.DOORBELL_TAG_PREFIX) }
+      ?.removePrefix(WorkManagerScheduler.DOORBELL_TAG_PREFIX)
+      ?.let { name -> RequiredNetwork.values().firstOrNull { it.name == name } },
   )
 
-  // On API 28 and later setRequiredNetworkRequest stores the request and
-  // sets the type to NOT_REQUIRED (Constraints.Builder in 2.12.0).
-  private fun networkOf(c: Constraints): RequiredNetwork {
-    val request = c.requiredNetworkRequest
-    return when {
-      request != null && request.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> RequiredNetwork.WIFI
-      request != null || c.requiredNetworkType != NetworkType.NOT_REQUIRED -> RequiredNetwork.CONNECTED
-      else -> RequiredNetwork.NONE
-    }
-  }
-
-  private fun request(entry: QueueEntry, delayMs: Long, network: RequiredNetwork): OneTimeWorkRequest {
+  private fun request(entry: QueueEntry, delayMs: Long): OneTimeWorkRequest {
     val builder = if (entry.body?.kind == StagedBody.CHUNKED) {
       OneTimeWorkRequestBuilder<ChunkedUploadWorker>()
     } else {
@@ -414,42 +468,6 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
       .addTag(WorkManagerScheduler.ID_TAG_PREFIX + entry.id)
       .setInputData(workDataOf(WorkManagerScheduler.ENTRY_ID_KEY to entry.id))
       .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
-      .setConstraints(constraints(network))
       .build()
   }
-
-  /**
-   * The Wi-Fi request is the in-worker check's rule: a validated Wi-Fi
-   * network. WorkManager uses the request on API 28 and later (minSdk is
-   * 29); UNMETERED is only its fallback for older API levels. A new
-   * NetworkRequest.Builder also asks for NOT_VPN and NOT_RESTRICTED;
-   * WorkManager 2.12.0 removes both from the request it builds for
-   * CONNECTED (NetworkTypeCompatKt.toNetworkRequest), and so does this one.
-   *
-   * API 29 gets no constraint, as before: there WorkManager tracks each
-   * constrained row with its own network callback (IndividualNetworkCallback),
-   * and the app's callbacks share a limit of 100. Its runs keep the
-   * in-worker poll ([TransferHost.networkWakes]).
-   */
-  private fun constraints(network: RequiredNetwork): Constraints {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return Constraints.NONE
-    return when (network) {
-      RequiredNetwork.NONE -> Constraints.NONE
-      RequiredNetwork.CONNECTED -> Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-      RequiredNetwork.WIFI -> Constraints.Builder()
-        .setRequiredNetworkRequest(
-          NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            // As WorkManager's own CONNECTED request: a VPN over Wi-Fi counts.
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-            .build(),
-          NetworkType.UNMETERED,
-        )
-        .build()
-    }
-  }
-
 }

@@ -20,11 +20,29 @@ import androidx.work.ForegroundInfo
 // identified by the NotificationConfig that configure() saved. Its progress
 // bar is the total across the uploads.
 
-internal enum class Connectivity { NoWifi, NoInternet, Ok }
+/**
+ * The network check's answer. [BoundElsewhere]: the default network fits a
+ * Wi-Fi-only upload, but the app binds the process to a network that is not
+ * Wi-Fi, so the upload's sockets would not use Wi-Fi. That does not last
+ * (the app binds for one call), so a run waits for it and does not hand over.
+ */
+internal enum class Connectivity { NoWifi, NoInternet, Ok, BoundElsewhere }
+
+/**
+ * Runs a network check that must not throw: an error reads as no network,
+ * so the caller waits. WorkManager catches a SecurityException around the
+ * same ConnectivityManager calls.
+ */
+internal inline fun safeConnectivity(wifiOnly: Boolean, check: () -> Connectivity): Connectivity =
+  try {
+    check()
+  } catch (error: Exception) {
+    if (wifiOnly) Connectivity.NoWifi else Connectivity.NoInternet
+  }
 
 // This is synchronized to ensure consistent status across workers
 @Synchronized
-internal fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
+internal fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity = safeConnectivity(wifiOnly) {
   val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
   // activeNetwork is the system default network, not a network the process
   // is bound to (ConnectivityManager docs).
@@ -32,7 +50,7 @@ internal fun validateConnectivity(context: Context, wifiOnly: Boolean): Connecti
   // While the app binds the process to a network (bindProcessToNetwork), new
   // sockets and DNS use that network, also OkHttp's.
   val bound = manager.boundNetworkForProcess
-  return connectivityOf(
+  connectivityOf(
     wifiOnly = wifiOnly,
     validated = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true,
     defaultWifi = capabilities?.hasTransport(TRANSPORT_WIFI) == true,
@@ -43,15 +61,25 @@ internal fun validateConnectivity(context: Context, wifiOnly: Boolean): Connecti
 /**
  * The network check. The default network must be validated. Wi-Fi only
  * also needs it to be Wi-Fi, and a process bound to a network that is not
- * Wi-Fi fails it: its sockets would send over that network. [boundWifi] is
- * null when the process is not bound. Wi-Fi only answers NoWifi, not
- * NoInternet: asking the user to join Wi-Fi is the more direct hint.
+ * Wi-Fi does not pass: its sockets would send over that network
+ * ([Connectivity.BoundElsewhere]). [boundWifi] is null when the process is
+ * not bound. Wi-Fi only answers NoWifi, not NoInternet: asking the user to
+ * join Wi-Fi is the more direct hint.
  */
 internal fun connectivityOf(wifiOnly: Boolean, validated: Boolean, defaultWifi: Boolean, boundWifi: Boolean?): Connectivity = when {
   !wifiOnly -> if (validated) Connectivity.Ok else Connectivity.NoInternet
-  validated && defaultWifi && boundWifi != false -> Connectivity.Ok
-  else -> Connectivity.NoWifi
+  !validated || !defaultWifi -> Connectivity.NoWifi
+  boundWifi == false -> Connectivity.BoundElsewhere
+  else -> Connectivity.Ok
 }
+
+/**
+ * Whether the network fits an upload with this Wi-Fi rule now. A process
+ * bound elsewhere counts: the default network fits, and a run waits out the
+ * bind. Never throws.
+ */
+internal fun networkFitsNow(context: Context, wifiOnly: Boolean): Boolean =
+  validateConnectivity(context, wifiOnly).let { it == Connectivity.Ok || it == Connectivity.BoundElsewhere }
 
 // Makes sure that the channel for the foreground notification exists. It makes
 // the channel only when the channel is absent. Thus a channel that the consumer
@@ -79,7 +107,7 @@ internal fun buildUploadNotification(
   val progress = UploadProgress.total()
   val progress2Decimals = "%.2f".format(progress)
   val title = when (connectivity) {
-    Connectivity.NoWifi -> config.notificationTitleNoWifi
+    Connectivity.NoWifi, Connectivity.BoundElsewhere -> config.notificationTitleNoWifi
     Connectivity.NoInternet -> config.notificationTitleNoInternet
     Connectivity.Ok -> config.notificationTitle
   }

@@ -32,11 +32,11 @@ internal interface TransferHost {
   suspend fun foreground(entry: QueueEntry): Boolean
 
   /**
-   * Whether a run that finds no network may hand the wait to a wake row
-   * with a network constraint: API 30 and later. On API 29 WorkManager
-   * tracks each constrained row with its own network callback.
+   * The device's API level. It decides whether a run that finds no network
+   * hands over to a doorbell (API 30 and later), and whether a run with
+   * foreground mode does so too (API 35 and later).
    */
-  fun networkWakes(): Boolean
+  fun sdkInt(): Int
 
   fun progressStarted(id: String, total: Long, sent: Long)
 

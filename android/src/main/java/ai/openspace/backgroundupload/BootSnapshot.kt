@@ -8,8 +8,9 @@ package ai.openspace.backgroundupload
  * v9Leftovers counts the v9 work still on disk, and orphans the
  * directories with no entry file that are not v9: what the boot cleanup
  * left, and what it deleted. Zeros included. wifiOnly is the queue's
- * setting, and entriesByWake counts the queued entries by the wake they
- * sleep on: a backoff wait, the network, or Wi-Fi.
+ * setting. entriesByWake counts the queued entries by what starts them:
+ * their backoff wake, or the network or Wi-Fi doorbell; doorbells says
+ * which doorbell rows exist.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"
@@ -24,7 +25,7 @@ internal object BootSnapshot {
     runs: List<PendingRun>?,
     now: Long,
     leftovers: Leftovers,
-    wifiOnly: Boolean,
+    settings: QueueSettings,
   ): Map<String, Any?> {
     val base = mapOf(
       "entries" to entries.size,
@@ -33,7 +34,7 @@ internal object BootSnapshot {
       "oldestUpdatedAt" to entries.minOfOrNull { it.updatedAt },
       "v9Leftovers" to leftovers.v9.toMap(),
       "orphans" to leftovers.orphans.toMap(),
-      "wifiOnly" to wifiOnly,
+      "wifiOnly" to settings.wifiOnly,
     )
     if (runs == null) return base + ("runsUnavailable" to true)
     val withRun = runs.mapNotNull { it.entryId }.toSet()
@@ -48,17 +49,21 @@ internal object BootSnapshot {
         run.delayed && run.nextScheduleAt != null && run.nextScheduleAt - now > EXPIRY_WAKE_HORIZON_MS
       },
       "maxRunAttemptCount" to runs.maxOfOrNull { it.runAttemptCount },
-      "entriesByWake" to entriesByWake(entries, runs),
+      "entriesByWake" to entriesByWake(entries, runs, now, settings),
+      "doorbells" to mapOf(
+        "network" to runs.any { it.doorbell == RequiredNetwork.CONNECTED },
+        "wifi" to runs.any { it.doorbell == RequiredNetwork.WIFI },
+      ),
     )
   }
 
   /**
-   * Each queued entry once, by its wake: "backoff" a delayed wake (a
-   * backoff wait), else "wifi" a wake that waits for Wi-Fi, else "network"
-   * one that waits for any network. An entry with none of them is not
-   * counted. Only a wake has a delay or a network rule.
+   * Each queued entry once. "backoff": it has a delayed wake (a backoff
+   * wait). "network" and "wifi": it has no run of its own and no long
+   * wait, so the doorbell of that rule starts it ([requiredNetwork]). An
+   * entry with a main-chain row is not counted.
    */
-  private fun entriesByWake(entries: List<QueueEntry>, runs: List<PendingRun>): Map<String, Int> {
+  private fun entriesByWake(entries: List<QueueEntry>, runs: List<PendingRun>, now: Long, settings: QueueSettings): Map<String, Int> {
     val byEntry = runs.filter { it.entryId != null }.groupBy { it.entryId }
     val counts = linkedMapOf("backoff" to 0, "network" to 0, "wifi" to 0)
     for (e in entries) {
@@ -66,9 +71,12 @@ internal object BootSnapshot {
       val own = byEntry[e.id].orEmpty()
       val kind = when {
         own.any { it.delayed } -> "backoff"
-        own.any { it.network == RequiredNetwork.WIFI } -> "wifi"
-        own.any { it.network == RequiredNetwork.CONNECTED } -> "network"
-        else -> continue
+        own.isNotEmpty() -> continue
+        else -> when (requiredNetwork(e, settings, now)) {
+          RequiredNetwork.CONNECTED -> "network"
+          RequiredNetwork.WIFI -> "wifi"
+          RequiredNetwork.NONE -> continue
+        }
       }
       counts[kind] = counts.getValue(kind) + 1
     }

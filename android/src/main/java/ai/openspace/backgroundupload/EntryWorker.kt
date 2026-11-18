@@ -103,7 +103,7 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
       return inForeground
     }
 
-    override fun networkWakes() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    override fun sdkInt() = Build.VERSION.SDK_INT
 
     override fun progressStarted(id: String, total: Long, sent: Long) {
       UploadProgress.add(id, total)

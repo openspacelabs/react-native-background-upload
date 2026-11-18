@@ -21,13 +21,19 @@ class QueueController(
   private val scheduler: WorkScheduler,
   private val isWorkerRunning: (id: String) -> Boolean = WorkerGate::isRunning,
   private val clock: () -> Long = System::currentTimeMillis,
-  /** Whether the network now fits the entry's Wi-Fi rule, as a run checks it. */
-  private val networkFits: (QueueEntry) -> Boolean = { true },
+  /**
+   * Whether the network now fits an upload with this Wi-Fi rule, as a run
+   * checks it. Called at most twice per pass ([NetworkProbe]).
+   */
+  private val networkFits: (wifiOnly: Boolean) -> Boolean = { true },
+  /** Whether an entry with no network may wait on a doorbell: API 30 and later. */
+  private val doorbells: Boolean = true,
 ) {
 
   // MARK: - enqueue
 
-  private class Enqueued(val entry: QueueEntry?, val reEmit: EventJournal.SettledRecord?)
+  /** [repair]: the entry was queued already (a same-id enqueue of the same body). */
+  private class Enqueued(val entry: QueueEntry?, val reEmit: EventJournal.SettledRecord?, val repair: Boolean = false)
 
   /** A body staged before the store lock was taken, and the generation it was staged for. */
   private class PreStaged(val generation: Int, val staged: BodyStaging.Staged)
@@ -58,7 +64,9 @@ class QueueController(
     }
     result.reEmit?.let { record -> journal.listener()?.let { events.settled(record, it) } }
     result.entry?.let { entry ->
-      scheduleRun(entry)
+      // New work starts a run, which shows the notification and may take
+      // foreground mode. A same-id enqueue of a queued entry is a repair.
+      scheduleRun(entry, probe = if (result.repair) NetworkProbe() else null)
       events.state(entry.toRow())
     }
     return p.id
@@ -100,7 +108,7 @@ class QueueController(
       EnqueueRules.Action.Resume -> {
         val next = EnqueueRules.resumed(existing!!, p, s.isPaused(p.key), s.headerGeneration, now)
         saveOrThrow(next)
-        Enqueued(next, null)
+        Enqueued(next, null, repair = existing.state == EntryState.QUEUED)
       }
       EnqueueRules.Action.Create -> {
         val staged = preStaged(1) ?: stageOrThrow(p.descriptor, dir, 1)
@@ -237,7 +245,8 @@ class QueueController(
     }
     result.changed.forEach { events.state(it.toRow()) }
     // Every queued entry, not only the resumed ones: a run is idempotent.
-    store.all().forEach { scheduleRun(it) }
+    val probe = NetworkProbe()
+    store.all().forEach { scheduleRun(it, probe = probe) }
     result.throwIfFailed("resume")
   }
 
@@ -251,14 +260,10 @@ class QueueController(
    * failure, is scheduled only when no row of it can start now
    * ([WorkScheduler.rowSummary], one query): that is not a retry, it only
    * makes sure a row exists, and a row WorkManager holds back after a stop
-   * is replaced ([WorkScheduler.schedule]). An entry that sleeps on a wake
-   * that waits for the network gets a main row only when the network fits
-   * now ([networkFits]); offline, the wake stays its only row, so a
-   * foreground does not start a run that polls and hands over again. A
-   * queued entry whose wait stays and that has no delayed wake row gets its
-   * wake again (KEEP), also when it has a main row: WorkManager may hold
-   * that row back for hours. Running, paused, parked and settled entries
-   * are left alone. A queued entry sends nothing, and the
+   * is replaced ([WorkScheduler.schedule]). A queued entry whose wait stays
+   * and that has no delayed wake row gets its wake again (KEEP), also when
+   * it has a main row: WorkManager may hold that row back for hours. Running, paused, parked and
+   * settled entries are left alone. A queued entry sends nothing, and the
    * per-id gate holds any new row while a worker of the entry still winds
    * down, so this never starts a second transfer next to one in progress.
    *
@@ -292,29 +297,68 @@ class QueueController(
         }
       }
     }
-    cleared.forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
+    val probe = NetworkProbe()
+    cleared.forEach { e -> runCatching { scheduleRun(e, probe = probe) }.onFailure(::failed) }
     val clearedIds = cleared.map { it.id }.toSet()
     val idle = queued.filter { it.nextAttemptAt == null }
     val waiting = queued.filter { it.nextAttemptAt != null && it.id !in clearedIds }
     if (idle.isNotEmpty() || waiting.isNotEmpty()) {
       val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
-      // An entry that sleeps on a network wake waits for WorkManager while
-      // the network does not fit. When it fits, a main row starts the entry
-      // now too, so a start never depends on WorkManager's constraint
-      // tracking alone. The per-id gate runs the two rows one after the
-      // other, and the second finds the entry no longer queued.
-      idle.filter { rows == null || (it.id !in rows.startable && (it.id !in rows.networkWait || networkFits(it))) }
-        .forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
+      idle.filter { rows == null || it.id !in rows.startable }
+        .forEach { e -> runCatching { scheduleRun(e, probe = probe) }.onFailure(::failed) }
       // A wait that stays needs its wake. KEEP leaves one that exists, so
       // this is at most one enqueue per entry that lacks a wake.
       waiting.filter { rows == null || it.id !in rows.withWake }
-        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false, requiredNetwork(e, settings.load())) }.onFailure(::failed) }
+        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false) }.onFailure(::failed) }
     }
     cleared.forEach { events.state(it.toRow()) }
     first?.let { Diag.error("retryNow: $failures entry saves or WorkManager calls failed; the next app start or foreground tries again", it) }
   }
 
   private fun inScope(e: QueueEntry, keys: List<String>?) = keys == null || e.key in keys
+
+  /**
+   * A doorbell row ran: WorkManager saw a network that fits its rule. Each
+   * queued entry that waits for a network ([requiredNetwork]), has no row
+   * that can start now and no worker, is started when the network fits it
+   * now; for the others the doorbell of their rule is made sure again (a
+   * doorbell that runs this gets one queued behind it). One WorkManager
+   * query, and at most two network checks. Returns false when an entry
+   * save, a WorkManager call or the query failed: the doorbell worker then
+   * returns retry, so its row runs again.
+   */
+  fun answerDoorbell(): Boolean {
+    val now = clock()
+    val s = settings.load()
+    val waiting = store.all().filter { requiredNetwork(it, s, now) != RequiredNetwork.NONE && !isWorkerRunning(it.id) }
+    if (waiting.isEmpty()) return true
+    val rows = runCatching { scheduler.rowSummary() }
+      .onFailure { Diag.error("doorbell: could not read WorkManager; it rings again", it) }
+      .getOrNull() ?: return false
+    val probe = NetworkProbe()
+    var answered = true
+    waiting.filter { it.id !in rows.startable }.forEach { e ->
+      runCatching { scheduleRun(e, probe = probe) }.onFailure {
+        answered = false
+        Diag.error("doorbell: could not schedule '${e.id}'; it rings again", it)
+      }
+    }
+    return answered
+  }
+
+  /**
+   * The network check for one pass, at most once per Wi-Fi rule. A check
+   * that throws reads as no network.
+   */
+  private inner class NetworkProbe {
+    private val answers = mutableMapOf<Boolean, Boolean>()
+
+    /** The doorbells already made sure in this pass. */
+    val ensured = mutableSetOf<RequiredNetwork>()
+
+    fun fits(wifiOnly: Boolean): Boolean =
+      answers.getOrPut(wifiOnly) { runCatching { networkFits(wifiOnly) }.getOrDefault(false) }
+  }
 
   /**
    * Live: journal a 'cancelled' (user) outcome, then forget after its ack.
@@ -418,25 +462,26 @@ class QueueController(
    * [updateHeaders]) never throw for a failed settings write. See
    * [QueueSettingsStore.update].
    *
-   * A change to off runs now every queued entry that follows the setting
-   * and has no wait and no worker: such an entry may sleep on a wake that
-   * waits for Wi-Fi, which no longer fits. That wake is cancelled once the
-   * main row is made. A change to on needs no work: a run that starts on
-   * another network fails the check and hands over with the Wi-Fi rule.
-   * The same value schedules nothing. A failed WorkManager call is logged
-   * and the next entry goes on.
+   * A change to off moves the queued entries that follow the setting from
+   * the Wi-Fi rule to any network (see below). The same value, or a change
+   * to on, schedules nothing.
    */
   fun setWifiOnly(enabled: Boolean) {
     val before = settings.load().wifiOnly
     val after = settings.update { it.copy(wifiOnly = enabled) }.wifiOnly
     if (!before || after) return
+    // Off: the entries that follow the setting now wait for any network.
+    // Each one with no long wait and no worker starts when that fits, else
+    // it waits on the CONNECTED doorbell. A Wi-Fi doorbell left behind
+    // finds nothing to start and ends. On needs no work: a run that starts
+    // on another network fails the check and hands over to the Wi-Fi doorbell.
+    val now = clock()
+    val s = settings.load()
+    val probe = NetworkProbe()
     store.all()
-      .filter {
-        !it.legacy && it.state == EntryState.QUEUED && it.nextAttemptAt == null &&
-          it.descriptor?.wifiOnly == null && !isWorkerRunning(it.id)
-      }
+      .filter { it.descriptor?.wifiOnly == null && requiredNetwork(it, s, now) != RequiredNetwork.NONE && !isWorkerRunning(it.id) }
       .forEach { e ->
-        runCatching { scheduleRun(e, keepNetworkWake = false) }
+        runCatching { scheduleRun(e, probe = probe) }
           .onFailure { Diag.error("setWifiOnly: could not schedule '${e.id}'", it) }
       }
   }
@@ -632,7 +677,8 @@ class QueueController(
     // process left in WorkManager.
     val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
     toForget.forEach { scheduler.cancel(it) }
-    toSchedule.forEach { scheduleRun(it, keepWake = true) }
+    val probe = NetworkProbe()
+    toSchedule.forEach { scheduleRun(it, keepWake = true, probe = probe) }
     // Every start, even an idle one: a v9 leftover count of zero is a value
     // the app reports. It replaces a snapshot JS has not taken yet, so
     // launches with no takeDiagnostics() do not push out real warnings.
@@ -642,7 +688,7 @@ class QueueController(
     val removed = store.removeOrphans(counted.orphanDirs, now)
     Diag.info(
       BootSnapshot.MESSAGE,
-      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed), s.wifiOnly),
+      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed), s),
       replaceUntaken = true,
     )
     changed.forEach { events.state(it.toRow()) }
@@ -662,33 +708,56 @@ class QueueController(
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
    * to the wake; a parked entry gets a wake at its expiry, so it settles
    * 'expired' on time, once that expiry is near (see [EXPIRY_WAKE_HORIZON_MS]).
-   * Any other wake of the entry is stale, so it is cancelled, except a wake
-   * that waits for the network ([keepNetworkWake]): the entry may sleep on
-   * it, and it starts the entry when the network is back.
+   * Any other wake of the entry is stale, so it is cancelled.
+   *
+   * With a [probe] (a repair: the boot sweep, resume(), a return to the
+   * foreground, a same-id enqueue, setWifiOnly(), a doorbell), an entry
+   * whose network does not fit now gets no row: it waits on the doorbell of
+   * its rule, so an offline app start starts no run. When the doorbell
+   * cannot be stored, the entry gets its main row after all: that run waits
+   * for the network and hands over again. Without a probe (new work, new
+   * headers) the run starts in any case. API 29 has no doorbell.
    */
-  private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false, keepNetworkWake: Boolean = true) {
+  private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false, probe: NetworkProbe? = null) {
     val now = clock()
     when (entry.state) {
       EntryState.QUEUED -> {
         val at = entry.nextAttemptAt
         if (at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
-          scheduler.scheduleWake(entry, at, replace = !keepWake, requiredNetwork(entry, settings.load()))
+          scheduler.scheduleWake(entry, at, replace = !keepWake)
+        } else if (probe != null && waitsOnDoorbell(entry, probe, now)) {
+          cancelStaleWake(entry.id)
         } else {
           // The main row first: these are two separate WorkManager calls,
           // and a process death between them must not leave the entry
           // with neither a wake nor a main row.
           scheduler.schedule(entry)
-          cancelStaleWake(entry.id, keepNetworkWake)
+          cancelStaleWake(entry.id)
         }
       }
       EntryState.AWAITING_AUTH ->
         if (expiryWakeIsNear(entry.expiresAt, now)) {
-          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake, requiredNetwork(entry, settings.load()))
+          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
         } else {
           cancelStaleWake(entry.id)
         }
       else -> Unit
     }
+  }
+
+  /**
+   * True when [entry]'s network does not fit now and its doorbell is
+   * stored. False when it fits, on API 29, or when the doorbell failed.
+   */
+  private fun waitsOnDoorbell(entry: QueueEntry, probe: NetworkProbe, now: Long): Boolean {
+    if (!doorbells) return false
+    val network = requiredNetwork(entry, settings.load(), now)
+    if (network == RequiredNetwork.NONE || probe.fits(network == RequiredNetwork.WIFI)) return false
+    if (network in probe.ensured) return true
+    return runCatching { scheduler.ensureDoorbell(network) }
+      .onSuccess { probe.ensured += network }
+      .onFailure { Diag.error("could not store the ${network.name} doorbell for '${entry.id}'; it starts a run instead", it) }
+      .isSuccess
   }
 
   // A running wake is the entry's worker; it finishes its own run.
@@ -697,16 +766,13 @@ class QueueController(
   //
   // The caller's entry can be a stale snapshot: a worker may have released
   // the entry with a long wait and made its wake since. So the stored entry
-  // is read again, and a wake it still needs is kept. A queued entry with no
-  // long wait may sleep on a wake that waits for the network (a run handed
-  // over, or a worker did that since the snapshot): that wake is kept too,
-  // unless [keepNetworkWake] is false.
-  private fun cancelStaleWake(id: String, keepNetworkWake: Boolean = true) {
+  // is read again, and a wake it still needs is kept.
+  private fun cancelStaleWake(id: String) {
     if (isWorkerRunning(id)) return
     val stored = runCatching { store.load(id) }.getOrNull()
     val at = stored?.nextAttemptAt
     if (stored?.state == EntryState.QUEUED && at != null && at - clock() > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) return
-    scheduler.cancelWake(id, keepNetworkWake = keepNetworkWake && stored?.state == EntryState.QUEUED)
+    scheduler.cancelWake(id)
   }
 
   /** The entries [transformAll] saved, and the saves that failed. */

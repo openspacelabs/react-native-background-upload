@@ -41,8 +41,8 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
   var foregroundError: Throwable? = null
   /** What foreground() answers: whether the run holds foreground mode. */
   var foregroundGranted = true
-  /** What networkWakes() answers: false is API 29. */
-  var networkWake = true
+  /** What sdkInt() answers. */
+  var sdk = 35
   /** sleep() also yields, so a sibling part coroutine can run. */
   var yieldOnSleep = false
   /** The wifiOnly value of every connectivity check, in order. */
@@ -72,6 +72,10 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
 
   override fun connectivity(wifiOnly: Boolean): Connectivity {
     wifiChecks += wifiOnly
+    if (connectivityErrors > 0) {
+      connectivityErrors--
+      throw SecurityException("Package android does not belong to 10123")
+    }
     return network.removeFirstOrNull() ?: Connectivity.Ok
   }
 
@@ -80,7 +84,7 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
     return foregroundGranted
   }
 
-  override fun networkWakes() = networkWake
+  override fun sdkInt() = sdk
 
   override fun progressStarted(id: String, total: Long, sent: Long) {
     progress += "start:$total:$sent"
@@ -92,7 +96,13 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
 
   override fun progressEnded(id: String, completed: Boolean) {
     progress += "end:$completed"
+    onProgressEnded()
   }
+
+  var onProgressEnded: () -> Unit = {}
+
+  /** How many of the next connectivity() calls throw, as a ConnectivityManager call can. */
+  var connectivityErrors = 0
 
   override fun attempt(event: AttemptEvent) {
     attempts += event
@@ -397,8 +407,6 @@ class EntryRunTest {
     run()
     assertEquals(EntryState.AWAITING_AUTH, store.load("e1")!!.state)
     assertEquals(listOf("e1" to 90_000L), scheduler.wakes)
-    // The expiry wake settles the entry; that needs no network.
-    assertEquals(listOf(RequiredNetwork.NONE), scheduler.wakeNetworks)
     assertEquals(listOf("error"), host.attempts.map { it.outcome })
     assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
@@ -560,8 +568,6 @@ class EntryRunTest {
     // A fresh wake row, even for a wait a worker could sleep out in place.
     assertEquals(listOf("e1" to host.clock + 4_000), scheduler.wakes)
     assertEquals(listOf(true), scheduler.wakeReplaces)
-    // A backoff wake waits for a network too, so it does not start a run offline.
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
   }
 
   @Test
@@ -592,20 +598,6 @@ class EntryRunTest {
     assertEquals(emptyList<TransferRequest>(), host.requests)
     assertEquals(listOf("e1" to host.clock), scheduler.wakes)
     assertEquals(listOf(true), scheduler.wakeReplaces)
-    // The fresh row waits for the network, so an offline entry does not start, poll and stop again.
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
-  }
-
-  @Test
-  fun `a timeout stop while a Wi-Fi-only entry waits for Wi-Fi wakes it on Wi-Fi`() {
-    controller.setWifiOnly(true)
-    controller.enqueue(parsed())
-    host.stop = StopKind.TIME_LIMIT
-    host.network = ArrayDeque(listOf(Connectivity.NoWifi))
-    host.onSleep = { throw CancellationException("timeout") }
-    assertThrows(CancellationException::class.java) { run() }
-    assertEquals(listOf("e1" to host.clock), scheduler.wakes)
-    assertEquals(listOf(RequiredNetwork.WIFI), scheduler.wakeNetworks)
   }
 
   @Test
@@ -903,10 +895,10 @@ class EntryRunTest {
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
   }
 
-  // MARK: - waiting for the network on a constrained wake
+  // MARK: - waiting for the network on a doorbell
 
   @Test
-  fun `a run with no foreground mode and no network for 60 s goes back to queued and waits on a network wake`() {
+  fun `a run with no foreground mode and no network for 60 s goes back to queued and waits on the network doorbell`() {
     controller.enqueue(parsed())
     host.foregroundGranted = false
     host.network = ArrayDeque(List(7) { Connectivity.NoInternet })
@@ -924,9 +916,9 @@ class EntryRunTest {
     // Seven checks, 10 s apart: 60 s in all.
     assertEquals(7, host.wifiChecks.size)
     assertEquals(EntryRun.HEADLESS_NETWORK_WAIT_MS, host.sleeps.sum())
-    assertEquals(listOf("e1" to host.clock), scheduler.wakes)
-    assertEquals(listOf(true), scheduler.wakeReplaces)
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
+    // No row of its own: the shared doorbell starts it.
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
     assertEquals("state:e1:queued", events.log.last())
     assertEquals("end:false", host.progress.last())
   }
@@ -939,7 +931,7 @@ class EntryRunTest {
     respond(200)
     run()
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
-    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   @Test
@@ -959,7 +951,7 @@ class EntryRunTest {
   }
 
   @Test
-  fun `a Wi-Fi-only entry hands over with the Wi-Fi constraint`() {
+  fun `a Wi-Fi-only entry hands over to the Wi-Fi doorbell`() {
     controller.setWifiOnly(true)
     controller.enqueue(parsed(id = "follow"))
     controller.enqueue(parsed(id = "own", descriptor = desc(dataJson = """{"a":1}""", wifiOnly = true)))
@@ -969,12 +961,34 @@ class EntryRunTest {
     host.network = ArrayDeque(List(7) { Connectivity.NoWifi })
     controller.setWifiOnly(false)
     run("own")
-    assertEquals(listOf(RequiredNetwork.WIFI, RequiredNetwork.WIFI), scheduler.wakeNetworks)
-    assertEquals(EntryState.QUEUED, store.load("own")!!.state)
+    assertEquals(listOf(RequiredNetwork.WIFI, RequiredNetwork.WIFI), scheduler.doorbells)
   }
 
   @Test
-  fun `a run that holds foreground mode keeps the poll for 30 minutes`() {
+  fun `a hand-over uses the Wi-Fi setting at the hand-over, not the one the run read first`() {
+    controller.setWifiOnly(true)
+    controller.enqueue(parsed())
+    host.foregroundGranted = false
+    host.network = ArrayDeque(List(7) { Connectivity.NoWifi })
+    host.onSleep = { if (host.sleeps.size == 6) controller.setWifiOnly(false) }
+    run()
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
+  }
+
+  @Test
+  fun `a run that holds foreground mode on API 35 polls for 30 minutes, then hands over`() {
+    controller.enqueue(parsed())
+    host.foregroundGranted = true
+    host.sdk = 35
+    host.network = ArrayDeque(List(181) { Connectivity.NoInternet })
+    run()
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    assertEquals(EntryRun.FOREGROUND_NETWORK_WAIT_MS, host.sleeps.sum())
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
+  }
+
+  @Test
+  fun `a run that holds foreground mode on API 35 that finds the network within 30 minutes sends`() {
     controller.enqueue(parsed())
     host.foregroundGranted = true
     host.network = ArrayDeque(List(180) { Connectivity.NoInternet })
@@ -982,70 +996,112 @@ class EntryRunTest {
     run()
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
     assertEquals(EntryRun.FOREGROUND_NETWORK_WAIT_MS, host.sleeps.sum())
-    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
   }
 
   @Test
-  fun `a run that holds foreground mode hands over after 30 minutes with no network`() {
+  fun `below API 35 a run that holds foreground mode keeps the poll`() {
     controller.enqueue(parsed())
     host.foregroundGranted = true
-    host.network = ArrayDeque(List(181) { Connectivity.NoInternet })
+    host.sdk = 34
+    host.network = ArrayDeque(List(300) { Connectivity.NoInternet })
     respond(200)
     run()
-    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
-    assertEquals(EntryRun.FOREGROUND_NETWORK_WAIT_MS, host.sleeps.sum())
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
-    assertEquals(emptyList<TransferRequest>(), host.requests)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(3_000_000L, host.sleeps.sum())
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   @Test
   fun `on API 29 a run with no foreground mode keeps the poll`() {
     controller.enqueue(parsed())
     host.foregroundGranted = false
-    host.networkWake = false
+    host.sdk = 29
     host.network = ArrayDeque(List(20) { Connectivity.NoInternet })
     respond(200)
     run()
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
     assertEquals(200_000L, host.sleeps.sum())
-    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   @Test
-  fun `a hand-over whose wake can not be scheduled leaves the entry queued and fails the run, so the worker retries`() {
-    val file = File(tmp.newFolder(), "diagnostics.json")
-    Diag.log = DiagnosticLog(file)
+  fun `a Wi-Fi-only run waits out a process bound to cellular and does not hand over`() {
+    controller.setWifiOnly(true)
+    controller.enqueue(parsed())
+    host.foregroundGranted = false
+    host.network = ArrayDeque(List(20) { Connectivity.BoundElsewhere })
+    respond(200)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(200_000L, host.sleeps.sum())
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
+  }
+
+  @Test
+  fun `a network check that throws reads as no network, so the run waits and sends`() {
+    controller.enqueue(parsed())
+    host.connectivityErrors = 3
+    respond(200)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(1, e.attempts)
+    assertEquals(3 * EntryRun.CONNECTIVITY_POLL_MS, host.sleeps.sum())
+  }
+
+  @Test
+  fun `a hand-over whose doorbell can not be stored leaves the entry queued and fails the run, so the worker retries`() {
     controller.enqueue(parsed())
     host.foregroundGranted = false
     host.network = ArrayDeque(List(7) { Connectivity.NoInternet })
-    scheduler.wakeFailures = 1
+    scheduler.doorbellFailures = 1
     assertThrows(WorkerOps.WakeNotScheduledException::class.java) { run() }
     val e = store.load("e1")!!
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(0, e.attempts)
-    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
   }
 
   @Test
-  fun `a pause while it waits to hand over stops the run with no wake`() {
+  fun `a pause while it waits to hand over stops the run with no doorbell`() {
     controller.enqueue(parsed())
     host.foregroundGranted = false
     host.network = ArrayDeque(List(7) { Connectivity.NoInternet })
     host.onSleep = { if (host.sleeps.size == 5) controller.pause() }
     run()
     assertEquals(EntryState.PAUSED, store.load("e1")!!.state)
-    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   @Test
   fun `the send gate refuses a hand-over while a request is sending, and a send once a hand-over began`() {
     val gate = EntryRun.SendGate()
     gate.beginSend()
-    assertFalse(gate.tryHandOver(RequiredNetwork.WIFI))
+    assertFalse(gate.tryHandOver())
     gate.endSend()
-    assertTrue(gate.tryHandOver(RequiredNetwork.WIFI))
-    val refused = assertThrows(EntryRun.AwaitNetworkException::class.java) { gate.beginSend() }
-    assertEquals(RequiredNetwork.WIFI, refused.network)
+    assertTrue(gate.tryHandOver())
+    assertThrows(EntryRun.AwaitNetworkException::class.java) { gate.beginSend() }
+  }
+
+  @Test
+  fun `a pass after a re-issue starts with a fresh send gate`() {
+    // Pass 1 ends with a 401 that parks; updateHeaders() lands before the
+    // park, so the run goes on (REISSUE). A sibling's hand-over had begun
+    // in pass 1. Pass 2 must still send.
+    controller.enqueue(parsed())
+    val r = EntryRun("e1", store, ops, host)
+    respond(401, 200)
+    var once = false
+    host.onProgressEnded = {
+      if (!once) {
+        once = true
+        assertTrue(r.sends.tryHandOver())
+        controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+      }
+    }
+    runBlocking { r.run() }
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(2, host.requests.size)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   // MARK: - transient rules
@@ -1603,6 +1659,6 @@ class EntryRunTest {
     assertEquals(listOf("completed"), host.attempts.map { it.outcome })
     // Part 1 waited past 60 s while part 0 was sending, then handed over.
     assertTrue(host.sleeps.sum() >= 120_000)
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
   }
 }

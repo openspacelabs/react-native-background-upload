@@ -41,9 +41,9 @@ internal class EntryRun(
 
   /**
    * The run waited long enough for the network and hands the wait to a
-   * WorkManager wake that waits for [network] ([WorkerOps.awaitNetwork]).
+   * doorbell row ([WorkerOps.awaitNetwork]).
    */
-  class AwaitNetworkException(val network: RequiredNetwork) : Exception("waiting for the network")
+  class AwaitNetworkException : Exception("waiting for the network")
 
   /**
    * Keeps a hand-over away from a request on its way. Chunked parts run
@@ -53,12 +53,12 @@ internal class EntryRun(
    */
   class SendGate {
     private var sending = 0
-    private var handOver: RequiredNetwork? = null
+    private var handingOver = false
 
     /** Before the write-ahead of a request. Throws when a hand-over began. */
     @Synchronized
     fun beginSend() {
-      handOver?.let { throw AwaitNetworkException(it) }
+      if (handingOver) throw AwaitNetworkException()
       sending++
     }
 
@@ -69,9 +69,9 @@ internal class EntryRun(
 
     /** True when no request is sending; from then on no request starts. */
     @Synchronized
-    fun tryHandOver(network: RequiredNetwork): Boolean {
+    fun tryHandOver(): Boolean {
       if (sending > 0) return false
-      handOver = network
+      handingOver = true
       return true
     }
   }
@@ -117,16 +117,23 @@ internal class EntryRun(
 
     /**
      * How long a run with no foreground mode waits for the network before it
-     * hands over to a wake that waits for it. JobScheduler counts the wait
+     * hands over to a doorbell. JobScheduler counts the wait
      * against the app's job quota, and Android may stop the job meanwhile.
      */
     const val HEADLESS_NETWORK_WAIT_MS = 60_000L
 
     /**
-     * The same for a run that holds foreground mode. On Android 15 and later
-     * each minute of it uses the dataSync budget of 6 hours in 24.
+     * The same for a run that holds foreground mode, on Android 15 (API 35)
+     * and later only: there each minute of it uses the dataSync budget of 6
+     * hours in 24. Below API 35 such a run polls for as long as it runs.
      */
     const val FOREGROUND_NETWORK_WAIT_MS = 30 * 60_000L
+
+    /** The first API level with a network doorbell. API 29 keeps the poll. */
+    const val DOORBELL_MIN_SDK = 30
+
+    /** The first API level whose dataSync foreground service has a daily budget (Android 15). */
+    const val FOREGROUND_BUDGET_MIN_SDK = 35
 
     /** The poll while a short backoff remainder runs out before the run starts. */
     private const val WAIT_POLL_MS = 10_000L
@@ -150,7 +157,10 @@ internal class EntryRun(
   @Volatile
   private var holdsForeground = false
 
-  private val sends = SendGate()
+  /** New for every pass: a pass that ended in a re-issue does not carry a hand-over into the next. */
+  @Volatile
+  internal var sends = SendGate()
+    private set
 
   /** A cancel reached a request after its write-ahead. Chunked parts set it from their own coroutines. */
   @Volatile
@@ -184,6 +194,7 @@ internal class EntryRun(
       try {
         // A part cancelled by a sibling's park in the last pass does not count.
         stopCutRequest = false
+        sends = SendGate()
         if (!first) current = ops.latest(entryId, generation)
         first = false
         holdsForeground = host.foreground(current) || holdsForeground
@@ -210,10 +221,10 @@ internal class EntryRun(
         endProgress(completed = false)
         return
       } catch (wait: AwaitNetworkException) {
-        // No request is on its way (SendGate). A wake that fails to enqueue
-        // throws, and the worker returns retry.
+        // No request is on its way (SendGate). A doorbell that could not be
+        // stored throws, and the worker returns retry.
         endProgress(completed = false)
-        ops.awaitNetwork(entryId, generation, wait.network)
+        ops.awaitNetwork(entryId, generation)
         return
       } catch (error: CancellationException) {
         // A system stop moves a running entry back to queued. A pause or a
@@ -358,31 +369,41 @@ internal class EntryRun(
    * else the queue's setting. Re-reads the settings and the entry at every
    * poll, so a setWifiOnly() toggle reaches an entry that follows it.
    *
-   * On API 30 and later the run does not poll without end. After
-   * [HEADLESS_NETWORK_WAIT_MS] with no foreground mode, or
-   * [FOREGROUND_NETWORK_WAIT_MS] with it, it throws [AwaitNetworkException]
-   * and the entry sleeps on a wake that WorkManager starts once the network
-   * is up. It hands over only while no request of the run is sending
-   * ([SendGate]). API 29 keeps the poll: there WorkManager registers one
-   * network callback per constrained row.
+   * On API 30 and later the run does not poll without end. With no
+   * foreground mode it waits [HEADLESS_NETWORK_WAIT_MS]; with foreground
+   * mode on API 35 and later [FOREGROUND_NETWORK_WAIT_MS]. Then it throws
+   * [AwaitNetworkException]: the entry goes back to queued and a doorbell
+   * starts it once the network is up. Below API 35 a run with foreground
+   * mode polls as before. It hands over only while no request of the run is
+   * sending ([SendGate]), and only when the default network itself fails
+   * the rule: while the app binds the process to another network
+   * ([Connectivity.BoundElsewhere]) the run keeps waiting, because the
+   * doorbell would ring at once. API 29 keeps the poll.
+   *
+   * A check that throws reads as no network, so the run waits.
    */
   suspend fun waitForNetwork() {
     val since = host.now()
+    val sdk = host.sdkInt()
     while (true) {
       val s = ops.settings()
       val entry = ops.latest(entryId, generation)
       if (s.isPaused(entry.key)) throw PausedException()
       if (RetryClassifier.isExpired(host.now(), entry.expiresAt)) throw ExpiredException()
       val wifiOnly = s.wifiOnlyFor(entry)
-      if (host.connectivity(wifiOnly) == Connectivity.Ok) return
-      val limit = if (holdsForeground) FOREGROUND_NETWORK_WAIT_MS else HEADLESS_NETWORK_WAIT_MS
-      if (host.networkWakes() && host.now() - since >= limit) {
-        val network = if (wifiOnly) RequiredNetwork.WIFI else RequiredNetwork.CONNECTED
-        if (sends.tryHandOver(network)) throw AwaitNetworkException(network)
+      val network = safeConnectivity(wifiOnly) { host.connectivity(wifiOnly) }
+      if (network == Connectivity.Ok) return
+      val limit = when {
+        sdk < DOORBELL_MIN_SDK || network == Connectivity.BoundElsewhere -> null
+        !holdsForeground -> HEADLESS_NETWORK_WAIT_MS
+        sdk >= FOREGROUND_BUDGET_MIN_SDK -> FOREGROUND_NETWORK_WAIT_MS
+        else -> null
       }
+      if (limit != null && host.now() - since >= limit && sends.tryHandOver()) throw AwaitNetworkException()
       host.sleep(CONNECTIVITY_POLL_MS)
     }
   }
+
 
   fun policy(entry: QueueEntry) =
     RetryClassifier.policy(ops.settings().retry, entry.descriptor?.retry)

@@ -824,10 +824,17 @@ class QueueControllerTest {
     assertTrue(QueueSettingsStore(file).load().wifiOnly)
   }
 
+  /** The controller with a network check that answers [fits], on an API level with doorbells or not. */
+  private fun withNetwork(fits: Boolean, doorbells: Boolean = true) =
+    QueueController(store, journal, settings, events, scheduler, { it in running }, { now }, { fits }, doorbells)
+
   @Test
-  fun `setWifiOnly(false) runs the queued entries that follow the setting`() {
-    controller.setWifiOnly(true)
+  fun `setWifiOnly(false) starts the queued entries that follow the setting when the network fits`() {
+    val c = withNetwork(fits = true)
+    c.setWifiOnly(true)
     store.save(entry(id = "follow", state = EntryState.QUEUED))
+    // A short wait kept at a hand-over, long over now (probe P1).
+    store.save(entry(id = "stale", state = EntryState.QUEUED, nextAttemptAt = now - 60_000))
     store.save(entry(id = "own", state = EntryState.QUEUED, descriptor = desc(dataJson = """{"a":1}""", wifiOnly = true)))
     store.save(entry(id = "cell", state = EntryState.QUEUED, descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false)))
     store.save(entry(id = "waits", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000).copy(waitCause = WaitCause.RESPONSE, failedAt = now))
@@ -835,23 +842,79 @@ class QueueControllerTest {
     store.save(entry(id = "paused", state = EntryState.PAUSED))
     store.save(entry(id = "running", state = EntryState.RUNNING))
     running += "busy"
-    controller.setWifiOnly(false)
-    assertEquals(listOf("follow"), scheduler.scheduled)
-    // Its Wi-Fi wake no longer fits the setting.
-    assertEquals(listOf("follow"), scheduler.cancelledWakes)
-    assertEquals(listOf(false), scheduler.cancelWakeKeeps)
+    c.setWifiOnly(false)
+    assertEquals(setOf("follow", "stale"), scheduler.scheduled.toSet())
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
     assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
   }
 
   @Test
-  fun `setWifiOnly with the same value schedules nothing, and turning it on schedules nothing`() {
+  fun `setWifiOnly(false) offline moves the entries that follow it to the network doorbell`() {
+    val c = withNetwork(fits = false)
+    c.setWifiOnly(true)
     store.save(entry(id = "follow", state = EntryState.QUEUED))
-    controller.setWifiOnly(false)
-    // A run that starts on cellular fails the check and hands over with the Wi-Fi constraint.
-    controller.setWifiOnly(true)
-    controller.setWifiOnly(true)
+    c.setWifiOnly(false)
     assertEquals(emptyList<String>(), scheduler.scheduled)
-    assertEquals(emptyList<String>(), scheduler.cancelledWakes)
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
+  }
+
+  @Test
+  fun `setWifiOnly with the same value schedules nothing, and turning it on schedules nothing`() {
+    val c = withNetwork(fits = false)
+    store.save(entry(id = "follow", state = EntryState.QUEUED))
+    c.setWifiOnly(false)
+    c.setWifiOnly(true)
+    c.setWifiOnly(true)
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
+  }
+
+  @Test
+  fun `offline, a same-id enqueue of a queued entry rings for it, and a new entry starts a run`() {
+    controller.enqueue(parsed())
+    scheduler.scheduled.clear()
+    val c = withNetwork(fits = false)
+    c.enqueue(parsed())
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.doorbells)
+    // New work starts a run: it shows the notification and may take foreground mode.
+    c.enqueue(parsed(id = "new"))
+    assertEquals(listOf("new"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `on API 29 the repairs start a run offline and make no doorbell`() {
+    val c = withNetwork(fits = false, doorbells = false)
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    c.sweep()
+    c.resume()
+    c.retryNow()
+    assertEquals(listOf("q", "q", "q"), scheduler.scheduled)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
+  }
+
+  @Test
+  fun `a doorbell answer that can not read WorkManager or schedule an entry asks to ring again`() {
+    store.save(entry(id = "q", state = EntryState.QUEUED))
+    val broken = object : WorkScheduler by scheduler {
+      override fun rowSummary(): RowSummary = throw IllegalStateException("no WorkManager")
+    }
+    assertFalse(QueueController(store, journal, settings, events, broken, { false }, { now }).answerDoorbell())
+    val failing = object : WorkScheduler by scheduler {
+      override fun schedule(entry: QueueEntry) = throw IllegalStateException("enqueue failed")
+    }
+    assertFalse(QueueController(store, journal, settings, events, failing, { false }, { now }).answerDoorbell())
+    assertTrue(controller.answerDoorbell())
+    assertEquals(listOf("q"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `a doorbell answer with no entry waiting does nothing`() {
+    store.save(entry(id = "p", state = EntryState.PAUSED))
+    store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
+    assertTrue(withNetwork(fits = false).answerDoorbell())
+    assertEquals(0, scheduler.startableQueries)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
   }
 
   @Test
@@ -1556,24 +1619,25 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `sweep counts the entries by the wake they sleep on, and reports the wifiOnly setting`() {
+  fun `sweep counts the entries by what starts them, and reports the doorbells and the wifiOnly setting`() {
     val file = File(tmp.newFolder(), "diagnostics.json")
     Diag.log = DiagnosticLog(file)
     controller.setWifiOnly(true)
     store.save(entry(id = "b", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000).copy(waitCause = WaitCause.RESPONSE, failedAt = now))
-    store.save(entry(id = "n", state = EntryState.QUEUED))
-    store.save(entry(id = "w", state = EntryState.QUEUED))
+    store.save(entry(id = "n", state = EntryState.QUEUED, descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false)))
+    store.save(entry(id = "w1", state = EntryState.QUEUED))
+    store.save(entry(id = "w2", state = EntryState.QUEUED))
     store.save(entry(id = "m", state = EntryState.QUEUED))
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, expiresAt = now + 1_000))
-    scheduler.runs += PendingRun("b", "ENQUEUED", 0, now + 3_600_000, delayed = true, network = RequiredNetwork.CONNECTED)
-    scheduler.runs += PendingRun("n", "ENQUEUED", 0, now - 5_000, delayed = false, network = RequiredNetwork.CONNECTED)
-    scheduler.runs += PendingRun("w", "ENQUEUED", 0, now - 5_000, delayed = false, network = RequiredNetwork.WIFI)
-    // A main-chain row and a parked entry's expiry wake are not waits for a network or a backoff.
+    scheduler.runs += PendingRun("b", "ENQUEUED", 0, now + 3_600_000, delayed = true)
+    // "m" has a main-chain row: it is not waiting for a doorbell.
     scheduler.runs += PendingRun("m", "ENQUEUED", 0, now, delayed = false)
     scheduler.runs += PendingRun("p", "ENQUEUED", 0, now + 1_000, delayed = true)
+    scheduler.runs += PendingRun(null, "ENQUEUED", 0, now, delayed = false, doorbell = RequiredNetwork.WIFI)
     controller.sweep()
     val data = DiagnosticLog(file).drain().single().data!!
-    assertEquals(mapOf("backoff" to 1.0, "network" to 1.0, "wifi" to 1.0), data["entriesByWake"])
+    assertEquals(mapOf("backoff" to 1.0, "network" to 1.0, "wifi" to 2.0), data["entriesByWake"])
+    assertEquals(mapOf("network" to false, "wifi" to true), data["doorbells"])
     assertEquals(true, data["wifiOnly"])
   }
 
@@ -1589,36 +1653,7 @@ class QueueControllerTest {
     assertEquals(false, data["wifiOnly"])
     assertEquals(true, data["runsUnavailable"])
     assertFalse(data.containsKey("entriesByWake"))
-  }
-
-  @Test
-  fun `the wakes the controller makes wait for the network a run needs`() {
-    controller.setWifiOnly(true)
-    // A backoff wait after a server response stays at the boot sweep: its wake waits for any network.
-    store.save(entry(id = "b", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000).copy(waitCause = WaitCause.RESPONSE, failedAt = now))
-    // A parked entry's expiry wake settles it, and needs no network.
-    store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, expiresAt = now + 1_000))
-    controller.sweep()
-    assertEquals(
-      mapOf("b" to RequiredNetwork.CONNECTED, "p" to RequiredNetwork.NONE),
-      scheduler.wakes.map { it.first }.zip(scheduler.wakeNetworks).toMap(),
-    )
-    // A return to the foreground makes a missing backoff wake again, with the same rule.
-    scheduler.wakes.clear()
-    scheduler.wakeNetworks.clear()
-    controller.retryNow()
-    assertEquals(listOf("b" to now + 3_600_000), scheduler.wakes)
-    assertEquals(listOf(RequiredNetwork.CONNECTED), scheduler.wakeNetworks)
-  }
-
-  @Test
-  fun `the sweep, resume and a same-id enqueue keep the network wake of a queued entry with no wait`() {
-    controller.enqueue(parsed())
-    scheduler.cancelWakeKeeps.clear()
-    controller.sweep()
-    controller.resume()
-    controller.enqueue(parsed())
-    assertEquals(listOf(true, true, true), scheduler.cancelWakeKeeps)
+    assertFalse(data.containsKey("doorbells"))
   }
 
   @Test

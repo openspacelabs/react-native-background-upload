@@ -1,5 +1,6 @@
 package ai.openspace.backgroundupload
 
+import android.os.Build
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
@@ -55,7 +56,8 @@ class UploaderModule(context: ReactApplicationContext) :
   private val scheduler = WorkManagerScheduler(context)
   private val controller = QueueController(
     store, journal, settings, EventReporter, scheduler,
-    networkFits = { validateConnectivity(context, settings.load().wifiOnlyFor(it)) == Connectivity.Ok },
+    networkFits = { wifiOnly -> networkFitsNow(context, wifiOnly) },
+    doorbells = Build.VERSION.SDK_INT >= EntryRun.DOORBELL_MIN_SDK,
   )
 
   // Before init: the lifecycle listener it registers can fire at once.

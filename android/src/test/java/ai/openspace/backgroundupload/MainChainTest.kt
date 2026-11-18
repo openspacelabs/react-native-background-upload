@@ -7,7 +7,6 @@ import androidx.work.WorkInfo.State.ENQUEUED
 import androidx.work.WorkInfo.State.RUNNING
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -40,10 +39,10 @@ class MainChainTest {
     val log = mutableListOf<String>()
     var enqueueFails = false
 
-    override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork) {
+    override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
       if (enqueueFails) throw IllegalStateException("the process died before the enqueue")
-      log += "enqueue:$name:$policy" + if (network == RequiredNetwork.NONE) "" else ":$network"
-      work.enqueue(name, policy, entry, delayMs, network)
+      log += "enqueue:$name:$policy"
+      work.enqueue(name, policy, entry, delayMs)
     }
 
     override fun cancel(name: String) {
@@ -61,16 +60,12 @@ class MainChainTest {
     journal = EventJournal(tmp.newFolder("journal"), retryLater = { _, _ -> })
     settings = QueueSettingsStore(File(root, "settings.json"))
     scheduler = RowScheduler(rows) { work.now }
-    controller = QueueController(store, journal, settings, events, scheduler, { it in running }, { work.now }, ::networkFits)
+    controller = QueueController(store, journal, settings, events, scheduler, { it in running }, { work.now })
   }
 
   /** A queued entry that waits after a transport failure 10 minutes ago. */
   private fun transportWait(id: String = "e1", streak: Int = 12) = entry(id = id, state = EntryState.QUEUED, nextAttemptAt = work.now + 60 * minute)
     .copy(backoffStreak = streak, waitCause = WaitCause.NO_RESPONSE, failedAt = work.now - 10 * minute)
-
-  /** The in-worker check, on the fake's network. */
-  private fun networkFits(e: QueueEntry) =
-    work.network.ordinal >= (if (settings.load().wifiOnlyFor(e)) RequiredNetwork.WIFI else RequiredNetwork.CONNECTED).ordinal
 
   /** The rows of [id] WorkManager may start now, main chain and wake. */
   private fun startable(id: String = "e1") = work.startableNow().filter { it.entryId == id }
@@ -223,7 +218,7 @@ class MainChainTest {
     work.add("e1#wake", state = RUNNING, runAttemptCount = 1)
     running += "e1"
     controller.retryNow()
-    scheduler.scheduleWake(store.load("e1")!!, work.now + 60 * minute, replace = true, RequiredNetwork.CONNECTED)
+    scheduler.scheduleWake(store.load("e1")!!, work.now + 60 * minute, replace = true)
     running -= "e1"
     assertEquals(CANCELLED, held.state)
     assertNull(store.load("e1")!!.nextAttemptAt)
@@ -257,158 +252,6 @@ class MainChainTest {
     val row = work.add("e1", runAttemptCount = 8, lastEnqueueTime = startedAt)
     assertEquals(work.nextScheduleAt(row), WorkManagerBackoff.restartBy(startedAt, 7))
     assertTrue(WorkManagerBackoff.restartBy(startedAt, 4) < startedAt + 10 * minute)
-  }
-
-  // MARK: - an offline entry sleeps on a network wake
-
-  /**
-   * A run of e1 under [rowName] waited for [network] and handed over: the
-   * entry is queued, the wake waits for the network, and the run's own row
-   * ends (a REPLACE of the wake name cancels a wake row that runs).
-   */
-  private fun handedOver(rowName: String = "e1", network: RequiredNetwork = RequiredNetwork.CONNECTED) {
-    store.save(entry(state = EntryState.RUNNING))
-    val own = work.add(rowName, state = RUNNING, runAttemptCount = 1)
-    running += "e1"
-    val ops = WorkerOps(store, journal, settings, events, scheduler) { work.now }
-    assertTrue(ops.awaitNetwork("e1", 1, network))
-    running -= "e1"
-    if (own.state == RUNNING) own.state = androidx.work.WorkInfo.State.SUCCEEDED
-    rows.log.clear()
-  }
-
-  private fun openRows() = work.rows.filter { !it.state.isFinished }
-
-  @Test
-  fun `a constrained row reports its enqueue time as the next schedule time, and starts only when its network is up`() {
-    val row = work.add("e1#wake", network = RequiredNetwork.WIFI)
-    assertEquals(work.now, work.nextScheduleAt(row))
-    work.network = RequiredNetwork.NONE
-    assertEquals(emptyList<FakeWorkManager.Row>(), work.startableNow())
-    work.network = RequiredNetwork.CONNECTED
-    assertEquals(emptyList<FakeWorkManager.Row>(), work.startableNow())
-    work.network = RequiredNetwork.WIFI
-    assertEquals(listOf(row), work.startableNow())
-  }
-
-  @Test
-  fun `a hand-over leaves one row, a wake that waits for the network`() {
-    work.network = RequiredNetwork.NONE
-    handedOver()
-    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
-    val wake = openRows().single()
-    assertEquals("e1#wake", wake.name)
-    assertEquals(RequiredNetwork.CONNECTED, wake.network)
-    assertEquals(0L, wake.initialDelay)
-    assertEquals(emptyList<FakeWorkManager.Row>(), startable())
-    // The network comes back: WorkManager starts the wake.
-    work.network = RequiredNetwork.CONNECTED
-    assertEquals(listOf(wake), startable())
-  }
-
-  @Test
-  fun `a hand-over from a run under the wake name replaces that wake`() {
-    work.network = RequiredNetwork.NONE
-    handedOver(rowName = "e1#wake", network = RequiredNetwork.WIFI)
-    assertEquals(listOf(CANCELLED, ENQUEUED), work.rows.map { it.state })
-    assertEquals(RequiredNetwork.WIFI, openRows().single().network)
-  }
-
-  @Test
-  fun `a return to the foreground while offline adds no row next to a network wake`() {
-    work.network = RequiredNetwork.NONE
-    handedOver()
-    controller.retryNow()
-    controller.retryNow()
-    assertEquals(emptyList<String>(), rows.log)
-    assertEquals(listOf("e1#wake"), openRows().map { it.name })
-  }
-
-  @Test
-  fun `opening the app with a network starts an entry on a network wake, also when WorkManager has not started the wake`() {
-    work.network = RequiredNetwork.NONE
-    handedOver()
-    work.network = RequiredNetwork.CONNECTED
-    controller.retryNow()
-    // A main row starts now; the wake stays. The per-id gate runs them one after the other.
-    assertEquals(listOf("enqueue:e1:APPEND_OR_REPLACE"), rows.log)
-    assertEquals(listOf("e1#wake", "e1"), startable().map { it.name })
-    // The next foreground finds a row that starts now and adds nothing.
-    rows.log.clear()
-    controller.retryNow()
-    assertEquals(emptyList<String>(), rows.log)
-  }
-
-  @Test
-  fun `a return to the foreground on cellular adds no row next to a Wi-Fi wake`() {
-    controller.setWifiOnly(true)
-    work.network = RequiredNetwork.NONE
-    handedOver(network = RequiredNetwork.WIFI)
-    work.network = RequiredNetwork.CONNECTED
-    controller.retryNow()
-    assertEquals(emptyList<String>(), rows.log)
-    assertEquals(emptyList<FakeWorkManager.Row>(), startable())
-  }
-
-  @Test
-  fun `rowSummary lists a network wake as the entry's wake and as a network wait, not as a row that starts now`() {
-    work.network = RequiredNetwork.NONE
-    work.add("n#wake", network = RequiredNetwork.CONNECTED)
-    work.add("w#wake", network = RequiredNetwork.WIFI)
-    work.add("b#wake", initialDelay = minute, network = RequiredNetwork.CONNECTED)
-    val summary = scheduler.rowSummary()
-    assertEquals(emptySet<String>(), summary.startable)
-    assertEquals(setOf("n", "w", "b"), summary.withWake)
-    assertEquals(setOf("n", "w"), summary.networkWait)
-  }
-
-  @Test
-  fun `a waiting entry with a short wait and a network wake gets no second wake`() {
-    work.network = RequiredNetwork.NONE
-    handedOver()
-    // A chunked sibling's short backoff was still pending at the hand-over.
-    store.save(store.load("e1")!!.copy(nextAttemptAt = work.now + 20_000, waitCause = WaitCause.RESPONSE, failedAt = work.now))
-    controller.retryNow()
-    assertEquals(listOf("e1#wake"), openRows().map { it.name })
-  }
-
-  @Test
-  fun `the boot sweep adds a main row for an entry on a network wake and keeps the wake`() {
-    // The sweep is the repair path: a main row runs whatever WorkManager's constraint tracking does.
-    work.network = RequiredNetwork.NONE
-    handedOver()
-    controller.sweep()
-    assertEquals(listOf("enqueue:e1:APPEND_OR_REPLACE"), rows.log)
-    assertEquals(listOf("e1#wake", "e1"), openRows().map { it.name })
-  }
-
-  @Test
-  fun `setWifiOnly(false) starts an entry on a Wi-Fi wake with a main row and cancels the Wi-Fi wake`() {
-    controller.setWifiOnly(true)
-    work.network = RequiredNetwork.CONNECTED
-    handedOver(network = RequiredNetwork.WIFI)
-    assertEquals(emptyList<FakeWorkManager.Row>(), startable())
-    controller.setWifiOnly(false)
-    assertEquals(listOf("enqueue:e1:APPEND_OR_REPLACE", "cancel:e1#wake"), rows.log)
-    assertEquals(listOf("e1"), startable().map { it.name })
-  }
-
-  @Test
-  fun `a process death between the hand-over save and the wake enqueue leaves the run's own row to start again`() {
-    work.network = RequiredNetwork.NONE
-    store.save(entry(state = EntryState.RUNNING))
-    val own = work.add("e1", state = RUNNING, runAttemptCount = 1, lastEnqueueTime = work.now - 10 * minute)
-    val ops = WorkerOps(store, journal, settings, events, scheduler) { work.now }
-    rows.enqueueFails = true
-    assertThrows(WorkerOps.WakeNotScheduledException::class.java) { ops.awaitNetwork("e1", 1, RequiredNetwork.CONNECTED) }
-    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
-    // The process dies. At the next start WorkManager sets the RUNNING row back to ENQUEUED (ForceStopRunnable).
-    own.state = ENQUEUED
-    rows.enqueueFails = false
-    controller.retryNow()
-    assertEquals(listOf(own), work.rows.filter { !it.state.isFinished })
-    // It has no constraint, so it starts now, waits for the network and hands over again.
-    assertEquals(listOf(own), startable())
   }
 
   // MARK: - order, and cost
@@ -459,7 +302,7 @@ class MainChainTest {
   fun `a return to the foreground makes the wake again for a wait that stays and has no row`() {
     store.save(transportWait().copy(waitCause = WaitCause.RESPONSE))
     controller.retryNow()
-    assertEquals(listOf("enqueue:e1#wake:KEEP:CONNECTED"), rows.log)
+    assertEquals(listOf("enqueue:e1#wake:KEEP"), rows.log)
     assertEquals(listOf("e1#wake"), work.rows.filter { !it.state.isFinished }.map { it.name })
     // With a wake there, KEEP adds nothing.
     controller.retryNow()
@@ -474,7 +317,7 @@ class MainChainTest {
     store.save(transportWait(streak = 9).copy(waitCause = WaitCause.RESPONSE, nextAttemptAt = work.now + 10 * minute))
     work.add("e1", runAttemptCount = 10, lastEnqueueTime = work.now - minute)
     controller.retryNow()
-    assertEquals(listOf("enqueue:e1#wake:KEEP:CONNECTED"), rows.log)
+    assertEquals(listOf("enqueue:e1#wake:KEEP"), rows.log)
     val wake = work.rows.single { it.name == "e1#wake" }
     assertEquals(work.now + 10 * minute, work.nextScheduleAt(wake))
   }
@@ -498,8 +341,8 @@ class MainChainTest {
         return work.library(states)
       }
 
-      override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork) {
-        rows.enqueue(name, policy, entry, delayMs, network)
+      override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+        rows.enqueue(name, policy, entry, delayMs)
         if (name == "e1") {
           val row = work.rows.last()
           row.state = RUNNING
