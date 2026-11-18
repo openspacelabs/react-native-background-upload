@@ -9,6 +9,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -1701,7 +1702,9 @@ class EntryRunTest {
     // Part 0 finds the network (before and in its slot) and sends; part 1 then finds none.
     host.network = ArrayDeque(listOf(Connectivity.Ok, Connectivity.Ok) + List(30) { Connectivity.NoInternet })
     val answer = CompletableDeferred<UploadResponse>()
-    host.handler = { _, _ -> answer.await() }
+    // Bounded: if a second part were let through to send (no network check
+    // in its slot), it would wait on this answer for ever. It fails in 5 s.
+    host.handler = { _, _ -> withTimeout(5_000) { answer.await() } }
     val start = host.clock
     host.onSleep = { if (host.clock - start >= 120_000 && !answer.isCompleted) answer.complete(UploadResponse(200, "", mapOf())) }
     run()
