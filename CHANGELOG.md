@@ -207,8 +207,13 @@ still writes its boot record. Then the library itself runs a repair on its
 queue thread, 30 s later at first, and later each time it fails again (up
 to 5 minutes): it starts every queued entry that has no row that can start
 now (its main row when the network fits, else its doorbell) and makes the
-wakes that are missing. No app call is needed. A doorbell ring that meets
-a timeout stops, writes one record and rings again later.
+wakes that are missing. No app call is needed while the process lives:
+the repair timer is in memory, so if the process ends first, the next app
+start (the boot sweep) or a doorbell ring starts the entry. While that
+repair is pending, a new pass makes no WorkManager call and leaves its
+entries to the repair, so each `mutate()` does not wait 10 s again. A
+doorbell ring that meets a timeout stops, writes one record and rings
+again later.
 
 ## 11.3.0
 

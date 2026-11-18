@@ -47,6 +47,16 @@ class QueueController(
   @Volatile
   private var repairDelayMs = REPAIR_FIRST_MS
 
+  /**
+   * The last WorkManager call of a pass timed out, and no pass has
+   * scheduled since. While a repair is also pending, a new pass makes no
+   * WorkManager call: the pending repair has not read the store yet (its
+   * task clears [repairPending] first), so it finds the entries this pass
+   * saved. A repair that schedules with no failure clears it.
+   */
+  @Volatile
+  private var workManagerTimedOut = false
+
   // MARK: - enqueue
 
   /** [repair]: the entry was queued already (a same-id enqueue of the same body). */
@@ -326,7 +336,7 @@ class QueueController(
     val idle = queued.filter { !longWait(it) && it.id !in clearedIds }
     val waiting = queued.filter { longWait(it) && it.id !in clearedIds }
     if (idle.isNotEmpty() || waiting.isNotEmpty()) {
-      val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
+      val rows = if (pass.isStopped) null else runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
       idle.filter { rows == null || it.id !in rows.startable }
         .forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
       // A wait that stays needs its wake. KEEP leaves one that exists, so
@@ -715,10 +725,22 @@ class QueueController(
     }
     // Read before the cleanup below changes it: this is what an earlier
     // process left in WorkManager.
-    val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
+    // A timeout here stops the pass's scheduling too, so the sweep waits
+    // for WorkManager once, not twice.
+    val pass = SchedulePass("boot sweep")
+    val runs = if (pass.isStopped) {
+      null
+    } else {
+      try {
+        scheduler.libraryRuns()
+      } catch (error: Exception) {
+        // Any other failure only leaves the record without its run counts, as before.
+        if (isTimeout(error)) pass.failed(error)
+        null
+      }
+    }
     toForget.forEach { scheduler.cancel(it) }
     val probe = NetworkProbe()
-    val pass = SchedulePass("boot sweep")
     toSchedule.forEach { e -> pass.schedule { scheduleRun(e, keepWake = true, probe = probe) } }
     // Every start, even an idle one: a v9 leftover count of zero is a value
     // the app reports. It replaces a snapshot JS has not taken yet, so
@@ -796,18 +818,30 @@ class QueueController(
    * for the pass, and asks for [repairRows] later, which starts the entries
    * the pass left with no row.
    */
-  private inner class SchedulePass(val what: String) {
+  private inner class SchedulePass(val what: String, isRepair: Boolean = false) {
     private var failures = 0
     private var skipped = 0
     private var first: Throwable? = null
-    private var stopped = false
+
+    /**
+     * True from the start while an earlier timeout is not cleared and its
+     * repair is pending: this pass leaves its entries to that repair.
+     */
+    private val leftToRepair = !isRepair && workManagerTimedOut && repairPending.get()
+    private var stopped = leftToRepair
 
     val anyFailed get() = failures + skipped > 0
+
+    /** No WorkManager call is made in this pass any more. */
+    val isStopped get() = stopped
 
     fun failed(error: Throwable) {
       failures++
       if (first == null) first = error
-      if (isTimeout(error)) stopped = true
+      if (isTimeout(error)) {
+        stopped = true
+        workManagerTimedOut = true
+      }
     }
 
     fun schedule(block: () -> Unit) {
@@ -824,6 +858,11 @@ class QueueController(
 
     fun finish(repair: Boolean = true) {
       if (!anyFailed) return
+      // Left to a pending repair: the timeout is recorded already.
+      if (leftToRepair && failures == 0) {
+        if (repair) requestRepair()
+        return
+      }
       val tail = if (stopped) "; stopped at a WorkManager timeout with $skipped left" else ""
       Diag.error("$what: $failures entry saves or WorkManager calls failed$tail; the queue tries again", first)
       if (repair) requestRepair()
@@ -854,7 +893,7 @@ class QueueController(
   fun repairRows() {
     val now = clock()
     val entries = store.all().filter { !it.legacy && (it.state == EntryState.QUEUED || it.state == EntryState.AWAITING_AUTH) }
-    val pass = SchedulePass("repair")
+    val pass = SchedulePass("repair", isRepair = true)
     if (entries.isNotEmpty()) {
       val rows = try {
         scheduler.rowSummary()
@@ -876,6 +915,7 @@ class QueueController(
       }
     }
     repairDelayMs = if (pass.anyFailed) minOf(repairDelayMs * 2, REPAIR_MAX_MS) else REPAIR_FIRST_MS
+    if (!pass.anyFailed) workManagerTimedOut = false
     pass.finish()
   }
 

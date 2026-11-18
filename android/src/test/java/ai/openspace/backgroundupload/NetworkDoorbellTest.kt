@@ -393,6 +393,47 @@ class NetworkDoorbellTest {
     assertEquals(emptyList<Pair<Long, () -> Unit>>(), repairs)
   }
 
+  @Test
+  fun `five enqueues while WorkManager does not answer wait for it once, and the repair starts all five`() {
+    val c = controllerWithRepairs()
+    network(RequiredNetwork.CONNECTED)
+    work.unfinishedTimeouts = 1_000
+    work.libraryTimeouts = 1_000
+    for (n in 1..5) assertEquals("q$n", c.enqueue(parsed(id = "q$n")))
+    assertEquals(1, work.timedOutQueries)
+    assertEquals(1, repairs.size)
+    // WorkManager answers again; the pending repair reads every queued entry.
+    work.unfinishedTimeouts = 0
+    work.libraryTimeouts = 0
+    repairs.removeAt(0).second()
+    for (n in 1..5) assertEquals("q$n", 1, startable("q$n").size)
+    // The repair cleared the timeout: the next enqueue schedules at once.
+    c.enqueue(parsed(id = "q6"))
+    assertEquals(1, startable("q6").size)
+    assertEquals(emptyList<Pair<Long, () -> Unit>>(), repairs)
+  }
+
+  @Test
+  fun `the boot sweep waits for a WorkManager that does not answer once, not twice`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    try {
+      val c = controllerWithRepairs()
+      for (n in 1..3) store.save(entry(id = "q$n"))
+      network(RequiredNetwork.CONNECTED)
+      work.unfinishedTimeouts = 1_000
+      work.libraryTimeouts = 1_000
+      c.sweep()
+      assertEquals(1, work.timedOutQueries)
+      val records = DiagnosticLog(file).drain()
+      assertEquals(true, records.single { it.message == BootSnapshot.MESSAGE }.data!!["runsUnavailable"])
+      assertEquals(1, records.count { it.level == DiagnosticLog.ERROR })
+      assertEquals(1, repairs.size)
+    } finally {
+      Diag.log = null
+    }
+  }
+
   // MARK: - the fake follows WorkManager 2.12.0
 
   @Test

@@ -306,7 +306,15 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   /** How many unfinished(name) queries were made. */
   var nameQueries = 0
 
+  /** How many of the next library() queries time out, as a WorkManager that does not answer. They count in [timedOutQueries]. */
+  var libraryTimeouts = 0
+
   override fun library(states: List<WorkInfo.State>): List<WorkRow> {
+    if (libraryTimeouts > 0) {
+      libraryTimeouts--
+      timedOutQueries++
+      throw java.util.concurrent.TimeoutException("WorkManager did not answer")
+    }
     libraryQueries += states
     return rows.filter { it.state in states }.map(::view)
   }
