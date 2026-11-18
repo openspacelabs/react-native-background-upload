@@ -221,8 +221,8 @@ at the next run, after a growing backoff. A body that needs more than
 accepted parts are kept across runs. iOS has no equal limit.
 
 **No network.** On API 30 and later a run that finds no usable network
-checks every 10 s for at most 60 s; with foreground mode, on API 35 and
-later, for at most 30 minutes. Then the entry goes back to `queued` with no
+checks every 10 s for at most 60 s; with foreground mode, in an app that
+targets API 35 on Android 15 and later, for at most 30 minutes. Then the entry goes back to `queued` with no
 row of its own and waits on a doorbell: one WorkManager row for the whole
 queue that waits for a validated network, and one that waits for a
 validated Wi-Fi network. When Android starts a doorbell, it starts the
@@ -231,8 +231,9 @@ that sends has a network rule. The app's start, `resume()` and return to
 the foreground also start a waiting entry when its network fits, and
 otherwise make sure its doorbell exists. This is not a failed attempt and
 adds no backoff. A Wi-Fi-only upload also waits while the app binds its
-process to a network that is not Wi-Fi. API 29, and a foreground run below
-API 35, keep the 10 s check for as long as the run lasts. A run that a
+process to a network that is not Wi-Fi, and every attempt checks the
+network again once it has a transmit slot. API 29, and any other
+foreground run, keep the 10 s check for as long as the run lasts. A run that a
 doorbell starts in the background cannot take foreground mode on API 31
 and later, so the headless time limit above applies to it.
 
@@ -796,7 +797,10 @@ many queued or running entries had no run at all. `entriesByWake`
 (`{ backoff, network, wifi }`) counts the queued entries by what starts
 them: a backoff wake, the network doorbell, or the Wi-Fi doorbell.
 `doorbells` (`{ network, wifi }`) says whether each doorbell row exists.
-Both are left out when WorkManager could not be read. `wifiOnly` is the
+Both describe the state before the boot sweep changed it, and are left out
+when WorkManager could not be read. `entriesWithoutRun` also counts the
+entries that wait for a doorbell, so by itself it does not mean an entry
+is stuck. `wifiOnly` is the
 queue's Wi-Fi setting. Together they tell "waits for the network or for
 Wi-Fi" from "waits for a backoff".
 

@@ -128,13 +128,34 @@ Before, the job used the app's job quota while it waited (in the `rare`
 standby bucket, 10 minutes in 24 hours) and Android stopped it at its time
 limit. Android 10 (API 29) keeps the poll and has no doorbell.
 
-On Android 15 and later (API 35), a run that holds foreground mode polls
-for at most 30 minutes, then hands over the same way: each minute of it
-uses the `dataSync` budget of 6 hours in 24. Below API 35 it polls as
-before. Known limit: on API 31 and later a run that a doorbell starts in
-the background cannot take foreground mode, so a single body (`data`,
-`form`, `file`) that needs more than the 10-minute job limit cannot finish
-until the app is opened. Use `parts` for large bodies.
+In an app that targets API 35, on Android 15 and later, a run that holds
+foreground mode polls for at most 30 minutes, then hands over the same
+way: Android documents the `dataSync` limit of 6 hours in 24 for apps that
+target Android 15, and each minute of the poll uses it. In other apps, and
+below Android 15, such a run polls as before.
+
+A doorbell whose network WorkManager sees, but the library's check does
+not, queues the next doorbell with a 30 s delay, so it rings at most once
+every 30 s. Each attempt now checks the network again once it has a
+transmit slot, just before it is written ahead. When the check fails, the
+request leaves the slot with no attempt counted and waits for the network
+again. Before, a Wi-Fi-only request that waited for a slot could go out
+over another network.
+
+Known limits:
+
+- An app start with no network starts no run, so no "waiting for the
+  network" notification shows until a run starts.
+- On API 31 and later a run that a doorbell starts in the background
+  cannot take foreground mode, so a single body (`data`, `form`, `file`)
+  that needs more than the 10-minute job limit cannot finish until the app
+  is opened. Use `parts` for large bodies.
+- WorkManager hands JobScheduler at most 20 rows, the oldest first. With
+  20 or more older sleeping rows (backoff or expiry wakes), the doorbell is
+  not handed to JobScheduler until some of them have run, while the app
+  process is not alive. That wait is bounded by the backoff maximum and
+  the 24-hour expiry-wake horizon. The app's start, `resume()` and return
+  to the foreground start the entry sooner when its network fits.
 
 **Behavior change:** on Android 11 and later, the boot sweep, `resume()`,
 a return to the foreground, a same-id `mutate()` of a queued entry and
@@ -149,8 +170,8 @@ returns, or at the next start, resume or foreground with a network.
 
 Android: `setWifiOnly(false)` now moves the queued entries that follow the
 setting from the Wi-Fi rule to any network: each one with no long backoff
-wait and no worker starts at once when a network fits, else it waits on
-the network doorbell. The same value, or `setWifiOnly(true)`, schedules
+wait starts at once when a network fits, else it waits on the network
+doorbell. The same value, or `setWifiOnly(true)`, schedules
 nothing: a run that starts on another network hands over to the Wi-Fi
 doorbell. A run that hands over uses the setting at that moment.
 
@@ -166,9 +187,12 @@ Android: the boot record (`takeDiagnostics()`, message `boot sweep`) now
 has `wifiOnly`, the queue's setting; `entriesByWake`
 (`{ backoff, network, wifi }`), the queued entries a backoff wake, the
 network doorbell or the Wi-Fi doorbell starts; and `doorbells`
-(`{ network, wifi }`), whether each doorbell row exists. `entriesByWake`
-and `doorbells` are left out when WorkManager could not be read. The
-`Diagnostic` type has the three fields.
+(`{ network, wifi }`), whether each doorbell row exists. Both describe the
+state the start found, before the boot sweep changed it, and are left out
+when WorkManager could not be read. `entriesWithoutRun` now also counts the
+entries that wait for a doorbell, so by itself it no longer means an entry
+is stuck: compare it with `entriesByWake`. The `Diagnostic` type has the
+three new fields.
 
 ## 11.3.0
 
