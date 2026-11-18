@@ -487,11 +487,14 @@ class NetworkDoorbellTest {
   }
 
   @Test
-  fun `the source sets a WorkManager constraint only on the doorbell`() {
+  fun `the source sets a WorkManager constraint only on the doorbell, and awaits its insert`() {
     val source = File("src/main/java/ai/openspace/backgroundupload/Scheduler.kt").readText()
     assertEquals(1, Regex("""\.setConstraints\(""").findAll(source).count())
     val doorbell = source.substringAfter("override fun enqueueDoorbell(").substringBefore("\n  }\n")
     assertTrue(doorbell.contains(".setConstraints("))
+    // The insert is awaited, so one that fails later is seen.
+    assertTrue(doorbell.contains(".enqueue().result"))
+    assertTrue(doorbell.contains(".get(WorkManagerScheduler.DOORBELL_ENQUEUE_TIMEOUT_MS"))
     assertFalse(source.substringAfter("private fun request(").contains(".setConstraints("))
   }
 
