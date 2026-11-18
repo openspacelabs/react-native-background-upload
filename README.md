@@ -220,6 +220,18 @@ at the next run, after a growing backoff. A body that needs more than
 10 minutes headless cannot finish that way. Use `parts` for large bodies:
 accepted parts are kept across runs. iOS has no equal limit.
 
+**No network.** On API 30 and later a run that finds no usable network
+checks every 10 s for at most 60 s, or 30 minutes when it holds foreground
+mode. Then the entry goes back to `queued` and sleeps on a WorkManager row
+that waits for a validated network (a validated Wi-Fi network when Wi-Fi
+only applies). Android starts it when the network is up, within the
+limits of the app's standby bucket and Doze. This is not a failed attempt and adds no backoff. Backoff wakes wait for a
+network too. The boot sweep, `resume()`, and a return to the foreground
+when the network fits, also start the entry from a plain row, so a start
+does not depend on that rule alone. A Wi-Fi-only upload also waits while
+the app binds its process to a network that is not Wi-Fi. API 29 keeps the
+10 s check for as long as the run lasts.
+
 **Backoff and the app.** When the app starts, calls `resume()`, or comes
 to the foreground (every Activity resume, at most once every 30 s), the
 library ends the retry backoff of a queued entry and runs it at once, when
@@ -519,8 +531,9 @@ again.
 The queue's Wi-Fi setting. Persisted natively. Applies to queued and future
 entries whose descriptor does not set `wifiOnly`. An entry that sets it keeps
 its own value. Both are checked before each attempt, so a toggle moves the
-queued entries that follow the setting. A call with the current value
-resolves without a write.
+queued entries that follow the setting. On Android, turning it off also
+starts at once the queued entries that follow it and have no backoff wait.
+A call with the current value resolves without a write.
 
 It does not reject. The new value applies at once, also when the disk is
 full. See [Settings on a full disk](#settings-on-a-full-disk).
@@ -774,7 +787,12 @@ entry that was running when its process died counts as running. It also
 describes every unfinished WorkManager run the library had before the start
 changed them: the count by state, how many are delayed wakes, how many of
 those are due more than 24 hours out, the highest run attempt count, and how
-many queued or running entries had no run at all.
+many queued or running entries had no run at all. `entriesByWake`
+(`{ backoff, network, wifi }`) counts the queued entries by the wake they
+sleep on: the end of a backoff wait, any validated network, or Wi-Fi. It
+is left out when WorkManager could not be read. `wifiOnly` is the queue's
+Wi-Fi setting. Together they tell "waits for the network or for Wi-Fi by
+choice" from "waits for a backoff".
 
 On iOS the boot record has only `v9Leftovers` and `orphans`. The other iOS
 records are the warnings of the count and of the orphan cleanup, and a

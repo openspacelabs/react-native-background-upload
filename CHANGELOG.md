@@ -108,6 +108,57 @@ their own failures from 0. Before, every part started at the stored
 backoff, so one failed part after a long backoff sent the whole entry back
 for the next, longer wait.
 
+**Behavior change:** on Android 11 and later (API 30), an upload that finds
+no usable network no longer polls inside a running job until the network
+returns. A run with no foreground mode checks every 10 s for at most
+60 s. Then the entry goes back to `queued` and sleeps on a WorkManager
+wake row that waits for a validated network, or a validated Wi-Fi network
+when Wi-Fi only applies to it. Android starts that row when the network is
+up. This is not a failure: `attempts`, the backoff step and the last
+failure's cause stay as they were, and the row shows no `nextAttemptAt`. A
+run that holds foreground mode polls for at most 30 minutes, then hands
+over the same way, because on Android 15 and later each minute of it uses
+the `dataSync` budget of 6 hours in 24. A run hands over only while none
+of its requests is on its way: a chunked part that waits for the network
+waits for a sibling part to finish sending, and once it hands over, no
+part starts a request. Before, the job used the app's job quota while it
+waited, Android stopped it at its time limit, and in the `rare` standby
+bucket it could wait without a network for the whole run. Android 10 (API
+29) keeps the poll, and its wake rows have no network rule, as before:
+there WorkManager registers one network callback per constrained row.
+
+Android: backoff wakes (API 30 and later) now also wait for a validated
+network, so a wake does not start a run offline. A wake after a time-limit
+stop waits for the network the entry needs. A parked entry's expiry wake
+has no network rule. Main-chain rows still have none, and every run still
+checks the network itself before each attempt. One effect: an entry whose
+`expiresAt` passes while it sleeps on such a wake settles `expired` when
+the network returns or the app starts, not at that time.
+
+Android: `setWifiOnly(false)` now runs at once each queued entry that
+follows the setting and has no wait and no worker, and cancels its
+Wi-Fi wake. The same value schedules nothing, and `setWifiOnly(true)`
+schedules nothing: a run that starts on another network hands over with
+the Wi-Fi rule.
+
+Android: an entry that sleeps on a network wake keeps it through the boot
+sweep, `resume()` and a same-id `mutate()`. The boot sweep and `resume()`
+still add a main row too, so a start never depends on WorkManager's
+constraint tracking alone; offline, that row waits up to 60 s and hands
+over again. A return to the foreground adds a main row only when the
+network fits the entry now, so it does not start a run offline.
+
+Android: a Wi-Fi-only upload now also waits while the app binds its
+process to a network that is not Wi-Fi (`bindProcessToNetwork`). Its
+sockets would use that network. The network check reads the system
+default network, which a bind does not change.
+
+Android: the boot record (`takeDiagnostics()`, message `boot sweep`) now
+has `wifiOnly`, the queue's setting, and `entriesByWake`
+(`{ backoff, network, wifi }`): the queued entries by the wake row they
+sleep on. `entriesByWake` is left out when WorkManager could not be read.
+The `Diagnostic` type has both fields.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

@@ -2,6 +2,7 @@
 // nothing here runs. Each @ts-expect-error line fails the build when the
 // error it expects goes away.
 import type {
+  BootWakeCounts,
   Diagnostic,
   Meta,
   OutcomeError,
@@ -348,6 +349,39 @@ if (orphaned) {
   expectType<number>(orphaned.removedDirs);
   expectType<number>(orphaned.removedBytes);
 }
+const wakes = record.data?.entriesByWake;
+assertEqual<typeof wakes, BootWakeCounts | undefined>(true);
+if (wakes) {
+  expectType<number>(wakes.backoff);
+  expectType<number>(wakes.network);
+  expectType<number>(wakes.wifi);
+}
+const wifiOnlySetting = record.data?.wifiOnly;
+assertEqual<typeof wifiOnlySetting, boolean | undefined>(true);
+expectType<boolean | undefined>(wifiOnlySetting);
+const androidBoot: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  data: { wifiOnly: true, entriesByWake: { backoff: 1, network: 2, wifi: 0 } },
+};
+expectType<Diagnostic>(androidBoot);
+const wakesMissingWifi: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error every wake count is required
+  data: { entriesByWake: { backoff: 1, network: 2 } },
+};
+expectType<Diagnostic>(wakesMissingWifi);
+const wifiOnlyText: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error wifiOnly is a boolean
+  data: { wifiOnly: 'yes' },
+};
+expectType<Diagnostic>(wifiOnlyText);
 assertEqual<NonNullable<typeof record.data>['entries'], unknown>(true);
 const zero: Diagnostic = {
   at: 1,
