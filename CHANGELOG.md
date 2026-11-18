@@ -60,12 +60,19 @@ would spend a rule's `maxRetries` faster. Before, an entry on a long
 backoff (up to 2 hours) kept its wait when the app opened, and `resume()`
 kept it too. `resume({ keys })` affects those keys only. The entry keeps at
 most 5 backoff steps, so if the request fails again, the next wait is 32
-times `baseMs` (32 s at the default 1 s base), and then it doubles. A paused entry that `resume()` moves back to `queued` also keeps at
-most 5 steps. "A return to the foreground" is every Activity resume, also
-after a permission dialog or a picker, so the library does this at most
-once every 30 s. The app needs no code for this. Entries now save the cause
-and time of their last failure; entries saved by an older version read as
-unknown.
+times `baseMs` (32 s at the default 1 s base), and then it doubles. "A
+return to the foreground" is every Activity resume, also after a
+permission dialog or a picker, so the library does this at most once every
+30 s, measured on a clock that does not change with the wall clock. The
+app needs no code for this. Entries now save the cause and time of their
+last failure; entries saved by an older version read as unknown.
+
+**Behavior change:** on Android, `pause()` now keeps a backoff wait with
+its cause. `resume()` gives the entry back what is left of it, ended only
+by the rule above. Before, `pause()` cleared the wait, so a pause and a
+resume sent the request again at once, also after a server response. A
+paused row still does not show `nextAttemptAt`. A paused entry that
+`resume()` moves back to `queued` keeps at most 5 backoff steps.
 
 Android: the boot sweep, `resume()`, a return to the foreground,
 `updateHeaders()` and a same-id `mutate()` now replace a WorkManager row
@@ -75,22 +82,28 @@ last failure: it only makes sure a row exists. Before, the library added no
 row while that stopped row waited, and the entry waited for WorkManager's
 own backoff (up to 5 hours). The library replaces the row only when no row
 of the entry's main chain runs, and keeps a row that WorkManager starts
-within 30 s. It makes the new row before it cancels the old wake.
+within 30 s. It makes the new row before it cancels the old wake, and it
+keeps a wake that the stored entry still needs. A return to the foreground
+also makes the wake again (KEEP) for a queued entry whose wait stays and
+that has no WorkManager row at all.
 
-Android: a failure in the connect phase now waits at most 15 minutes. That
-is a failure that proves the request never reached the server:
-`ConnectException`, `UnknownHostException`, `NoRouteToHostException`,
-`PortUnreachableException`, `SSLHandshakeException`,
-`SSLPeerUnverifiedException`. Every attempt starts on a network that
-Android reports as validated. Every other failure, a timeout included,
-keeps the retry policy's `maxMs` (2 hours by default), because the server
-may have the request.
+Android: a call that failed while it connected, with no earlier try inside
+the same call, now waits at most 15 minutes. Such a call sent no request.
+The failures are `ConnectException`, `UnknownHostException`,
+`NoRouteToHostException`, `PortUnreachableException`,
+`SSLHandshakeException` and `SSLPeerUnverifiedException`, with no
+suppressed exception (OkHttp attaches the earlier tries of a call as
+suppressed, and an earlier try may have sent the body). Every attempt
+starts on a network that Android reports as validated. Every other
+failure, a timeout included, keeps the retry policy's `maxMs` (2 hours by
+default), because the server may have the request.
 
-Android: in a chunked entry, the part whose failures set the stored backoff
-goes on from it in the next run, and only that part's acceptance resets it.
-The other parts count their own failures from 0. Before, every part
-started at the stored backoff, so one failed part after a long backoff
-sent the whole entry back for the next, longer wait.
+Android: in a chunked entry, the part that releases a run for a long wait
+takes the stored backoff with its own count. It goes on from it in the
+next run, and only that part's acceptance resets it. The other parts count
+their own failures from 0. Before, every part started at the stored
+backoff, so one failed part after a long backoff sent the whole entry back
+for the next, longer wait.
 
 ## 11.3.0
 
