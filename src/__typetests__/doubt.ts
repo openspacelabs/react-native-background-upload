@@ -114,6 +114,15 @@ client.define({
   request: (_vars: null) => ({ url: 'https://x', data: {} }),
   onBodyUnknown: () => undefined,
 });
+// Also when the definition is built first, where no excess-property check
+// applies: the handler would never run, so it does not compile.
+const builtFirst = {
+  key: 'note.create.raw.built',
+  request: (_vars: null) => ({ url: 'https://x', data: {} }),
+  onBodyUnknown: () => undefined,
+};
+// @ts-expect-error onBodyUnknown needs a response parser
+client.define(builtFirst);
 
 // The fake native can settle the case and set the count.
 const settledUnknown: FakeOutcome = {
