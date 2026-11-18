@@ -86,6 +86,11 @@ internal class FakeHost(var clock: Long = 10_000L) : TransferHost {
 
   override fun sdkInt() = sdk
 
+  /** What targetSdk() answers. */
+  var target = 35
+
+  override fun targetSdk() = target
+
   override fun progressStarted(id: String, total: Long, sent: Long) {
     progress += "start:$total:$sent"
   }
@@ -469,7 +474,8 @@ class EntryRunTest {
     controller.enqueue(parsed(id = "cell", descriptor = desc(dataJson = """{"a":1}""", wifiOnly = false)))
     respond(200)
     run("cell")
-    assertEquals(listOf(false), host.wifiChecks) // its own false beats the queue's true
+    // Before the transmit slot and once more in it: its own false beats the queue's true.
+    assertEquals(listOf(false, false), host.wifiChecks)
 
     host.wifiChecks.clear()
     controller.enqueue(parsed(id = "follow"))
@@ -477,7 +483,7 @@ class EntryRunTest {
     host.onSleep = { controller.setWifiOnly(false) } // a toggle while it waits
     respond(200)
     run("follow")
-    assertEquals(listOf(true, false), host.wifiChecks)
+    assertEquals(listOf(true, false, false), host.wifiChecks)
     assertEquals(EntryState.COMPLETED, store.load("follow")!!.state)
   }
 
@@ -996,6 +1002,53 @@ class EntryRunTest {
     run()
     assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
     assertEquals(EntryRun.FOREGROUND_NETWORK_WAIT_MS, host.sleeps.sum())
+  }
+
+  @Test
+  fun `a run that holds foreground mode on API 35 in an app that targets API 34 keeps the poll`() {
+    // The dataSync time limit applies to apps that target API 35.
+    controller.enqueue(parsed())
+    host.foregroundGranted = true
+    host.sdk = 35
+    host.target = 34
+    host.network = ArrayDeque(List(200) { Connectivity.NoInternet })
+    respond(200)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
+  }
+
+  @Test
+  fun `the network is checked again inside the transmit slot, and a failed check sends nothing and counts nothing`() {
+    controller.setWifiOnly(true)
+    controller.enqueue(parsed())
+    // Before the slot: Wi-Fi. In the slot: cellular only. Then Wi-Fi again.
+    host.network = ArrayDeque(listOf(Connectivity.Ok, Connectivity.NoWifi, Connectivity.NoWifi, Connectivity.Ok, Connectivity.Ok))
+    var attemptsInSlot = mutableListOf<Int>()
+    host.beforeSlot = { attemptsInSlot += store.load("e1")!!.attempts }
+    respond(200)
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(1, e.attempts)
+    assertEquals(1, host.requests.size)
+    assertEquals(5, host.wifiChecks.size)
+    assertEquals(listOf(0, 0), attemptsInSlot) // two slots taken, one attempt counted
+    assertEquals(listOf(EntryRun.CONNECTIVITY_POLL_MS), host.sleeps)
+  }
+
+  @Test
+  fun `a chunked part checks the network again inside the transmit slot`() {
+    controller.setWifiOnly(true)
+    val src = File(tmp.newFolder(), "video.bin").apply { writeBytes(ByteArray(10) { it.toByte() }) }
+    controller.enqueue(parsed(descriptor = desc(url = null, method = "PUT", file = src.path, parts = listOf(part(0, 10)))))
+    host.network = ArrayDeque(listOf(Connectivity.Ok, Connectivity.NoWifi, Connectivity.Ok, Connectivity.Ok))
+    run()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.COMPLETED, e.state)
+    assertEquals(1, e.attempts)
+    assertEquals(1, host.requests.size)
+    assertEquals(4, host.wifiChecks.size)
   }
 
   @Test
@@ -1645,8 +1698,8 @@ class EntryRunTest {
       parts = listOf(part(0, 10), part(10, 20)))))
     host.foregroundGranted = false
     host.yieldOnSleep = true
-    // Part 0 finds the network and sends; part 1 then finds none.
-    host.network = ArrayDeque(listOf(Connectivity.Ok) + List(30) { Connectivity.NoInternet })
+    // Part 0 finds the network (before and in its slot) and sends; part 1 then finds none.
+    host.network = ArrayDeque(listOf(Connectivity.Ok, Connectivity.Ok) + List(30) { Connectivity.NoInternet })
     val answer = CompletableDeferred<UploadResponse>()
     host.handler = { _, _ -> answer.await() }
     val start = host.clock

@@ -841,9 +841,10 @@ class QueueControllerTest {
     store.save(entry(id = "busy", state = EntryState.QUEUED))
     store.save(entry(id = "paused", state = EntryState.PAUSED))
     store.save(entry(id = "running", state = EntryState.RUNNING))
+    // A worker of "busy" may be one that handed over and is leaving: schedule() queues a row behind it.
     running += "busy"
     c.setWifiOnly(false)
-    assertEquals(setOf("follow", "stale"), scheduler.scheduled.toSet())
+    assertEquals(setOf("follow", "stale", "busy"), scheduler.scheduled.toSet())
     assertEquals(emptyList<RequiredNetwork>(), scheduler.doorbells)
     assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
   }
@@ -900,8 +901,9 @@ class QueueControllerTest {
       override fun rowSummary(): RowSummary = throw IllegalStateException("no WorkManager")
     }
     assertFalse(QueueController(store, journal, settings, events, broken, { false }, { now }).answerDoorbell())
+    // The doorbell waits for each main row to be stored.
     val failing = object : WorkScheduler by scheduler {
-      override fun schedule(entry: QueueEntry) = throw IllegalStateException("enqueue failed")
+      override fun scheduleAndWait(entry: QueueEntry) = throw IllegalStateException("insert failed")
     }
     assertFalse(QueueController(store, journal, settings, events, failing, { false }, { now }).answerDoorbell())
     assertTrue(controller.answerDoorbell())

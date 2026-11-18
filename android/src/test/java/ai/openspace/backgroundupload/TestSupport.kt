@@ -130,6 +130,8 @@ internal class FakeScheduler : WorkScheduler {
   val startable = mutableSetOf<String>()
   /** What rowSummary() returns as withWake. */
   val withWake = mutableSetOf<String>()
+  /** What rowSummary() returns as due. */
+  val due = mutableSetOf<String>()
   /** How many rowSummary() calls were made. */
   var startableQueries = 0
 
@@ -154,7 +156,11 @@ internal class FakeScheduler : WorkScheduler {
     cancelledWakes += id
   }
 
-  override fun ensureDoorbell(network: RequiredNetwork) {
+  /** The delayMs of every ensureDoorbell call, in order. */
+  val doorbellDelays = mutableListOf<Long>()
+
+  override fun ensureDoorbell(network: RequiredNetwork, delayMs: Long) {
+    doorbellDelays += delayMs
     if (doorbellFailures > 0) {
       doorbellFailures--
       throw IllegalStateException("insert failed")
@@ -166,7 +172,7 @@ internal class FakeScheduler : WorkScheduler {
 
   override fun rowSummary(): RowSummary {
     startableQueries++
-    return RowSummary(startable.toSet(), withWake.toSet())
+    return RowSummary(startable.toSet(), withWake.toSet(), due.toSet())
   }
 }
 
@@ -287,16 +293,39 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
     return rows.filter { it.state in states }.map(::view)
   }
 
+  /**
+   * How many of the next upload-row inserts fail after the call returned,
+   * as WorkManager's insert on its own thread can: the row never lands, and
+   * only a caller that waits for the result sees it.
+   */
+  var lateInsertFailures = 0
+
+  /** How many doorbell inserts were tried. */
+  var doorbellInserts = 0
+
   override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+    if (lateInsertFailures > 0) {
+      lateInsertFailures--
+      return
+    }
     add(name, policy, entry.id, delayMs, RequiredNetwork.NONE, null)
   }
 
-  override fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork) {
+  override fun enqueueAndWait(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+    if (lateInsertFailures > 0) {
+      lateInsertFailures--
+      throw java.util.concurrent.ExecutionException(IllegalStateException("insert failed"))
+    }
+    add(name, policy, entry.id, delayMs, RequiredNetwork.NONE, null)
+  }
+
+  override fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork, delayMs: Long) {
+    doorbellInserts++
     if (doorbellInsertFailures > 0) {
       doorbellInsertFailures--
       throw java.util.concurrent.ExecutionException(IllegalStateException("insert failed"))
     }
-    add(name, policy, null, 0L, network, network)
+    add(name, policy, null, delayMs, network, network)
   }
 
   private fun add(name: String, policy: ExistingWorkPolicy, entryId: String?, delayMs: Long, network: RequiredNetwork, doorbell: RequiredNetwork?) {
@@ -328,6 +357,23 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   fun stop(row: Row) {
     check(row.state == WorkInfo.State.RUNNING)
     row.state = WorkInfo.State.ENQUEUED
+  }
+
+  /**
+   * The worker returned retry: back to ENQUEUED. WorkManager keeps the count
+   * and sets the last enqueue time to now, so the backoff counts from now
+   * (WorkerWrapper.reschedule).
+   */
+  fun retry(row: Row) {
+    check(row.state == WorkInfo.State.RUNNING)
+    row.state = WorkInfo.State.ENQUEUED
+    row.lastEnqueueTime = now
+  }
+
+  /** The worker threw or returned failure: FAILED, and every row blocked behind it fails without a run. */
+  fun fail(row: Row) {
+    row.state = WorkInfo.State.FAILED
+    rows.filter { it.name == row.name && it.state == WorkInfo.State.BLOCKED }.forEach { it.state = WorkInfo.State.FAILED }
   }
 
   /** A run ends: the row succeeds, and a row blocked behind it becomes ENQUEUED. */

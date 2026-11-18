@@ -300,8 +300,12 @@ class QueueController(
     val probe = NetworkProbe()
     cleared.forEach { e -> runCatching { scheduleRun(e, probe = probe) }.onFailure(::failed) }
     val clearedIds = cleared.map { it.id }.toSet()
-    val idle = queued.filter { it.nextAttemptAt == null }
-    val waiting = queued.filter { it.nextAttemptAt != null && it.id !in clearedIds }
+    // A wait that is due, or shorter than a worker sleeps out, is no wait
+    // here: such an entry follows the network rule like any other (a
+    // chunked hand-over can keep a sibling part's short wait).
+    fun longWait(e: QueueEntry) = e.nextAttemptAt?.let { it - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS } == true
+    val idle = queued.filter { !longWait(it) && it.id !in clearedIds }
+    val waiting = queued.filter { longWait(it) && it.id !in clearedIds }
     if (idle.isNotEmpty() || waiting.isNotEmpty()) {
       val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
       idle.filter { rows == null || it.id !in rows.startable }
@@ -327,17 +331,23 @@ class QueueController(
    * save, a WorkManager call or the query failed: the doorbell worker then
    * returns retry, so its row runs again.
    */
-  fun answerDoorbell(): Boolean {
+  fun answerDoorbell(rung: RequiredNetwork? = null): Boolean {
     val now = clock()
     val s = settings.load()
-    val waiting = store.all().filter { requiredNetwork(it, s, now) != RequiredNetwork.NONE && !isWorkerRunning(it.id) }
+    val waiting = store.all().filter { requiredNetwork(it, s, now) != RequiredNetwork.NONE }
     if (waiting.isEmpty()) return true
     val rows = runCatching { scheduler.rowSummary() }
       .onFailure { Diag.error("doorbell: could not read WorkManager; it rings again", it) }
       .getOrNull() ?: return false
-    val probe = NetworkProbe()
+    // WorkManager saw [rung]'s network. When the library's check does not,
+    // the doorbell queued behind this one waits DOORBELL_REPEAT_MS.
+    val probe = NetworkProbe(repeatOf = rung, awaitRows = true)
     var answered = true
-    waiting.filter { it.id !in rows.startable }.forEach { e ->
+    // Only an ENQUEUED row that starts now covers an entry. A worker of the
+    // entry, or a RUNNING row, may be one that handed over and is on its way
+    // out; schedule() then queues one row behind it, and the per-id gate
+    // runs them one after the other.
+    waiting.filter { it.id !in rows.due }.forEach { e ->
       runCatching { scheduleRun(e, probe = probe) }.onFailure {
         answered = false
         Diag.error("doorbell: could not schedule '${e.id}'; it rings again", it)
@@ -347,14 +357,21 @@ class QueueController(
   }
 
   /**
-   * The network check for one pass, at most once per Wi-Fi rule. A check
-   * that throws reads as no network.
+   * One pass: the network check at most once per Wi-Fi rule (a check that
+   * throws reads as no network), and each doorbell made sure at most once.
+   * A doorbell that could not be stored is not tried again in the pass: its
+   * entries get their main row. [repeatOf]: the doorbell that is answering;
+   * one made for its own rule waits DOORBELL_REPEAT_MS. [awaitRows]: wait
+   * until each main row is stored.
    */
-  private inner class NetworkProbe {
+  private inner class NetworkProbe(val repeatOf: RequiredNetwork? = null, val awaitRows: Boolean = false) {
     private val answers = mutableMapOf<Boolean, Boolean>()
 
     /** The doorbells already made sure in this pass. */
     val ensured = mutableSetOf<RequiredNetwork>()
+
+    /** The doorbells that could not be stored in this pass. */
+    val failed = mutableSetOf<RequiredNetwork>()
 
     fun fits(wifiOnly: Boolean): Boolean =
       answers.getOrPut(wifiOnly) { runCatching { networkFits(wifiOnly) }.getOrDefault(false) }
@@ -471,15 +488,16 @@ class QueueController(
     val after = settings.update { it.copy(wifiOnly = enabled) }.wifiOnly
     if (!before || after) return
     // Off: the entries that follow the setting now wait for any network.
-    // Each one with no long wait and no worker starts when that fits, else
-    // it waits on the CONNECTED doorbell. A Wi-Fi doorbell left behind
+    // Each one with no long wait starts when that fits, else it waits on
+    // the CONNECTED doorbell. A worker of the entry may be one that handed
+    // over and is on its way out: schedule() queues one row behind it. A Wi-Fi doorbell left behind
     // finds nothing to start and ends. On needs no work: a run that starts
     // on another network fails the check and hands over to the Wi-Fi doorbell.
     val now = clock()
     val s = settings.load()
     val probe = NetworkProbe()
     store.all()
-      .filter { it.descriptor?.wifiOnly == null && requiredNetwork(it, s, now) != RequiredNetwork.NONE && !isWorkerRunning(it.id) }
+      .filter { it.descriptor?.wifiOnly == null && requiredNetwork(it, s, now) != RequiredNetwork.NONE }
       .forEach { e ->
         runCatching { scheduleRun(e, probe = probe) }
           .onFailure { Diag.error("setWifiOnly: could not schedule '${e.id}'", it) }
@@ -731,7 +749,7 @@ class QueueController(
           // The main row first: these are two separate WorkManager calls,
           // and a process death between them must not leave the entry
           // with neither a wake nor a main row.
-          scheduler.schedule(entry)
+          if (probe?.awaitRows == true) scheduler.scheduleAndWait(entry) else scheduler.schedule(entry)
           cancelStaleWake(entry.id)
         }
       }
@@ -754,9 +772,15 @@ class QueueController(
     val network = requiredNetwork(entry, settings.load(), now)
     if (network == RequiredNetwork.NONE || probe.fits(network == RequiredNetwork.WIFI)) return false
     if (network in probe.ensured) return true
-    return runCatching { scheduler.ensureDoorbell(network) }
+    if (network in probe.failed) return false
+    val delay = if (network == probe.repeatOf) WorkManagerScheduler.DOORBELL_REPEAT_MS else 0L
+    return runCatching { scheduler.ensureDoorbell(network, delay) }
       .onSuccess { probe.ensured += network }
-      .onFailure { Diag.error("could not store the ${network.name} doorbell for '${entry.id}'; it starts a run instead", it) }
+      .onFailure {
+        // One record per pass: the other entries of this rule skip the doorbell.
+        probe.failed += network
+        Diag.error("could not store the ${network.name} doorbell; its waiting entries start a run instead", it)
+      }
       .isSuccess
   }
 

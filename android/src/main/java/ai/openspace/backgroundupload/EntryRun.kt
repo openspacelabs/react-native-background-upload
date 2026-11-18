@@ -123,16 +123,18 @@ internal class EntryRun(
     const val HEADLESS_NETWORK_WAIT_MS = 60_000L
 
     /**
-     * The same for a run that holds foreground mode, on Android 15 (API 35)
-     * and later only: there each minute of it uses the dataSync budget of 6
-     * hours in 24. Below API 35 such a run polls for as long as it runs.
+     * The same for a run that holds foreground mode, in an app that targets
+     * API 35 and runs on Android 15 (API 35) or later: only there does each
+     * minute of it use the dataSync budget of 6 hours in 24 (Android's
+     * foreground-service timeout docs; the limit is gated on the target).
+     * Otherwise such a run polls for as long as it runs.
      */
     const val FOREGROUND_NETWORK_WAIT_MS = 30 * 60_000L
 
     /** The first API level with a network doorbell. API 29 keeps the poll. */
     const val DOORBELL_MIN_SDK = 30
 
-    /** The first API level whose dataSync foreground service has a daily budget (Android 15). */
+    /** The first API level, of the device and of the app's target, with the dataSync daily budget (Android 15). */
     const val FOREGROUND_BUDGET_MIN_SDK = 35
 
     /** The poll while a short backoff remainder runs out before the run starts. */
@@ -340,6 +342,16 @@ internal class EntryRun(
     }
   }
 
+  /** The network no longer fits the entry when its request got a transmit slot. */
+  private class NetworkGoneException : Exception("the network no longer fits")
+
+  /** The network check, once more, inside the transmit slot. */
+  private fun networkStillFits(): Boolean {
+    val entry = ops.latest(entryId, generation)
+    val wifiOnly = ops.settings().wifiOnlyFor(entry)
+    return safeConnectivity(wifiOnly) { host.connectivity(wifiOnly) } == Connectivity.Ok
+  }
+
   /**
    * Sleeps out a short backoff remainder. False when the wait is long (the
    * wake run comes back for it) or the entry is no longer queued. For a long
@@ -371,10 +383,11 @@ internal class EntryRun(
    *
    * On API 30 and later the run does not poll without end. With no
    * foreground mode it waits [HEADLESS_NETWORK_WAIT_MS]; with foreground
-   * mode on API 35 and later [FOREGROUND_NETWORK_WAIT_MS]. Then it throws
+   * mode on API 35 and later, in an app that targets API 35,
+   * [FOREGROUND_NETWORK_WAIT_MS]. Then it throws
    * [AwaitNetworkException]: the entry goes back to queued and a doorbell
-   * starts it once the network is up. Below API 35 a run with foreground
-   * mode polls as before. It hands over only while no request of the run is
+   * starts it once the network is up. Otherwise a run with foreground mode
+   * polls as before. It hands over only while no request of the run is
    * sending ([SendGate]), and only when the default network itself fails
    * the rule: while the app binds the process to another network
    * ([Connectivity.BoundElsewhere]) the run keeps waiting, because the
@@ -396,7 +409,7 @@ internal class EntryRun(
       val limit = when {
         sdk < DOORBELL_MIN_SDK || network == Connectivity.BoundElsewhere -> null
         !holdsForeground -> HEADLESS_NETWORK_WAIT_MS
-        sdk >= FOREGROUND_BUDGET_MIN_SDK -> FOREGROUND_NETWORK_WAIT_MS
+        sdk >= FOREGROUND_BUDGET_MIN_SDK && host.targetSdk() >= FOREGROUND_BUDGET_MIN_SDK -> FOREGROUND_NETWORK_WAIT_MS
         else -> null
       }
       if (limit != null && host.now() - since >= limit && sends.tryHandOver()) throw AwaitNetworkException()
@@ -429,29 +442,41 @@ internal class EntryRun(
     val highPriority = ops.latest(entryId, generation).descriptor!!.highPriority
     var written: QueueEntry? = null
     var failure: Throwable? = null
-    val response = try {
-      host.withSlot(highPriority) {
-        // A sibling part that handed over meanwhile: no request starts.
-        sends.beginSend()
-        try {
-          val e = ops.recordAttempt(entryId, generation, requestId)
-          written = e
-          val d = e.descriptor!!
-          val part = partIndex?.let { d.parts!![it] }
-          host.send(TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
-        } finally {
-          sends.endSend()
+    var response: UploadResponse? = null
+    var done = false
+    while (!done) {
+      try {
+        response = host.withSlot(highPriority) {
+          // The wait for a slot can be long: check the network again, so a
+          // Wi-Fi-only request does not go out over another network.
+          if (!networkStillFits()) throw NetworkGoneException()
+          // A sibling part that handed over meanwhile: no request starts.
+          sends.beginSend()
+          try {
+            val e = ops.recordAttempt(entryId, generation, requestId)
+            written = e
+            val d = e.descriptor!!
+            val part = partIndex?.let { d.parts!![it] }
+            host.send(TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
+          } finally {
+            sends.endSend()
+          }
         }
+        done = true
+      } catch (gone: NetworkGoneException) {
+        // The slot is left with no attempt counted. Wait for the network
+        // again, with its own limits and hand-over.
+        waitForNetwork()
+      } catch (error: CancellationException) {
+        // A stop after the write-ahead cut a request that was on its way.
+        if (written != null) stopCutRequest = true
+        throw error
+      } catch (error: Throwable) {
+        // With no write-ahead, the store write failed: not a network attempt.
+        if (written == null) throw error
+        failure = error
+        done = true
       }
-    } catch (error: CancellationException) {
-      // A stop after the write-ahead cut a request that was on its way.
-      if (written != null) stopCutRequest = true
-      throw error
-    } catch (error: Throwable) {
-      // With no write-ahead, the store write failed: not a network attempt.
-      if (written == null) throw error
-      failure = error
-      null
     }
 
     val entry = written!!

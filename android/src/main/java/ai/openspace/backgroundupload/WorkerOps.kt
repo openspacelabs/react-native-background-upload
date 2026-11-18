@@ -443,9 +443,14 @@ class WorkerOps(
     if (!applied || next == null) return false
     events.state(next.toRow())
     val network = requiredNetwork(next, settings(), now)
-    if (network == RequiredNetwork.NONE) return true
     try {
-      scheduler.ensureDoorbell(network)
+      if (network != RequiredNetwork.NONE) {
+        scheduler.ensureDoorbell(network)
+      } else {
+        // A kept wait that reads as long now (the clock moved): its wake
+        // starts the entry, as after a release.
+        scheduler.scheduleWake(next, next.nextAttemptAt ?: now, replace = true)
+      }
     } catch (error: Exception) {
       throw WakeNotScheduledException(id, error)
     }

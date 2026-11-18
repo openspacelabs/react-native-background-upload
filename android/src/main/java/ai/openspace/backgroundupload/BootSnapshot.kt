@@ -4,13 +4,16 @@ package ai.openspace.backgroundupload
  * What the boot sweep found, as one diagnostic record: the entries it
  * schedules, and every unfinished WorkManager run of the library before the
  * sweep changes them. Stale wakes show as delayed runs far in the future.
- * A queued or running entry with no run at all shows in entriesWithoutRun.
+ * A queued or running entry with no run at all shows in entriesWithoutRun;
+ * that includes an entry that waits for a doorbell, so by itself it does
+ * not mean a stuck entry.
  * v9Leftovers counts the v9 work still on disk, and orphans the
  * directories with no entry file that are not v9: what the boot cleanup
  * left, and what it deleted. Zeros included. wifiOnly is the queue's
  * setting. entriesByWake counts the queued entries by what starts them:
  * their backoff wake, or the network or Wi-Fi doorbell; doorbells says
- * which doorbell rows exist.
+ * which doorbell rows exist. Both describe the rows and entries before the
+ * sweep changed them.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"

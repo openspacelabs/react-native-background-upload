@@ -135,6 +135,12 @@ interface WorkScheduler {
   fun schedule(entry: QueueEntry)
 
   /**
+   * [schedule], and waits until WorkManager has stored the row it adds.
+   * Throws when it did not.
+   */
+  fun scheduleAndWait(entry: QueueEntry) = schedule(entry)
+
+  /**
    * A run at [at] under a second unique name. Used for long backoffs and for
    * the expiry of a parked entry. [replace] false keeps a wake that already
    * exists (the boot sweep).
@@ -152,9 +158,10 @@ interface WorkScheduler {
    * row for the whole queue, with that WorkManager network rule. When the
    * network is up, WorkManager runs it, and its worker ([DoorbellWorker])
    * starts the entries that wait for a network. It runs no upload. Returns
-   * once WorkManager has stored the row; throws when it could not.
+   * once WorkManager has stored the row; throws when it could not. [delayMs]
+   * is the initial delay of a new row; a doorbell that is there is kept.
    */
-  fun ensureDoorbell(network: RequiredNetwork)
+  fun ensureDoorbell(network: RequiredNetwork, delayMs: Long = 0L)
 
   /** Every unfinished WorkManager run of the library, main chains and wakes. For the boot snapshot. */
   fun libraryRuns(): List<PendingRun>
@@ -166,9 +173,15 @@ interface WorkScheduler {
 /**
  * [startable]: the ids with a run in progress, or a row WorkManager may
  * start now. [withWake]: the ids with an unfinished delayed row. Only a wake
- * has an initial delay; a main-chain row never does.
+ * has an initial delay; a main-chain row never does. [due]: the ids with an
+ * ENQUEUED row WorkManager may start now; a RUNNING row does not count, so
+ * a worker that is on its way out does not hide its entry.
  */
-data class RowSummary(val startable: Set<String>, val withWake: Set<String>)
+data class RowSummary(
+  val startable: Set<String>,
+  val withWake: Set<String>,
+  val due: Set<String> = emptySet(),
+)
 
 /**
  * One unfinished WorkManager run. [entryId] comes from the run's id tag.
@@ -212,11 +225,15 @@ interface WorkRows {
 
   fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long)
 
+  /** [enqueue], and waits until WorkManager has stored the row. Throws when it did not. */
+  fun enqueueAndWait(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) =
+    enqueue(name, policy, entry, delayMs)
+
   /**
    * Enqueues the doorbell row [name] with [network] as its rule, and waits
    * until WorkManager has stored it. Throws when it did not.
    */
-  fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork)
+  fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork, delayMs: Long = 0L)
 
   fun cancel(name: String)
 }
@@ -277,6 +294,14 @@ open class RowScheduler(
     }
   }
 
+  override fun scheduleAndWait(entry: QueueEntry) {
+    when (mainChainStep(rows.unfinished(entry.id), clock())) {
+      MainChainStep.NONE -> Unit
+      MainChainStep.APPEND -> rows.enqueueAndWait(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L)
+      MainChainStep.REPLACE -> rows.enqueueAndWait(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L)
+    }
+  }
+
   override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
     val delay = WorkManagerScheduler.initialDelayMs(at, clock())
     rows.enqueue(
@@ -301,14 +326,14 @@ open class RowScheduler(
    * for the process, and the enqueue is awaited, so two callers do not both
    * append.
    */
-  override fun ensureDoorbell(network: RequiredNetwork) {
+  override fun ensureDoorbell(network: RequiredNetwork, delayMs: Long) {
     require(network != RequiredNetwork.NONE) { "a doorbell needs a network" }
     val name = WorkManagerScheduler.doorbellName(network)
     synchronized(DOORBELL_LOCK) {
       when (mainChainStep(rows.unfinished(name), clock())) {
         MainChainStep.NONE -> Unit
-        MainChainStep.APPEND -> rows.enqueueDoorbell(name, ExistingWorkPolicy.APPEND_OR_REPLACE, network)
-        MainChainStep.REPLACE -> rows.enqueueDoorbell(name, ExistingWorkPolicy.REPLACE, network)
+        MainChainStep.APPEND -> rows.enqueueDoorbell(name, ExistingWorkPolicy.APPEND_OR_REPLACE, network, delayMs)
+        MainChainStep.REPLACE -> rows.enqueueDoorbell(name, ExistingWorkPolicy.REPLACE, network, delayMs)
       }
     }
   }
@@ -340,6 +365,7 @@ open class RowScheduler(
     return RowSummary(
       startable = open.filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
       withWake = open.filter { it.delayed }.mapNotNull { it.entryId }.toSet(),
+      due = open.filter { it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
     )
   }
 }
@@ -367,8 +393,15 @@ class WorkManagerScheduler private constructor(private val workManager: WorkMana
     /** A string literal, because WorkManager persists it across builds. */
     const val DOORBELL_NETWORK_KEY = "network"
 
-    /** How long a doorbell enqueue may take before it counts as failed. */
-    const val DOORBELL_ENQUEUE_TIMEOUT_MS = 10_000L
+    /** How long a WorkManager query or an awaited enqueue may take before it counts as failed. */
+    const val WORK_CALL_TIMEOUT_MS = 10_000L
+
+    /**
+     * The initial delay of the doorbell a doorbell queues behind itself when
+     * WorkManager saw its network but the library's check did not. So such
+     * a doorbell rings at most once in this time.
+     */
+    const val DOORBELL_REPEAT_MS = 30_000L
 
     /** Milliseconds from [now] until [at]; never negative. */
     fun initialDelayMs(at: Long?, now: Long): Long = if (at == null) 0L else (at - now).coerceAtLeast(0L)
@@ -386,8 +419,10 @@ class WorkManagerScheduler private constructor(private val workManager: WorkMana
 
 /** [WorkRows] on WorkManager. */
 private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
+  // A timeout, so a WorkManager that does not answer does not hold the queue executor.
   override fun unfinished(name: String): List<WorkRow> =
-    workManager.getWorkInfosForUniqueWork(name).get().filter { !it.state.isFinished }.map(::row)
+    workManager.getWorkInfosForUniqueWork(name).get(WorkManagerScheduler.WORK_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+      .filter { !it.state.isFinished }.map(::row)
 
   // The states are filtered in the query, so finished rows are never loaded.
   override fun library(states: List<WorkInfo.State>): List<WorkRow> =
@@ -399,6 +434,11 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
     workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue()
   }
 
+  override fun enqueueAndWait(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+    workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue().result
+      .get(WorkManagerScheduler.WORK_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+  }
+
   override fun cancel(name: String) {
     workManager.cancelUniqueWork(name)
   }
@@ -406,15 +446,16 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
   // Waits for the insert: an enqueue that fails later is otherwise not seen.
   // The callers run on the queue executor or a worker thread, never on the
   // main thread.
-  override fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork) {
+  override fun enqueueDoorbell(name: String, policy: ExistingWorkPolicy, network: RequiredNetwork, delayMs: Long) {
     val request = OneTimeWorkRequestBuilder<DoorbellWorker>()
       .addTag(WorkManagerScheduler.WORK_TAG)
       .addTag(WorkManagerScheduler.DOORBELL_TAG_PREFIX + network.name)
       .setInputData(workDataOf(WorkManagerScheduler.DOORBELL_NETWORK_KEY to network.name))
+      .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
       .setConstraints(constraints(network))
       .build()
     workManager.beginUniqueWork(name, policy, request).enqueue().result
-      .get(WorkManagerScheduler.DOORBELL_ENQUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+      .get(WorkManagerScheduler.WORK_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
   }
 
   /**

@@ -38,6 +38,9 @@ internal interface TransferHost {
    */
   fun sdkInt(): Int
 
+  /** The app's targetSdkVersion. */
+  fun targetSdk(): Int
+
   fun progressStarted(id: String, total: Long, sent: Long)
 
   fun progress(id: String, sent: Long, total: Long)

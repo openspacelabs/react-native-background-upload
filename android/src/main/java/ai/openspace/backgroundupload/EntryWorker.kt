@@ -105,6 +105,8 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
 
     override fun sdkInt() = Build.VERSION.SDK_INT
 
+    override fun targetSdk() = context.applicationInfo.targetSdkVersion
+
     override fun progressStarted(id: String, total: Long, sent: Long) {
       UploadProgress.add(id, total)
       UploadProgress.set(id, sent)

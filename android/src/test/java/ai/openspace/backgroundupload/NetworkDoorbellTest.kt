@@ -87,22 +87,251 @@ class NetworkDoorbellTest {
    * then ends.
    */
   private fun handedOver(id: String = "e1", stored: QueueEntry = entry(id = id, state = EntryState.RUNNING)) {
+    handingOver(id, stored).leave()
+  }
+
+  /**
+   * A worker of [id] that has handed over and is still on its way out: the
+   * entry is saved queued and the doorbell is made sure, but the worker
+   * still holds the per-id gate and its row is RUNNING.
+   */
+  private inner class Leaving(val id: String, val row: FakeWorkManager.Row) {
+    /** doWork's finally: the gate is released. The row stays RUNNING until WorkManager records the result. */
+    fun releaseGate() {
+      running -= id
+    }
+
+    fun leave() {
+      releaseGate()
+      work.finish(row)
+    }
+  }
+
+  private fun handingOver(id: String = "e1", stored: QueueEntry = entry(id = id, state = EntryState.RUNNING)): Leaving {
     store.save(stored)
     val own = work.add(id, state = RUNNING, runAttemptCount = 1)
     running += id
     assertTrue(ops().awaitNetwork(id, stored.generation))
-    running -= id
-    work.finish(own)
+    return Leaving(id, own)
   }
 
-  /** WorkManager starts each doorbell that may start now; its worker answers with its own controller. */
+  /**
+   * WorkManager starts each doorbell that may start now; its worker answers
+   * with its own controller. Its result: success finishes the row, retry
+   * puts it back with WorkManager's backoff.
+   */
   private fun ringDoorbells(): List<FakeWorkManager.Row> {
     val rung = work.startableNow().filter { it.doorbell != null }
     for (row in rung) {
       work.start(row)
-      if (newController().answerDoorbell()) work.finish(row) else work.stop(row)
+      val c = newController()
+      if (DoorbellRing.answered { c.answerDoorbell(row.doorbell) }) work.finish(row) else work.retry(row)
     }
     return rung
+  }
+
+  // MARK: - review fixes (second review)
+
+  @Test
+  fun `a doorbell that answers while a hand-over still holds the gate starts the entry after the worker leaves`() {
+    // Review probe P1a.
+    network(RequiredNetwork.NONE)
+    handedOver("a")
+    val b = handingOver("b")
+    assertEquals(1, doorbellRows().size)
+    network(RequiredNetwork.CONNECTED)
+    assertEquals(1, ringDoorbells().size)
+    b.leave()
+    assertEquals(1, startable("a").size)
+    assertEquals(1, startable("b").size)
+  }
+
+  @Test
+  fun `a doorbell that answers after the gate is released but before the row ends starts the entry`() {
+    // Review probe P1b.
+    network(RequiredNetwork.NONE)
+    handedOver("a")
+    val b = handingOver("b")
+    b.releaseGate()
+    network(RequiredNetwork.CONNECTED)
+    assertEquals(1, ringDoorbells().size)
+    work.finish(b.row)
+    assertEquals(1, startable("b").size)
+  }
+
+  @Test
+  fun `the doorbell appended behind a running one starts an entry whose hand-over row has not ended`() {
+    // Review probe P1c.
+    network(RequiredNetwork.NONE)
+    handedOver("a")
+    network(RequiredNetwork.CONNECTED)
+    val first = doorbellRows().single()
+    work.start(first)
+    val b = handingOver("b")
+    assertEquals(2, doorbellRows().size)
+    assertTrue(newController().answerDoorbell(RequiredNetwork.CONNECTED))
+    work.finish(first)
+    ringDoorbells()
+    b.leave()
+    assertEquals(1, startable("b").size)
+    assertEquals(1, uploadRows("b").size)
+  }
+
+  @Test
+  fun `a doorbell that rings after the hand-over worker left starts the entry too`() {
+    // The other order of the three above.
+    network(RequiredNetwork.NONE)
+    handingOver("b").leave()
+    network(RequiredNetwork.CONNECTED)
+    ringDoorbells()
+    assertEquals(1, startable("b").size)
+    assertEquals(1, uploadRows("b").size)
+  }
+
+  @Test
+  fun `setWifiOnly(false) starts an entry whose hand-over worker is still leaving`() {
+    controller.setWifiOnly(true)
+    network(RequiredNetwork.CONNECTED)
+    val b = handingOver("b")
+    controller.setWifiOnly(false)
+    b.leave()
+    assertEquals(1, startable("b").size)
+  }
+
+  @Test
+  fun `a doorbell whose library check keeps refusing rings at most once every 30 s`() {
+    // Review probe P2: WorkManager says the rule is met; the library's check says no.
+    network(RequiredNetwork.NONE)
+    handedOver("a")
+    network(RequiredNetwork.CONNECTED)
+    fitsThrows = true
+    val rings = mutableListOf<Long>()
+    repeat(20) {
+      if (ringDoorbells().isNotEmpty()) rings += work.now
+      work.now += 1_000
+    }
+    assertTrue("rings at $rings", rings.size >= 1)
+    assertTrue("rings at $rings", rings.zipWithNext().all { (x, y) -> y - x >= 30_000 })
+    assertTrue("rows: ${work.rows.size}", work.rows.count { it.doorbell != null } <= rings.size + 1)
+    assertEquals(1, doorbellRows().size)
+    // The network check passes again: the next ring starts the entry.
+    fitsThrows = false
+    work.now += 30_000
+    ringDoorbells()
+    assertEquals(1, startable("a").size)
+  }
+
+  @Test
+  fun `a doorbell insert that fails is tried once per pass, and the other entries get their main row`() {
+    // Review probe P5.
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    try {
+      network(RequiredNetwork.NONE)
+      for (n in 1..10) store.save(entry(id = "q$n"))
+      work.doorbellInsertFailures = 10
+      controller.retryNow()
+      assertEquals(1, work.doorbellInserts)
+      assertEquals(10, work.rows.count { it.doorbell == null && !it.state.isFinished })
+      assertEquals(1, DiagnosticLog(file).drain().count { it.level == DiagnosticLog.ERROR })
+    } finally {
+      Diag.log = null
+    }
+  }
+
+  @Test
+  fun `offline, a foreground starts no run for a waiting entry that kept a short wait after a response`() {
+    // Review probe P3.
+    network(RequiredNetwork.NONE)
+    handedOver(
+      "c",
+      entry(id = "c", state = EntryState.RUNNING, nextAttemptAt = work.now + 20_000)
+        .copy(waitCause = WaitCause.RESPONSE, failedAt = work.now, backoffStreak = 1),
+    )
+    work.now += 10 * minute
+    controller.retryNow()
+    assertEquals(emptyList<FakeWorkManager.Row>(), uploadRows("c"))
+    assertEquals(1, doorbellRows().size)
+  }
+
+  @Test
+  fun `a hand-over whose kept wait reads as long after a clock change gets its wake`() {
+    network(RequiredNetwork.NONE)
+    handedOver("e1", entry(state = EntryState.RUNNING, nextAttemptAt = work.now + 60_000))
+    assertEquals(listOf("e1#wake"), uploadRows().map { it.name })
+    work.now += 60_000
+    assertEquals(1, startable().size)
+  }
+
+  @Test
+  fun `a doorbell does not end while an entry's main row insert fails`() {
+    network(RequiredNetwork.NONE)
+    handedOver()
+    network(RequiredNetwork.CONNECTED)
+    work.lateInsertFailures = 1
+    val bell = doorbellRows().single()
+    ringDoorbells()
+    // The ring returned retry: the doorbell stays, and rings again after WorkManager's backoff.
+    assertEquals(ENQUEUED, bell.state)
+    assertEquals(emptyList<FakeWorkManager.Row>(), uploadRows())
+    work.now += 30_000
+    ringDoorbells()
+    assertEquals(1, startable().size)
+  }
+
+  @Test
+  fun `a doorbell answer that throws is a retry, not a failure`() {
+    assertFalse(DoorbellRing.answered { throw IllegalStateException("store unreadable") })
+    assertTrue(DoorbellRing.answered { true })
+    assertFalse(DoorbellRing.answered { false })
+    assertThrows(java.util.concurrent.CancellationException::class.java) {
+      DoorbellRing.answered { throw java.util.concurrent.CancellationException("stopped") }
+    }
+  }
+
+  @Test
+  fun `the fake, a worker that fails takes the doorbell queued behind it with it`() {
+    // Why the doorbell worker must not fail: WorkManager fails the rows blocked behind it.
+    scheduler.ensureDoorbell(RequiredNetwork.CONNECTED)
+    val first = doorbellRows().single()
+    work.start(first)
+    scheduler.ensureDoorbell(RequiredNetwork.CONNECTED)
+    work.fail(first)
+    assertEquals(emptyList<FakeWorkManager.Row>(), doorbellRows())
+  }
+
+  @Test
+  fun `the fake, a retry counts its backoff from the retry`() {
+    scheduler.ensureDoorbell(RequiredNetwork.CONNECTED)
+    val bell = doorbellRows().single()
+    work.now += 10 * minute
+    work.start(bell)
+    work.retry(bell)
+    assertEquals(work.now + 30_000, work.nextScheduleAt(bell))
+  }
+
+  @Test
+  fun `with 20 older sleeping rows the doorbell is outside the JobScheduler window until some of them run`() {
+    // Review probe P4. The result: while the app process is dead, the
+    // doorbell cannot ring before one of the older rows has run. A backoff
+    // wake runs at the latest at its backoff maximum, an expiry wake within
+    // the 24-hour horizon. The app's start, resume() or foreground starts
+    // the entry sooner when the network fits.
+    network(RequiredNetwork.NONE)
+    val older = (1..20).map { work.add("x$it#wake", initialDelay = 6 * 60 * minute) }
+    handedOver("a")
+    network(RequiredNetwork.CONNECTED)
+    val bell = doorbellRows().single()
+    assertTrue(bell in work.startableNow())
+    assertTrue(bell !in work.startableWhileDead())
+    // One older row runs and ends: the doorbell enters the window.
+    work.now += 6 * 60 * minute
+    work.start(older.first())
+    work.finish(older.first())
+    assertTrue(bell in work.startableWhileDead())
+    // The app opens with the network: a foreground starts the entry at once.
+    controller.retryNow()
+    assertEquals(1, startable("a").size)
   }
 
   // MARK: - the fake follows WorkManager 2.12.0
@@ -184,13 +413,19 @@ class NetworkDoorbellTest {
     work.start(bell)
     // WorkManager saw the network; the in-worker check does not (not validated any more).
     fitsThrows = true
-    assertTrue(newController().answerDoorbell())
+    assertTrue(newController().answerDoorbell(RequiredNetwork.CONNECTED))
     fitsThrows = false
+    val rungAt = work.now
     work.finish(bell)
     assertEquals(emptyList<FakeWorkManager.Row>(), uploadRows())
     val next = doorbellRows().single()
     assertTrue(next !== bell)
-    ringDoorbells()
+    // It waits at least 30 s, so a refusing check does not ring without pause.
+    assertEquals(emptyList<FakeWorkManager.Row>(), ringDoorbells())
+    work.now = rungAt + 29_999
+    assertEquals(emptyList<FakeWorkManager.Row>(), ringDoorbells())
+    work.now = rungAt + 30_000
+    assertEquals(listOf(next), ringDoorbells())
     assertEquals(1, startable().size)
   }
 
@@ -232,6 +467,12 @@ class NetworkDoorbellTest {
     handedOver("b")
     handedOver("c")
     assertEquals(listOf(RUNNING, BLOCKED), doorbellRows().map { it.state })
+    // The running doorbell answers, then the one behind it: every entry starts.
+    assertTrue(newController().answerDoorbell(RequiredNetwork.CONNECTED))
+    work.finish(bell)
+    ringDoorbells()
+    for (id in listOf("a", "b", "c")) assertEquals(id, 1, startable(id).size)
+    assertEquals(emptyList<FakeWorkManager.Row>(), doorbellRows())
   }
 
   @Test
@@ -285,17 +526,31 @@ class NetworkDoorbellTest {
   @Test
   fun `a process death between the hand-over save and the doorbell leaves an entry that every repair finds`() {
     // The entry is queued with no row: the run's own row ended, the doorbell never landed.
-    network(RequiredNetwork.NONE)
-    store.save(entry(state = EntryState.QUEUED))
-    controller.retryNow()
-    assertEquals(1, doorbellRows(RequiredNetwork.CONNECTED).size)
-    assertEquals(emptyList<FakeWorkManager.Row>(), uploadRows())
-    // The same with the network up: a foreground starts it.
-    work.rows.clear()
-    network(RequiredNetwork.CONNECTED)
-    controller.retryNow()
-    assertEquals(1, startable().size)
-    assertEquals(emptyList<FakeWorkManager.Row>(), doorbellRows())
+    controller.enqueue(parsed())
+    val repairs = listOf<Pair<String, () -> Unit>>(
+      "boot sweep" to { controller.sweep() },
+      "resume" to { controller.resume() },
+      "foreground" to { controller.retryNow() },
+      "same-id enqueue" to { controller.enqueue(parsed()) },
+      "setWifiOnly" to {
+        controller.setWifiOnly(true)
+        controller.setWifiOnly(false)
+      },
+    )
+    for ((name, repair) in repairs) {
+      for (online in listOf(false, true)) {
+        work.rows.clear()
+        network(if (online) RequiredNetwork.CONNECTED else RequiredNetwork.NONE)
+        repair()
+        if (online) {
+          assertEquals("$name online", 1, startable().size)
+          assertEquals("$name online", emptyList<FakeWorkManager.Row>(), doorbellRows())
+        } else {
+          assertEquals("$name offline", emptyList<FakeWorkManager.Row>(), uploadRows())
+          assertEquals("$name offline", 1, doorbellRows(RequiredNetwork.CONNECTED).size)
+        }
+      }
+    }
   }
 
   @Test
@@ -494,7 +749,7 @@ class NetworkDoorbellTest {
     assertTrue(doorbell.contains(".setConstraints("))
     // The insert is awaited, so one that fails later is seen.
     assertTrue(doorbell.contains(".enqueue().result"))
-    assertTrue(doorbell.contains(".get(WorkManagerScheduler.DOORBELL_ENQUEUE_TIMEOUT_MS"))
+    assertTrue(doorbell.contains(".get(WorkManagerScheduler.WORK_CALL_TIMEOUT_MS"))
     assertFalse(source.substringAfter("private fun request(").contains(".setConstraints("))
   }
 
