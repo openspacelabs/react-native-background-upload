@@ -82,6 +82,13 @@ export type Delivery = {
   forget: (id: string) => void;
 };
 
+/**
+ * Native sends `bodyUnknown` as a JSON boolean. Any truthy value counts, so a
+ * wrong value never sends an accepted request to the parser with no body.
+ */
+const isBodyUnknown = (response: RawResponse | undefined): boolean =>
+  Boolean(response?.bodyUnknown);
+
 const errorMessage = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
@@ -119,8 +126,6 @@ export const createDelivery = ({
   // Held outcomes whose key is now defined, by id, in their original order.
   // Each waits for its turn in its id's lane.
   const released = new Map<string, SettledEvent[]>();
-  // Keys already warned about an unknown body with no onBodyUnknown.
-  const bodyUnknownWarned = new Set<string>();
 
   const trackMutate = (id: string, pending: Promise<unknown>): void => {
     const settled = pending.then(
@@ -191,18 +196,10 @@ export const createDelivery = ({
       return;
     }
     // The server accepted the request, but there is no body for the parser.
-    // It is not an error and never the truncated error.
-    if (response.bodyUnknown === true) {
-      if (definition.onBodyUnknown) {
-        await definition.onBodyUnknown(response, vars, meta);
-        return;
-      }
-      if (!bodyUnknownWarned.has(event.key)) {
-        bodyUnknownWarned.add(event.key);
-        warn(
-          `delivery: "${event.key}" got an accepted response whose body is unknown (id ${event.id}). Its parser and onSuccess did not run, and the outcome counts as handled. Add onBodyUnknown to the definition to handle this case.`,
-        );
-      }
+    // It is not an error and never the truncated error. A definition with
+    // onSuccess and no onBodyUnknown never gets here: settle() holds it.
+    if (isBodyUnknown(response)) {
+      await definition.onBodyUnknown?.(response, vars, meta);
       return;
     }
     if (response.bodyTruncated) {
@@ -235,6 +232,21 @@ export const createDelivery = ({
     }
     await definition.onSuccess?.(data, vars, meta);
   };
+
+  /**
+   * True when a parser definition wants a success but has no handler for an
+   * accepted response whose body is unknown. A definition with neither
+   * onSuccess nor onBodyUnknown asked for nothing, so it is not held.
+   */
+  const lacksBodyUnknownHandler = (
+    event: SettledEvent,
+    definition: AnyDefinition,
+  ): boolean =>
+    event.kind === 'completed' &&
+    isBodyUnknown(event.response) &&
+    definition.response !== undefined &&
+    definition.onBodyUnknown === undefined &&
+    definition.onSuccess !== undefined;
 
   /** True when the handler settled, so the outcome may be acknowledged. */
   const runHandler = async (
@@ -331,6 +343,18 @@ export const createDelivery = ({
       );
       hold(event);
       emitState(unhandledRow(event));
+      return;
+    }
+    // Held like an outcome with no definition, so it is never acknowledged
+    // without a delivery. A define() of the key with onBodyUnknown releases
+    // it, and the next launch replays it. The row keeps its real state, so no
+    // unhandled-key row is emitted.
+    if (lacksBodyUnknownHandler(event, definition)) {
+      warn(
+        `delivery: "${event.key}" got an accepted response whose body is unknown (id ${event.id}). The definition has a response parser and onSuccess but no onBodyUnknown, so no handler ran. The outcome stays unacknowledged until define() adds onBodyUnknown for the key, or until the next launch.`,
+        event,
+      );
+      hold(event);
       return;
     }
     if (await runHandler(event, definition)) {

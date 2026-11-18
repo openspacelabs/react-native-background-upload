@@ -1372,6 +1372,12 @@ describe('late definitions with onWarning and the row cache', () => {
 });
 
 describe('with a fake native: attempts in doubt and an unknown body', () => {
+  let consoleWarn: jest.SpyInstance;
+  beforeEach(() => {
+    consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => consoleWarn.mockRestore());
+
   it('settles an accepted response with an unknown body into onSuccess of a definition without a parser', async () => {
     const fake = createFakeNative();
     const client = createUploadClient({ native: fake });
@@ -1430,38 +1436,198 @@ describe('with a fake native: attempts in doubt and an unknown body', () => {
     expect(fake.ackedEventIds).toEqual([event.eventId]);
   });
 
-  it('acks it and warns through onWarning once per key when a parser has no onBodyUnknown', async () => {
+  it('settles a chunked completion, which has no status, into onBodyUnknown', async () => {
     const fake = createFakeNative();
     const client = createUploadClient({ native: fake });
-    const onSuccess = jest.fn();
+    const onBodyUnknown = jest.fn();
+    const upload = client.define({
+      key: 'file.chunked',
+      request: (_v: null) => ({
+        method: 'PUT',
+        file: '/f',
+        parts: [
+          { url: 'https://s3/1', range: { start: 0, end: 5 } },
+          { url: 'https://s3/2', range: { start: 5, end: 9 } },
+        ],
+      }),
+      response: (raw) => raw,
+      onSuccess: jest.fn(),
+      onBodyUnknown,
+    });
+    client.configure({});
+    const { id } = await upload.mutate();
+    const event = await fake.settle(id, {
+      kind: 'completed',
+      response: { bodyUnknown: true },
+    });
+    expect(onBodyUnknown).toHaveBeenCalledWith(
+      { bodyTruncated: false, bodyUnknown: true },
+      null,
+      expect.objectContaining({ id }),
+    );
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+  });
+
+  describe('a parser definition with onSuccess and no onBodyUnknown', () => {
+    const noteRequest = (_v: null) => ({ url: 'https://x/notes', data: {} });
+
+    const settleThree = async () => {
+      const fake = createFakeNative({ ackTimeoutMs: 100 });
+      const client = createUploadClient({ native: fake });
+      const onSuccess = jest.fn();
+      const onError = jest.fn();
+      const onWarning = jest.fn();
+      const create = client.define({
+        key: 'note.create',
+        request: noteRequest,
+        response: (raw) => raw,
+        onSuccess,
+        onError,
+      });
+      client.configure({ onWarning });
+      const ids = ['a', 'b', 'c'];
+      for (const id of ids) {
+        await create.mutate(null, { id });
+      }
+      const settled = await Promise.allSettled(
+        ids.map((id) =>
+          fake.settle(id, {
+            kind: 'completed',
+            response: { status: 201, bodyUnknown: true },
+          }),
+        ),
+      );
+      return { fake, client, onSuccess, onError, onWarning, ids, settled };
+    };
+
+    it('holds every outcome unacknowledged, keeps the rows, and warns per outcome with the event', async () => {
+      const { fake, client, onSuccess, onError, onWarning, ids, settled } =
+        await settleThree();
+      expect(settled.map((r) => r.status)).toEqual([
+        'rejected',
+        'rejected',
+        'rejected',
+      ]);
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(fake.ackedEventIds).toEqual([]);
+      expect(client.getRequests().map((r) => [r.id, r.state])).toEqual([
+        ['a', 'completed'],
+        ['b', 'completed'],
+        ['c', 'completed'],
+      ]);
+      expect(onWarning).toHaveBeenCalledTimes(3);
+      ids.forEach((id, i) => {
+        expect(onWarning).toHaveBeenNthCalledWith(
+          i + 1,
+          `delivery: "note.create" got an accepted response whose body is unknown (id ${id}). The definition has a response parser and onSuccess but no onBodyUnknown, so no handler ran. The outcome stays unacknowledged until define() adds onBodyUnknown for the key, or until the next launch.`,
+          expect.objectContaining({ id, key: 'note.create', vars: null }),
+        );
+      });
+    });
+
+    it('delivers the held outcomes when define() adds onBodyUnknown in the same session', async () => {
+      const { fake, client, ids } = await settleThree();
+      const onBodyUnknown = jest.fn();
+      client.define({
+        key: 'note.create',
+        request: noteRequest,
+        response: (raw) => raw,
+        onSuccess: jest.fn(),
+        onBodyUnknown,
+      });
+      await flush();
+      expect(onBodyUnknown.mock.calls.map(([, , meta]) => meta.id)).toEqual(
+        ids,
+      );
+      expect(fake.ackedEventIds).toHaveLength(3);
+      expect(client.getRequests()).toEqual([]);
+    });
+
+    it('redelivers the held outcomes at the next launch, with deliveries grown', async () => {
+      const { fake } = await settleThree();
+      // The next launch: a new client on the same native journal.
+      const next = createUploadClient({ native: fake });
+      const onBodyUnknown = jest.fn();
+      next.define({
+        key: 'note.create',
+        request: noteRequest,
+        response: (raw) => raw,
+        onSuccess: jest.fn(),
+        onBodyUnknown,
+      });
+      next.configure({});
+      await flush();
+      expect(onBodyUnknown).toHaveBeenCalledTimes(3);
+      onBodyUnknown.mock.calls.forEach(([, , meta]) => {
+        expect(meta.deliveries).toBe(2);
+      });
+      expect(fake.ackedEventIds).toHaveLength(3);
+    });
+  });
+
+  it('acks with no call when a parser definition has neither onSuccess nor onBodyUnknown', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
     const onError = jest.fn();
     const onWarning = jest.fn();
     const create = client.define({
       key: 'note.create',
       request: (_v: null) => ({ url: 'https://x/notes', data: {} }),
       response: (raw) => raw,
-      onSuccess,
       onError,
     });
     client.configure({ onWarning });
-    const first = await create.mutate(null, { id: 'a' });
-    const second = await create.mutate(null, { id: 'b' });
-    await fake.settle(first.id, {
+    const { id } = await create.mutate();
+    const event = await fake.settle(id, {
       kind: 'completed',
       response: { bodyUnknown: true },
     });
-    await fake.settle(second.id, {
-      kind: 'completed',
-      response: { bodyUnknown: true },
-    });
-    expect(onSuccess).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
-    expect(fake.ackedEventIds).toHaveLength(2);
-    expect(onWarning.mock.calls).toEqual([
-      [
-        'delivery: "note.create" got an accepted response whose body is unknown (id a). Its parser and onSuccess did not run, and the outcome counts as handled. Add onBodyUnknown to the definition to handle this case.',
-        undefined,
-      ],
+    expect(onWarning).not.toHaveBeenCalled();
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
+  });
+
+  it('runs a rejected onBodyUnknown again at the next launch, with deliveries grown', async () => {
+    const fake = createFakeNative({ ackTimeoutMs: 100 });
+    const first = createUploadClient({ native: fake });
+    const failing = jest.fn(async () => {
+      throw new Error('fetch failed');
+    });
+    const create = first.define({
+      key: 'note.create',
+      request: (_v: null) => ({ url: 'https://x/notes', data: {} }),
+      response: (raw) => raw,
+      onBodyUnknown: failing,
+    });
+    first.configure({ onWarning: jest.fn() });
+    const { id } = await create.mutate();
+    await expect(
+      fake.settle(id, { kind: 'completed', response: { bodyUnknown: true } }),
+    ).rejects.toThrow(/not acknowledged/);
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(failing.mock.calls[0]).toEqual([
+      expect.anything(),
+      null,
+      expect.objectContaining({ deliveries: 1 }),
     ]);
+    expect(fake.ackedEventIds).toEqual([]);
+
+    const next = createUploadClient({ native: fake });
+    const onBodyUnknown = jest.fn();
+    next.define({
+      key: 'note.create',
+      request: (_v: null) => ({ url: 'https://x/notes', data: {} }),
+      response: (raw) => raw,
+      onBodyUnknown,
+    });
+    next.configure({});
+    await flush();
+    expect(onBodyUnknown).toHaveBeenCalledTimes(1);
+    expect(onBodyUnknown.mock.calls[0]?.[2]).toMatchObject({
+      id,
+      deliveries: 2,
+    });
+    expect(fake.ackedEventIds).toHaveLength(1);
   });
 });

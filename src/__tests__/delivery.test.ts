@@ -1234,43 +1234,40 @@ describe('accepted, body unknown', () => {
     expect(onBodyUnknown).toHaveBeenCalledTimes(1);
   });
 
-  it('with a parser and no onBodyUnknown, calls nothing, acks, and warns once per key', async () => {
-    const response = jest.fn();
+  it('reads a truthy flag that is not true as the flag, so the parser never runs', async () => {
+    const response = jest.fn(() => {
+      throw new Error('no body to parse');
+    });
     const onSuccess = jest.fn();
     const onError = jest.fn();
-    const { start, emit, native, warn } = setup({
-      k: { key: 'k', request: jest.fn(), response, onSuccess, onError },
-      other: {
-        key: 'other',
+    const onBodyUnknown = jest.fn();
+    const { start, emit, native } = setup({
+      k: {
+        key: 'k',
         request: jest.fn(),
-        response: jest.fn(),
+        response,
+        onSuccess,
         onError,
+        onBodyUnknown,
       },
     });
     start();
     await flush();
-    emit(completed({ eventId: 'a', response: unknownBody }));
-    emit(completed({ eventId: 'b', id: 'u2', response: unknownBody }));
     emit(
-      completed({ eventId: 'c', id: 'u3', key: 'other', response: unknownBody }),
+      completed({
+        response: {
+          status: 201,
+          bodyTruncated: false,
+          bodyUnknown: 1 as unknown as true,
+        },
+      }),
     );
     await flush();
     expect(response).not.toHaveBeenCalled();
-    expect(onSuccess).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
-    expect(native.ackEvents).toHaveBeenCalledTimes(3);
-    expect(native.ackEvents).toHaveBeenCalledWith(['a']);
-    expect(native.ackEvents).toHaveBeenCalledWith(['b']);
-    expect(native.ackEvents).toHaveBeenCalledWith(['c']);
-    expect(warn).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenNthCalledWith(
-      1,
-      expect.stringMatching(/"k".*onBodyUnknown/),
-    );
-    expect(warn).toHaveBeenNthCalledWith(
-      2,
-      expect.stringMatching(/"other".*onBodyUnknown/),
-    );
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onBodyUnknown).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
   });
 
   it('treats bodyUnknown: false as a normal response', async () => {
@@ -1326,12 +1323,135 @@ describe('accepted, body unknown', () => {
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the outcome unacknowledged when onBodyUnknown rejects, and runs it again on replay', async () => {
-    const event = completed({ response: unknownBody });
+  it('holds every outcome unacknowledged when a parser definition has onSuccess and no onBodyUnknown', async () => {
+    const response = jest.fn();
+    const onSuccess = jest.fn();
+    const onError = jest.fn();
+    const { start, emit, native, warn, stateEvents } = setup({
+      k: { key: 'k', request: jest.fn(), response, onSuccess, onError },
+    });
+    start();
+    await flush();
+    const events = [
+      completed({ eventId: 'a', id: 'u1', response: unknownBody }),
+      completed({ eventId: 'b', id: 'u2', response: unknownBody }),
+      completed({ eventId: 'c', id: 'u3', response: unknownBody }),
+    ];
+    events.forEach(emit);
+    await flush();
+    expect(response).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+    // One warning per outcome, as for a key with no definition. Each names
+    // its id and the handler to add, and carries the event as detail.
+    expect(warn).toHaveBeenCalledTimes(3);
+    events.forEach((event, i) => {
+      expect(warn).toHaveBeenNthCalledWith(
+        i + 1,
+        expect.stringContaining(`(id ${event.id})`),
+        event,
+      );
+      expect(warn.mock.calls[i]?.[0]).toMatch(/no onBodyUnknown/);
+    });
+    // The row keeps its real state: no unhandled-key row.
+    expect(stateEvents).toEqual([]);
+  });
+
+  it('releases held outcomes when define() adds onBodyUnknown in the same session', async () => {
+    const definitions: Record<string, AnyDefinition> = {
+      k: {
+        key: 'k',
+        request: jest.fn(),
+        response: jest.fn(),
+        onSuccess: jest.fn(),
+      },
+    };
+    const { start, emit, native, release } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ eventId: 'a', id: 'u1', response: unknownBody }));
+    emit(completed({ eventId: 'b', id: 'u2', response: unknownBody }));
+    await flush();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+
+    const onBodyUnknown = jest.fn();
+    definitions.k = { ...definitions.k!, onBodyUnknown };
+    release('k');
+    await flush();
+    expect(onBodyUnknown).toHaveBeenCalledTimes(2);
+    expect(onBodyUnknown.mock.calls.map(([, , meta]) => meta.id)).toEqual([
+      'u1',
+      'u2',
+    ]);
+    expect(native.ackEvents).toHaveBeenCalledWith(['a']);
+    expect(native.ackEvents).toHaveBeenCalledWith(['b']);
+  });
+
+  it('delivers to onBodyUnknown an outcome held for a key defined late', async () => {
+    const definitions: Record<string, AnyDefinition> = {};
+    const { start, emit, native, release } = setup(definitions);
+    start();
+    await flush();
+    emit(completed({ response: unknownBody }));
+    await flush();
+    expect(native.ackEvents).not.toHaveBeenCalled();
+
+    const onBodyUnknown = jest.fn();
+    definitions.k = {
+      key: 'k',
+      request: jest.fn(),
+      response: jest.fn(),
+      onSuccess: jest.fn(),
+      onBodyUnknown,
+    };
+    release('k');
+    await flush();
+    expect(onBodyUnknown).toHaveBeenCalledWith(
+      unknownBody,
+      { n: 1 },
+      expect.objectContaining({ id: 'u1' }),
+    );
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+  });
+
+  it('acks with no call when a parser definition has neither onSuccess nor onBodyUnknown', async () => {
+    const response = jest.fn();
+    const onError = jest.fn();
+    const { start, native, warn } = setup(
+      { k: { key: 'k', request: jest.fn(), response, onError } },
+      [completed({ response: unknownBody, deliveries: 3 })],
+    );
+    start();
+    await flush();
+    expect(response).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('acks only after an async onBodyUnknown resolves', async () => {
+    const gate = deferred();
+    const onBodyUnknown = jest.fn(() => gate.promise);
+    const { start, emit, native } = setup({
+      k: { key: 'k', request: jest.fn(), response: jest.fn(), onBodyUnknown },
+    });
+    start();
+    await flush();
+    emit(completed({ response: unknownBody }));
+    await flush();
+    expect(onBodyUnknown).toHaveBeenCalledTimes(1);
+    expect(native.ackEvents).not.toHaveBeenCalled();
+    gate.resolve();
+    await flush();
+    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
+  });
+
+  it('keeps the outcome unacknowledged when onBodyUnknown rejects', async () => {
     const failing = jest.fn(async () => {
       throw new Error('fetch failed');
     });
-    const first = setup({
+    const { start, emit, native, warn } = setup({
       k: {
         key: 'k',
         request: jest.fn(),
@@ -1339,46 +1459,15 @@ describe('accepted, body unknown', () => {
         onBodyUnknown: failing,
       },
     });
-    first.start();
+    start();
     await flush();
-    first.emit(event);
+    emit(completed({ response: unknownBody }));
     await flush();
     expect(failing).toHaveBeenCalledTimes(1);
-    expect(first.native.ackEvents).not.toHaveBeenCalled();
-    expect(first.warn).toHaveBeenCalledWith(
+    expect(native.ackEvents).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
       expect.stringMatching(/rejected/),
       expect.any(Error),
     );
-
-    // The next launch replays the journaled outcome with one more delivery.
-    const onBodyUnknown = jest.fn();
-    const second = setup(
-      {
-        k: {
-          key: 'k',
-          request: jest.fn(),
-          response: jest.fn(),
-          onBodyUnknown,
-        },
-      },
-      [{ ...event, deliveries: 2 }],
-    );
-    second.start();
-    await flush();
-    expect(onBodyUnknown).toHaveBeenCalledTimes(1);
-    expect(onBodyUnknown.mock.calls[0]?.[2]).toMatchObject({ deliveries: 2 });
-    expect(second.native.ackEvents).toHaveBeenCalledTimes(1);
-    expect(second.native.ackEvents).toHaveBeenCalledWith(['e1']);
-  });
-
-  it('acks a replayed outcome with a parser and no onBodyUnknown', async () => {
-    const { start, native, warn } = setup(
-      { k: { key: 'k', request: jest.fn(), response: jest.fn() } },
-      [completed({ response: unknownBody, deliveries: 3 })],
-    );
-    start();
-    await flush();
-    expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
-    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

@@ -336,8 +336,10 @@ export type DefinitionWithResponse<V extends Vars, T> = DefinitionBase<V> & {
    * Called instead of the parser and `onSuccess` when the server accepted
    * the request but the response body is unknown (`response.bodyUnknown`).
    * The request is done; a typical handler fetches the object from the
-   * server. Without this handler, such an outcome calls no handler, is
-   * acknowledged, and warns once per key.
+   * server. When the definition has `onSuccess` but no `onBodyUnknown`, the
+   * outcome is held unacknowledged with a warning, and is delivered again
+   * when `define()` adds this handler or at the next launch. With neither
+   * handler, it is acknowledged with no call.
    */
   onBodyUnknown?: (
     response: RawResponse,

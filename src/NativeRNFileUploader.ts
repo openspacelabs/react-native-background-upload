@@ -151,8 +151,9 @@ export interface Spec extends TurboModule {
   // no server answer after the whole request can have reached the server.
   // Persisted with the entry; JS reads a missing value as 0. A completed
   // outcome whose status was accepted but whose body was not received sets
-  // response.bodyUnknown: true and leaves response.body out. It settles
-  // completed, is never sent again, and is never the truncated error.
+  // response.bodyUnknown to the JSON boolean true and leaves response.body
+  // out. JS reads any truthy value as the flag. It settles completed, is
+  // never sent again, and is never the truncated error.
   readonly onSettled: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
   readonly onNotification: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
 }

@@ -686,7 +686,7 @@ describe('attempts in doubt and an unknown body', () => {
     expect(event.kind === 'completed' && 'body' in event.response).toBe(false);
   });
 
-  it('emits an attempt event with bodySent', () => {
+  it('passes an attempt event with bodySent through emit.attempt unchanged', () => {
     const fake = createFakeNative();
     const handler = jest.fn();
     fake.onAttempt(handler);
