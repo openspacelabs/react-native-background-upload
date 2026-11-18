@@ -134,9 +134,11 @@ way: Android documents the `dataSync` limit of 6 hours in 24 for apps that
 target Android 15, and each minute of the poll uses it. In other apps, and
 below Android 15, such a run polls as before.
 
-A doorbell whose network WorkManager sees, but the library's check does
-not, queues the next doorbell with a 30 s delay, so it rings at most once
-every 30 s. Each attempt now checks the network again once it has a
+A ring that the library's own check refuses (WorkManager sees the
+network, the library does not) is followed by the next ring at least 30 s
+later. Two bounded exceptions can add one ring with no delay: a hand-over
+that lands while such a ring runs, and a repair that replaces a doorbell
+WorkManager holds back. Each attempt now checks the network again once it has a
 transmit slot, just before it is written ahead. When the check fails, the
 request leaves the slot with no attempt counted and waits for the network
 again. Before, a Wi-Fi-only request that waited for a slot could go out
@@ -193,6 +195,20 @@ when WorkManager could not be read. `entriesWithoutRun` now also counts the
 entries that wait for a doorbell, so by itself it no longer means an entry
 is stuck: compare it with `entriesByWake`. The `Diagnostic` type has the
 three new fields.
+
+Android: a WorkManager call that fails or times out no longer makes
+`mutate()`, `resume()` or `updateHeaders()` reject, and no longer stops
+the boot sweep. WorkManager queries and awaited inserts now time out after
+10 s. A pass stops scheduling at the first timeout, because each further
+call would hold the queue thread (which also serves every JS call) for
+10 s more. It writes one diagnostics record and goes on with the rest of
+its work: `mutate()` resolves once the entry is saved, and the boot sweep
+still writes its boot record. Then the library itself runs a repair on its
+queue thread, 30 s later at first, and later each time it fails again (up
+to 5 minutes): it starts every queued entry that has no row that can start
+now (its main row when the network fits, else its doorbell) and makes the
+wakes that are missing. No app call is needed. A doorbell ring that meets
+a timeout stops, writes one record and rings again later.
 
 ## 11.3.0
 
