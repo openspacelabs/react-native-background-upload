@@ -320,23 +320,18 @@ class WorkerOpsTest {
   }
 
   @Test
-  fun `park sets awaiting-auth once and wakes at expiry`() {
-    store.save(entry(state = EntryState.RUNNING, expiresAt = 90_000))
-    assertEquals(WorkerOps.ParkResult.PARKED, ops.park("e1", 1, headerGeneration = 0))
-    val e = store.load("e1")!!
-    assertEquals(EntryState.AWAITING_AUTH, e.state)
-    assertEquals(0, e.parkedGeneration)
-    assertEquals(listOf("state:e1:awaiting-auth"), events.log)
-    assertEquals(listOf("e1" to 90_000L), scheduler.wakes)
-    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
-  }
-
-  @Test
-  fun `park with an expiry past the horizon schedules no wake`() {
-    store.save(entry(state = EntryState.RUNNING, expiresAt = FAR_FUTURE))
-    assertEquals(WorkerOps.ParkResult.PARKED, ops.park("e1", 1, headerGeneration = 0))
-    assertEquals(EntryState.AWAITING_AUTH, store.load("e1")!!.state)
+  fun `park sets awaiting-auth once and makes no row, with expiresAt near or past`() {
+    for ((id, expiresAt) in listOf("near" to 90_000L, "past" to 1L)) {
+      store.save(entry(id = id, state = EntryState.RUNNING, expiresAt = expiresAt))
+      assertEquals(WorkerOps.ParkResult.PARKED, ops.park(id, 1, headerGeneration = 0))
+      val e = store.load(id)!!
+      assertEquals(EntryState.AWAITING_AUTH, e.state)
+      assertEquals(0, e.parkedGeneration)
+    }
+    assertEquals(listOf("state:near:awaiting-auth", "state:past:awaiting-auth"), events.log)
     assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
 
   @Test

@@ -68,9 +68,8 @@ internal fun parsed(
   id: String = "e1",
   descriptor: Descriptor = desc(dataJson = """{"a":1}"""),
   varsJson: String = """{"n":1}""",
-  expiresAt: Long = FAR_FUTURE,
   key: String = "note",
-) = EntryParsing.Parsed(id, key, varsJson, descriptor, expiresAt)
+) = EntryParsing.Parsed(id, key, varsJson, descriptor)
 
 internal fun record(
   eventId: String,

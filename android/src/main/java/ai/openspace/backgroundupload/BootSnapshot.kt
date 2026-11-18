@@ -13,10 +13,16 @@ package ai.openspace.backgroundupload
  * setting. entriesByWake counts the queued entries by what starts them:
  * their backoff wake, or the network or Wi-Fi doorbell; doorbells says
  * which doorbell rows exist. Both describe the rows and entries before the
- * sweep changed them.
+ * sweep changed them. delayedPastHorizon counts the delayed runs due more
+ * than [FAR_DELAY_MS] ahead. This version makes none with the default retry
+ * settings (a backoff waits 2 hours at most), so such a run is a wake an
+ * earlier version left, or a backoff whose maxMs is over a day.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"
+
+  /** A delayed run due further ahead than this holds a JobScheduler slot for long. */
+  const val FAR_DELAY_MS = 24L * 60 * 60 * 1000
 
   /**
    * [entries]: the entries the sweep schedules, as it found them, so an
@@ -49,7 +55,7 @@ internal object BootSnapshot {
       "runsByState" to runs.groupingBy { it.state }.eachCount(),
       "delayedRuns" to runs.count { it.delayed },
       "delayedPastHorizon" to runs.count { run ->
-        run.delayed && run.nextScheduleAt != null && run.nextScheduleAt - now > EXPIRY_WAKE_HORIZON_MS
+        run.delayed && run.nextScheduleAt != null && run.nextScheduleAt - now > FAR_DELAY_MS
       },
       "maxRunAttemptCount" to runs.maxOfOrNull { it.runAttemptCount },
       "entriesByWake" to entriesByWake(entries, runs, now, settings),

@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellationException
 import okhttp3.RequestBody
 import java.io.IOException
 import java.util.UUID
-import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -16,7 +15,7 @@ import kotlin.math.min
  * settle, park, or release. The body kind at run time picks the transfer,
  * [SimpleTransfer] or [ChunkedTransfer], so a kind change under a queued run
  * is safe. The entry is read from the store at start and again before every
- * attempt, so fresh headers and a new expiresAt reach a running run.
+ * attempt, so fresh headers reach a running run.
  */
 internal class EntryRun(
   val entryId: String,
@@ -36,8 +35,6 @@ internal class EntryRun(
     /** The chunked part whose failure it was; null for a simple entry. */
     val partStart: Long?,
   ) : Exception("released for backoff")
-
-  class ExpiredException : Exception("expired before completion")
 
   /**
    * The run waited long enough for the network and hands the wait to a
@@ -176,14 +173,6 @@ internal class EntryRun(
   suspend fun run() {
     val initial = store.load(entryId) ?: return // forgotten while queued
     if (initial.legacy) return
-    if (initial.state == EntryState.AWAITING_AUTH) {
-      // The expiry wake of a parked entry. No attempt ran here, so the
-      // stored bytes stand.
-      if (RetryClassifier.isExpired(host.now(), initial.expiresAt)) {
-        ops.settle(entryId, initial.generation, expired(initial).copy(bytesSent = null))
-      }
-      return
-    }
     if (initial.state != EntryState.QUEUED && initial.state != EntryState.RUNNING) return
     if (ops.settings().isPaused(initial.key)) return
     if (!waitUntilDue(initial)) return
@@ -211,10 +200,6 @@ internal class EntryRun(
       } catch (backoff: BackoffException) {
         endProgress(completed = false)
         ops.release(entryId, generation, backoff.nextAttemptAt, backoff.streak, cause = backoff.waitCause, partStart = backoff.partStart)
-        return
-      } catch (error: ExpiredException) {
-        endProgress(completed = false)
-        ops.settle(entryId, generation, expired(current))
         return
       } catch (error: NotOwnedException) {
         endProgress(completed = false)
@@ -271,16 +256,6 @@ internal class EntryRun(
   private fun liveBytesOf(entry: QueueEntry): Long? =
     if (entry.body?.kind == StagedBody.CHUNKED) null else liveBytes
 
-  private fun expired(entry: QueueEntry) = Settlement.Failed(
-    errorKind = "expired",
-    message = "expired before completion",
-    response = null,
-    partIndex = null,
-    url = entry.descriptor?.reportUrl ?: "",
-    method = entry.descriptor?.method ?: "POST",
-    bytesSent = liveBytesOf(entry),
-  )
-
   /**
    * A system stop. Only a time-limit stop that cut a request is a failed
    * attempt. A run that only waited (for the network, a slot, or a short
@@ -326,11 +301,10 @@ internal class EntryRun(
       val e = store.load(entryId)
       if (!EntryTransitions.isOwnedRun(e, generation)) return
       val streak = e!!.backoffStreak + 1
-      val now = host.now()
       val backoff = RetryClassifier.backoffMs(policy(e), streak)
       // A cut request has no response. Which part it cut is not known.
       ops.release(
-        entryId, generation, RetryClassifier.nextAttemptAt(now, backoff, e.expiresAt), streak, wake,
+        entryId, generation, host.now() + backoff, streak, wake,
         cause = WaitCause.NO_RESPONSE, partStart = null,
       )
     }.onFailure {
@@ -402,7 +376,6 @@ internal class EntryRun(
       val s = ops.settings()
       val entry = ops.latest(entryId, generation)
       if (s.isPaused(entry.key)) throw PausedException()
-      if (RetryClassifier.isExpired(host.now(), entry.expiresAt)) throw ExpiredException()
       val wifiOnly = s.wifiOnlyFor(entry)
       val network = safeConnectivity(wifiOnly) { host.connectivity(wifiOnly) }
       if (network == Connectivity.Ok) return
@@ -542,19 +515,17 @@ internal class EntryRun(
   suspend fun backoffOrRelease(
     policy: RetryClassifier.Policy,
     streak: Int,
-    expiresAt: Long,
     cause: String,
     partStart: Long? = null,
   ) {
     val backoff = RetryClassifier.backoffMs(policy, streak)
     val now = host.now()
     if (backoff <= RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
-      val wait = min(backoff, max(0L, expiresAt - now))
-      ops.backingOff(entryId, generation, now + wait, streak, cause, partStart)
-      host.sleep(wait)
+      ops.backingOff(entryId, generation, now + backoff, streak, cause, partStart)
+      host.sleep(backoff)
       return
     }
-    throw BackoffException(RetryClassifier.nextAttemptAt(now, backoff, expiresAt), streak, cause, partStart)
+    throw BackoffException(now + backoff, streak, cause, partStart)
   }
 
   fun progressStarted(total: Long, sent: Long) {

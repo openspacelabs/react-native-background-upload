@@ -13,6 +13,7 @@ import { TurboModuleRegistry } from 'react-native';
 // and 6 mirror them.
 export interface Spec extends TurboModule {
   // Queue-wide settings: { lifetimeMs, retry, ...androidNotificationConfig }.
+  // Android ignores lifetimeMs and expiresAt: it never expires a request.
   // Android persists the notification config, so a headless WorkManager
   // relaunch (no JS) can read it. Each call replaces the full configuration.
   configure(options: CodegenTypes.UnsafeObject): void;
@@ -36,11 +37,11 @@ export interface Spec extends TurboModule {
   //
   // Same id, again. The body is data/form/file/parts, and a different url or
   // method is a different body.
-  // - Same body: resume. New headers, expiresAt and vars replace the stored
-  //   ones.
+  // - Same body: resume. New headers, expiresAt (iOS) and vars replace the
+  //   stored ones.
   // - Different body (data/form/file/parts) and the entry is NOT running
   //   (queued, paused, awaiting-auth, or settled): replace the descriptor,
-  //   staged body, vars, headers and expiresAt, and reopen the entry. It
+  //   staged body, vars, headers and expiresAt (iOS), and reopen the entry. It
   //   settles once more.
   // - Different body, entry running: reject E_RUNNING.
   // - Cancelled-but-unacked entry: a fresh generation. ack forgets the entry
@@ -63,8 +64,8 @@ export interface Spec extends TurboModule {
   // Each live entry that becomes paused moves to 'paused', and each that
   // stops being paused moves back to 'queued', with one 'state' event per
   // entry. A running attempt stops. No outcome is produced and no attempt
-  // event is emitted. A paused entry past expiresAt settles error/expired
-  // when it stops being paused.
+  // event is emitted. On iOS a paused entry past expiresAt settles
+  // error/expired when it stops being paused.
   //
   // pause, resume, setWifiOnly, updateHeaders and configure apply the new
   // settings in memory, then save them best-effort. A failed settings save

@@ -636,8 +636,9 @@ class QueueController(
    *    orphans from a cancel race. Ack them.
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
-   * 5. Schedule every queued entry, and the expiry wake of every parked one.
-   *    A row that WorkManager holds back after a stop is replaced
+   * 5. Schedule every queued entry. A parked entry gets no row, and a wake
+   *    an earlier version made for it is cancelled. A row that WorkManager
+   *    holds back after a stop is replaced
    *    ([WorkScheduler.schedule]), so each queued entry can start now.
    *
    * 6. Delete the orphan directories that hold only copied bodies and are
@@ -708,7 +709,7 @@ class QueueController(
             }
             if (cur !== e) changed += cur
           }
-          if (!paused || cur.state == EntryState.AWAITING_AUTH) {
+          if (!paused) {
             toSchedule += cur
             found += e
           }
@@ -770,9 +771,8 @@ class QueueController(
 
   /**
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
-   * to the wake; a parked entry gets a wake at its expiry, so it settles
-   * 'expired' on time, once that expiry is near (see [EXPIRY_WAKE_HORIZON_MS]).
-   * Any other wake of the entry is stale, so it is cancelled.
+   * to the wake. A parked entry gets no row: updateHeaders() starts it. Any
+   * other wake of the entry is stale, so it is cancelled.
    *
    * With a [probe] (a repair: the boot sweep, resume(), a return to the
    * foreground, a same-id enqueue, setWifiOnly(), a doorbell), an entry
@@ -799,12 +799,7 @@ class QueueController(
           cancelStaleWake(entry.id)
         }
       }
-      EntryState.AWAITING_AUTH ->
-        if (expiryWakeIsNear(entry.expiresAt, now)) {
-          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
-        } else {
-          cancelStaleWake(entry.id)
-        }
+      EntryState.AWAITING_AUTH -> cancelStaleWake(entry.id)
       else -> Unit
     }
   }
@@ -888,13 +883,13 @@ class QueueController(
    * whose WorkManager calls failed. One WorkManager query. An entry with
    * no long wait and no row that can start now is scheduled as a repair
    * (its main row when the network fits, else its doorbell); an entry with
-   * a long wait and no wake gets its wake (KEEP); a parked entry gets its
-   * expiry wake. It does not end a backoff wait. When it fails too, it
+   * a long wait and no wake gets its wake (KEEP). A parked entry needs no
+   * row. It does not end a backoff wait. When it fails too, it
    * asks for itself again, later each time, up to [REPAIR_MAX_MS].
    */
   fun repairRows() {
     val now = clock()
-    val entries = store.all().filter { !it.legacy && (it.state == EntryState.QUEUED || it.state == EntryState.AWAITING_AUTH) }
+    val entries = store.all().filter { !it.legacy && it.state == EntryState.QUEUED }
     val pass = SchedulePass("repair")
     if (entries.isNotEmpty()) {
       val rows = try {
@@ -909,8 +904,7 @@ class QueueController(
           val at = e.nextAttemptAt
           val longWait = at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS
           when {
-            e.state == EntryState.AWAITING_AUTH || longWait ->
-              if (e.id !in rows.withWake) pass.schedule { scheduleRun(e, keepWake = true) }
+            longWait -> if (e.id !in rows.withWake) pass.schedule { scheduleRun(e, keepWake = true) }
             e.id !in rows.startable -> pass.schedule { scheduleRun(e, probe = probe) }
           }
         }

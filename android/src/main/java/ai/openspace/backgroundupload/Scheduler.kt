@@ -16,20 +16,6 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 /**
- * How far ahead a parked entry's expiry wake may be scheduled. A delayed
- * WorkManager row holds one of the app's JobScheduler slots (20 by default)
- * until it runs, and WorkManager's in-process scheduler reads only the 200
- * oldest enqueued rows. Wakes years ahead, from long-lived requests that
- * parked, filled both, so no other work started. An entry that expires past
- * this horizon gets its wake from a later boot sweep, and settles at the
- * first launch after it expires at the latest.
- */
-const val EXPIRY_WAKE_HORIZON_MS = 24L * 60 * 60 * 1000
-
-/** Whether an expiry wake at [expiresAt] is near enough to schedule now. */
-fun expiryWakeIsNear(expiresAt: Long, now: Long): Boolean = expiresAt - now <= EXPIRY_WAKE_HORIZON_MS
-
-/**
  * When WorkManager 2.12.0 starts a row again after a system stop. Read from
  * the 2.12.0 classes: a stop sets the row back to ENQUEUED and keeps its
  * runAttemptCount and its last enqueue time (WorkerWrapper.resetWorkerStatus,
@@ -141,9 +127,9 @@ interface WorkScheduler {
   fun scheduleAndWait(entry: QueueEntry) = schedule(entry)
 
   /**
-   * A run at [at] under a second unique name. Used for long backoffs and for
-   * the expiry of a parked entry. [replace] false keeps a wake that already
-   * exists (the boot sweep).
+   * A run at [at] under a second unique name. Used for long backoffs and
+   * after a stop. [replace] false keeps a wake that already exists (the boot
+   * sweep).
    */
   fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean)
 

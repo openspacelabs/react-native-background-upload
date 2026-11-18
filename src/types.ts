@@ -25,7 +25,8 @@ export type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'GET';
  * Why a request failed. `http` means the server answered and the status was
  * not accepted. `network` is a transport failure. `file` means the payload is
  * missing on disk, so a retry can never succeed. `expired` means `expiresAt`
- * passed. `truncated` means the response body hit the 1 MB cap, so the
+ * passed: iOS only, or an outcome an earlier Android version stored.
+ * `truncated` means the response body hit the 1 MB cap, so the
  * `response` parser could not run. `unknown` covers a parser throw.
  */
 export type ErrorKind =
@@ -126,7 +127,7 @@ export type RequestDescriptor = {
   /** Chunked over `file`. Each part sends its own byte range. */
   parts?: Part[];
   accept?: AcceptRule[];
-  /** Epoch ms. Default now + `lifetimeMs`. */
+  /** Epoch ms. Default now + `lifetimeMs`. Android ignores it. */
   expiresAt?: number;
   retry?: Partial<RetryPolicy>;
   /**
@@ -395,7 +396,7 @@ export type ConfigureOptions = {
    * unlisted key still receives its outcomes.
    */
   definitions?: readonly AnyDefined[];
-  /** Default 14 days. Sets the default `expiresAt` of every entry. */
+  /** Default 14 days. Sets the default `expiresAt` of every entry. Android ignores it. */
   lifetimeMs?: number;
   /**
    * Default 1 MB. `mutate()` rejects `vars` whose JSON is longer. Only `vars`

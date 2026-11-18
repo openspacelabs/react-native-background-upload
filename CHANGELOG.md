@@ -1,5 +1,22 @@
 ## Unreleased
 
+Android never expires a request. It ignores the descriptor's `expiresAt` and
+`configure()`'s `lifetimeMs`, and accepts a call with or without them. A
+request waits and retries until the server accepts it, it settles as an
+error (for example a 4xx that the retry rules do not cover, or a missing
+file), or the app cancels it. Before, Android
+settled an entry `error` with `errorKind: 'expired'` once `expiresAt`
+passed, and gave each parked (`awaiting-auth`) entry a WorkManager wake at
+its `expiresAt` when that was less than 24 hours away. Those wakes could
+fill the app's 20 JobScheduler slots, so other uploads had to wait. A parked
+entry now has no WorkManager row and waits for `updateHeaders()`. An app
+that needs a limit calls `cancel(id)` itself. Entries an earlier version
+queued keep going and are sent, also when their `expiresAt` has passed. An
+`expired` outcome that an earlier version stored and the app has not yet
+acknowledged is still delivered, unchanged. New entries store an
+`expiresAt` that 11.3.0 never reaches, so an app that goes back to 11.3.0
+does not expire them.
+
 Android: a system stop now counts as a failed attempt only when it cut a
 request. Before, every stop at the job's time limit added one backoff step,
 up to 2 hours, also for a run that only waited for the network or for a free

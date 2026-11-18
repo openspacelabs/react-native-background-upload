@@ -12,7 +12,7 @@ class EntryTransitionsTest {
   fun `a settle on a cancelled entry or an older generation is not allowed`() {
     for (accepted in listOf(true, false)) {
       assertTrue(EntryTransitions.canSettle(entry(state = EntryState.RUNNING), 1, accepted))
-      assertTrue(EntryTransitions.canSettle(entry(state = EntryState.AWAITING_AUTH), 1, accepted)) // the expiry wake
+      assertTrue(EntryTransitions.canSettle(entry(state = EntryState.AWAITING_AUTH), 1, accepted))
       assertFalse(EntryTransitions.canSettle(entry(state = EntryState.CANCELLED), 1, accepted))
       assertFalse(EntryTransitions.canSettle(entry(state = EntryState.COMPLETED), 1, accepted))
       assertFalse(EntryTransitions.canSettle(entry(state = EntryState.RUNNING, generation = 2), 1, accepted))
@@ -200,7 +200,6 @@ class EnqueueRulesTest {
       descriptor = desc(url = null, method = "PUT", file = "/f", headers = mapOf("Authorization" to "Bearer new"),
         parts = parts.map { it.copy(accepted = false) }),
       varsJson = """{"n":2}""",
-      expiresAt = 77,
     )
     val next = EnqueueRules.resumed(stored, incoming, paused = false, headerGeneration = 5, now = 9)
     assertEquals(EntryState.QUEUED, next.state)
@@ -208,7 +207,7 @@ class EnqueueRulesTest {
     assertTrue(next.descriptor!!.parts!![0].accepted)
     assertEquals(10, next.bytesSent)
     assertEquals(4, next.attempts)
-    assertEquals(77, next.expiresAt)
+    assertEquals(stored.expiresAt, next.expiresAt) // not read, so not replaced
     assertEquals("""{"n":2}""", next.varsJson)
     assertEquals(5, next.headerGeneration)
     assertNull(next.parkedGeneration)

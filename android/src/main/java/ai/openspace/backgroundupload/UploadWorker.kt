@@ -28,8 +28,6 @@ internal class SimpleTransfer(private val run: EntryRun) {
     var streak = start.backoffStreak
 
     while (true) {
-      val latest = run.ops.latest(run.entryId, run.generation)
-      if (RetryClassifier.isExpired(run.host.now(), latest.expiresAt)) throw EntryRun.ExpiredException()
       run.waitForNetwork()
 
       val a = run.attempt(
@@ -47,7 +45,7 @@ internal class SimpleTransfer(private val run: EntryRun) {
         EntryRun.AttemptResult.Transient -> {
           run.reportProgress(0L, total)
           streak++
-          run.backoffOrRelease(a.policy, streak, a.entry.expiresAt, a.cause)
+          run.backoffOrRelease(a.policy, streak, a.cause)
         }
         is EntryRun.AttemptResult.Terminal ->
           return Settlement.Failed(r.errorKind, r.message, r.response, null, a.url, a.method, bytesSent = run.liveBytes)

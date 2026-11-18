@@ -406,13 +406,20 @@ class EntryRunTest {
     assertEquals(listOf("file"), host.attempts.map { it.errorKind })
   }
 
+  /** The stored entry as an earlier version saved it, with [expiresAt]. Native no longer reads it. */
+  private fun withExpiresAt(expiresAt: Long, id: String = "e1") =
+    store.save(store.load(id)!!.copy(expiresAt = expiresAt))
+
   @Test
-  fun `a 401 parks the entry and wakes it at expiry`() {
-    controller.enqueue(parsed(expiresAt = 90_000))
+  fun `a 401 parks the entry with no WorkManager row, also with expiresAt near`() {
+    controller.enqueue(parsed())
+    withExpiresAt(host.clock + 80_000)
+    val scheduledBefore = scheduler.scheduled.toList()
     respond(401)
     run()
     assertEquals(EntryState.AWAITING_AUTH, store.load("e1")!!.state)
-    assertEquals(listOf("e1" to 90_000L), scheduler.wakes)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(scheduledBefore, scheduler.scheduled)
     assertEquals(listOf("error"), host.attempts.map { it.outcome })
     assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
   }
@@ -434,29 +441,91 @@ class EntryRunTest {
   }
 
   @Test
-  fun `the expiry wake of a parked entry settles expired and keeps the stored bytes`() {
-    controller.enqueue(parsed(expiresAt = 20_000))
-    store.save(store.load("e1")!!.copy(state = EntryState.AWAITING_AUTH, bytesSent = 3))
-    run()
-    assertEquals(EntryState.AWAITING_AUTH, store.load("e1")!!.state) // not yet expired
-    host.clock = 20_000
-    run()
-    assertEquals("expired", outcome().errorKind)
-    assertEquals(3, outcome().bytesSent)
+  fun `a wake that finds a parked entry past expiresAt leaves it parked, with no row and no outcome`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(state = EntryState.AWAITING_AUTH, parkedGeneration = 0, bytesSent = 3, expiresAt = 20_000))
+    host.clock = 30_000
+    run() // a wake an earlier version left
+    val e = store.load("e1")!!
+    assertEquals(EntryState.AWAITING_AUTH, e.state)
+    assertEquals(3, e.bytesSent)
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
     assertEquals(emptyList<TransferRequest>(), host.requests)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    // New headers start it, and it is sent.
+    controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals("Bearer new", host.requests.single().headers["Authorization"])
   }
 
   @Test
-  fun `an entry past expiresAt settles error expired`() {
-    controller.enqueue(parsed(expiresAt = 5_000))
+  fun `an entry with expiresAt in the past is sent`() {
+    controller.enqueue(parsed())
+    withExpiresAt(5_000) // host.clock is 10 000
     run()
-    assertEquals("expired", outcome().errorKind)
-    assertEquals(emptyList<TransferRequest>(), host.requests)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(1, host.requests.size)
+    assertEquals(EventJournal.KIND_COMPLETED, outcome().kind)
   }
 
   @Test
-  fun `a paused entry past expiresAt stays paused, and settles expired at resume`() {
-    controller.enqueue(parsed(expiresAt = 20_000))
+  fun `a chunked entry with expiresAt in the past sends every part`() {
+    chunked()
+    withExpiresAt(5_000)
+    run()
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(3, host.requests.size)
+  }
+
+  @Test
+  fun `a network wait that passes expiresAt keeps polling, then sends`() {
+    controller.enqueue(parsed())
+    withExpiresAt(host.clock + 5_000)
+    host.network = ArrayDeque(listOf(Connectivity.NoInternet, Connectivity.NoInternet))
+    run()
+    assertEquals(listOf(EntryRun.CONNECTIVITY_POLL_MS, EntryRun.CONNECTIVITY_POLL_MS), host.sleeps)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+  }
+
+  @Test
+  fun `a transient failure past expiresAt retries on the normal backoff`() {
+    controller.enqueue(parsed())
+    withExpiresAt(host.clock + 500)
+    respond(503, 503, 200)
+    run()
+    // base 1 s, then 2 s: not cut at expiresAt, and no settle at it.
+    assertEquals(listOf(1_000L, 2_000L), host.sleeps)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(3, host.requests.size)
+  }
+
+  @Test
+  fun `a long backoff past expiresAt releases to the full wait`() {
+    controller.configureRetry(RetryDefaults(baseMs = 60_000, jitter = 0.0))
+    controller.enqueue(parsed())
+    withExpiresAt(host.clock + 500)
+    respond(503)
+    run()
+    assertEquals(host.clock + 60_000, store.load("e1")!!.nextAttemptAt)
+    assertEquals(listOf("e1" to host.clock + 60_000), scheduler.wakes)
+  }
+
+  @Test
+  fun `a timeout stop past expiresAt releases to the full next backoff step`() {
+    controller.enqueue(parsed())
+    store.save(store.load("e1")!!.copy(backoffStreak = 2, expiresAt = host.clock + 500))
+    host.stop = StopKind.TIME_LIMIT
+    host.handler = { _, _ -> throw CancellationException("timeout") }
+    assertThrows(CancellationException::class.java) { run() }
+    assertEquals(host.clock + 4_000, store.load("e1")!!.nextAttemptAt)
+    assertEquals(listOf("e1" to host.clock + 4_000), scheduler.wakes)
+  }
+
+  @Test
+  fun `a paused entry past expiresAt stays paused, and is sent at resume`() {
+    controller.enqueue(parsed())
+    withExpiresAt(20_000)
     controller.pause()
     host.clock = 30_000
     run() // a wake that fires during the pause
@@ -465,8 +534,8 @@ class EntryRunTest {
     controller.resume()
     assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
     run()
-    assertEquals("expired", outcome().errorKind)
-    assertEquals(EntryState.ERROR, store.load("e1")!!.state)
+    assertEquals(EntryState.COMPLETED, store.load("e1")!!.state)
+    assertEquals(1, host.requests.size)
   }
 
   @Test
@@ -1278,7 +1347,7 @@ class EntryRunTest {
     controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = before)))
     store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 40)))
     val after = RetryOverride(null, null, null, null, transient = listOf(bodyStopped.copy(maxRetries = 3), notFound48))
-    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = after), expiresAt = FAR_FUTURE + 1))
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", retry = after)))
     assertEquals(mapOf("404" to 40), store.load("e1")!!.transientHitsByRule)
     respondShaped(400, 400, 200)
     run()

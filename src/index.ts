@@ -256,8 +256,8 @@ export const createUploadClient = ({
   /**
    * No scope pauses the whole queue. `{ keys }` pauses the entries of those
    * keys, queued and future. No outcome is produced; live rows show
-   * 'paused'. A paused entry past its expiresAt settles error/expired when
-   * it resumes.
+   * 'paused'. On iOS a paused entry past its expiresAt settles
+   * error/expired when it resumes. Android never expires a request.
    */
   const pause = async (scope?: PauseScope): Promise<void> =>
     native.pause(toNativeScope('pause', scope));

@@ -312,12 +312,36 @@ class NetworkDoorbellTest {
   }
 
   @Test
+  fun `250 parked entries and 250 doorbell waiters with expiresAt 12 hours away make one sleeping row in all`() {
+    // An earlier version gave each parked entry a wake at its expiresAt
+    // when that was less than 24 hours away: 250 rows here, which fill the
+    // 20-row JobScheduler window. Now a parked entry has no row.
+    network(RequiredNetwork.NONE)
+    val expiresAt = work.now + 12 * 60 * minute
+    for (n in 1..250) {
+      store.save(entry(id = "p$n", state = EntryState.RUNNING, expiresAt = expiresAt))
+      assertEquals(WorkerOps.ParkResult.PARKED, ops().park("p$n", 1, headerGeneration = 0))
+    }
+    for (n in 1..250) handedOver("d$n", entry(id = "d$n", state = EntryState.RUNNING, expiresAt = expiresAt))
+    newController().sweep() // the next app start
+    work.now = expiresAt + minute // past every expiresAt
+    newController().sweep()
+    val unfinished = work.rows.filter { !it.state.isFinished }
+    // One row: the network doorbell. No row of any entry.
+    assertEquals(1, unfinished.size)
+    assertEquals(doorbellRows(RequiredNetwork.CONNECTED), unfinished)
+    assertEquals(1, sleeping().size)
+    assertEquals(250, store.all().count { it.state == EntryState.AWAITING_AUTH })
+    assertEquals(250, store.all().count { it.state == EntryState.QUEUED })
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
   fun `with 20 older sleeping rows the doorbell is outside the JobScheduler window until some of them run`() {
     // Review probe P4. The result: while the app process is dead, the
     // doorbell cannot ring before one of the older rows has run. A backoff
-    // wake runs at the latest at its backoff maximum, an expiry wake within
-    // the 24-hour horizon. The app's start, resume() or foreground starts
-    // the entry sooner when the network fits.
+    // wake runs at the latest at its backoff maximum. The app's start,
+    // resume() or foreground starts the entry sooner when the network fits.
     network(RequiredNetwork.NONE)
     val older = (1..20).map { work.add("x$it#wake", initialDelay = 6 * 60 * minute) }
     handedOver("a")

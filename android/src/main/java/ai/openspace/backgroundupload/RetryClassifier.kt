@@ -150,8 +150,6 @@ object RetryClassifier {
    */
   fun failureKind(verdict: Verdict): String = (verdict as? Verdict.Terminal)?.errorKind ?: "network"
 
-  fun isExpired(now: Long, expiresAt: Long) = now >= expiresAt
-
   /**
    * base * 2^(streak-1), capped at maxMs, then spread by ± jitter and capped
    * again. streak 1 is baseMs.
@@ -163,7 +161,4 @@ object RetryClassifier {
     val spread = raw * (1.0 + jitter * (2.0 * random.nextDouble() - 1.0))
     return min(spread, policy.maxMs.toDouble()).toLong().coerceAtLeast(0L)
   }
-
-  /** The wake time, never later than expiresAt, so an entry expires on time. */
-  fun nextAttemptAt(now: Long, backoffMs: Long, expiresAt: Long): Long = min(now + backoffMs, expiresAt)
 }
