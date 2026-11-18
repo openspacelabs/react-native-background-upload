@@ -71,8 +71,10 @@ export type Delivery = {
   /** Delivery for `id` waits until this promise has settled. */
   trackMutate: (id: string, pending: Promise<unknown>) => void;
   /**
-   * Call after `define()` registers `key`. The outcomes that reached `key`
-   * before it had a definition are routed again, in their original order.
+   * Call after `define()` registers `key`. The held outcomes of `key` are
+   * routed again, in their original order: those that arrived before it had
+   * a definition, and those whose body is unknown and that arrived while its
+   * definition had a parser and onSuccess but no onBodyUnknown.
    */
   release: (key: string) => void;
   /**
@@ -99,8 +101,11 @@ const errorMessage = (e: unknown): string =>
  * the id's in-flight mutate(), ack a cancelled outcome, look up the key, run
  * the handler, ack after its promise resolves. An unknown key or a rejected
  * handler leaves the outcome unacknowledged, so native redelivers it at the
- * next launch. An outcome with an unknown key is also held, and `release()`
- * routes it again when `define()` registers the key in the same session.
+ * next launch. Two kinds of outcome are also held, and `release()` routes
+ * them again when `define()` registers the key in the same session: one whose
+ * key has no definition, and one whose body is unknown when the definition
+ * has a parser and onSuccess but no onBodyUnknown. A held outcome can be
+ * delivered after a later outcome of its id.
  */
 export const createDelivery = ({
   native,

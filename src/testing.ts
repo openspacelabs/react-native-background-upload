@@ -151,9 +151,10 @@ export type FakeNative = Spec & {
    * and emits it on onSettled when a listener exists. Resolves with the event
    * after delivery acks it and the client has handled the ack, so the row
    * hooks no longer show a forgotten row. Rejects after `ackTimeoutMs` when no ack comes:
-   * the handler rejected, the key has no definition, or configure() was not
-   * called. To test those cases, create the fake with a short
-   * `ackTimeoutMs` and expect settle() to reject.
+   * the handler rejected, the key has no definition, the body is unknown and
+   * the definition has a parser and onSuccess but no onBodyUnknown, or
+   * configure() was not called. To test those cases, create the fake with a
+   * short `ackTimeoutMs` and expect settle() to reject.
    */
   settle: (
     id: string,
@@ -440,7 +441,7 @@ export const createFakeNative = (
         ackWaiters.delete(event.eventId);
         reject(
           new Error(
-            `createFakeNative: outcome ${event.eventId} ("${event.key}", id ${id}) was not acknowledged within ${ackTimeoutMs} ms. The handler rejected or has not settled, the key has no definition, or configure() was not called.`,
+            `createFakeNative: outcome ${event.eventId} ("${event.key}", id ${id}) was not acknowledged within ${ackTimeoutMs} ms. The handler rejected or has not settled, the key has no definition, the body is unknown and the definition has a parser and onSuccess but no onBodyUnknown, or configure() was not called.`,
           ),
         );
       }, ackTimeoutMs);

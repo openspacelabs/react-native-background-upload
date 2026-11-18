@@ -387,13 +387,19 @@ server:
   `onSuccess` do not run, and `onError` is not called. `onBodyUnknown(response,
   vars, meta)` runs instead.
 - A definition with a parser and `onSuccess` but no `onBodyUnknown` gets no
-  call. The outcome is held unacknowledged, as for a key with no
-  definition: native keeps the row, the client warns through `onWarning`
-  for each outcome (the detail is the outcome, with its `vars`), and the
-  outcome is delivered when a `define()` of the key adds `onBodyUnknown`, or
-  at the next launch, with `meta.deliveries` grown. A definition with a
-  parser and neither `onSuccess` nor `onBodyUnknown` asked for no result, so
-  its outcome is acknowledged with no call and no warning.
+  call. The outcome is held unacknowledged, and native keeps the row. It is
+  delivered when a `define()` of the key adds `onBodyUnknown`, or at the
+  next launch, with `meta.deliveries` grown. Unlike a key with no
+  definition, this hold emits no `state` event: the row stays `completed`
+  until the outcome is acknowledged. The only signal is a warning through
+  `onWarning`, one per outcome, with the outcome (and its `vars`) as
+  `detail`, so an app should set `onWarning`. This is an exception to the
+  order per id in rule 5: when a same-id `mutate()` with a different body
+  reopens the entry while the outcome is held, the later outcome of that id
+  can be delivered first.
+- A definition with a parser and neither `onSuccess` nor `onBodyUnknown`
+  asked for no result, so its outcome is acknowledged with no call and no
+  warning.
 
 ```ts
 const createNote = uploads.define({
@@ -673,8 +679,10 @@ const CaptureBadge = ({ captureId }: { captureId: string }) => {
 - Completed rows are included. A completed row stays until its outcome is
   acknowledged. When its handler rejects, or its key has no definition and
   no `define()` of the key runs in this session (rule 5 of "Reliable
-  delivery"), the outcome is not acknowledged, so the row stays for the whole
-  session. Do not treat a completed row as work still to do.
+  delivery"), or its body is unknown and its definition has a parser and
+  `onSuccess` but no `onBodyUnknown` ("Accepted, body unknown"), the outcome
+  is not acknowledged, so the row stays for the whole session. Do not treat a
+  completed row as work still to do.
 - `useRequests()` re-renders when a row appears, changes state, or goes. A
   row's bytes are those of its last `state` event.
 - `useRequestsWithProgress()` also re-renders on each `progress` event of a
