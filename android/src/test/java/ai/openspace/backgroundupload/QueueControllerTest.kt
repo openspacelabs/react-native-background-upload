@@ -90,7 +90,7 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `same body on a queued entry resumes with the new headers and vars, and keeps the stored expiresAt`() {
+  fun `same body on a queued entry resumes with the new headers and vars, and stores the downgrade expiresAt`() {
     controller.enqueue(parsed())
     assertEquals(QueueEntry.NO_DEADLINE, store.load("e1")!!.expiresAt)
     // An earlier version's entry, with its expiresAt long past.
@@ -100,7 +100,7 @@ class QueueControllerTest {
     val e = store.load("e1")!!
     assertEquals("Bearer new", e.descriptor!!.headers["Authorization"])
     assertEquals("""{"n":2}""", e.varsJson)
-    assertEquals(5, e.expiresAt) // not read, so not replaced
+    assertEquals(QueueEntry.NO_DEADLINE, e.expiresAt) // so 11.3.0 does not expire it after a downgrade
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(1, e.generation)
     assertEquals(bodyFile, e.body!!.fileName)

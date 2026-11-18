@@ -207,7 +207,7 @@ class EnqueueRulesTest {
     assertTrue(next.descriptor!!.parts!![0].accepted)
     assertEquals(10, next.bytesSent)
     assertEquals(4, next.attempts)
-    assertEquals(stored.expiresAt, next.expiresAt) // not read, so not replaced
+    assertEquals(QueueEntry.NO_DEADLINE, next.expiresAt) // safe after a downgrade
     assertEquals("""{"n":2}""", next.varsJson)
     assertEquals(5, next.headerGeneration)
     assertNull(next.parkedGeneration)

@@ -113,11 +113,12 @@ data class QueueEntry(
   val bytesSent: Long,
   val totalBytes: Long,
   /**
-   * Not read. This version never expires an entry. 11.3.0 and earlier read
+   * Not read. This version never expires an entry. 11.0.2 to 11.3.0 read
    * this field as the time to settle the entry 'expired', and read a
-   * missing one as 0, which is already past. So a new entry stores
-   * [NO_DEADLINE], and an app that goes back to such a version does not
-   * expire it. An entry from an earlier version keeps the value it had.
+   * missing one as 0, which is already past. So a new or re-queued entry
+   * stores [NO_DEADLINE], and an app that goes back to such a version does
+   * not expire it. An entry from an earlier version that is not queued
+   * again keeps the value it had.
    */
   val expiresAt: Long = NO_DEADLINE,
   val createdAt: Long,
@@ -161,7 +162,7 @@ data class QueueEntry(
   val backoffPartStart: Long? = null,
 ) {
   companion object {
-    /** The [expiresAt] a new entry stores. 11.3.0 never reaches it, and does no sum with it that overflows. */
+    /** The [expiresAt] a new or re-queued entry stores. 11.0.2 to 11.3.0 never reach it, and do no sum with it that overflows. */
     const val NO_DEADLINE = Long.MAX_VALUE
   }
 

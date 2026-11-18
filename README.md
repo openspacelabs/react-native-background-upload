@@ -137,7 +137,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `file` | Whole file body. Copied. Moved when `parts` is set. |
 | `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
 | `accept` | Non-2xx responses to treat as success: `[{ status, bodyIncludes? }]`. |
-| `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). On iOS, past it: `error` with `errorKind: 'expired'`. Android ignores it and never expires a request. To put a limit on a request, call `cancel()`. |
+| `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
 | `retry` | Per-request override of the `configure()` retry defaults: `backoff`, `terminalHttp.exempt`, and `transient` rules. See "Reliable delivery". |
 | `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
 | `priority` | `'high'` or `'normal'` (default). On Android at most 4 requests transmit at once, and one of those slots is kept for `'high'`. Normal requests can use only the other 3, so a high-priority request, such as a small JSON POST that creates a session, gets a slot without waiting behind a backlog of file parts. It can still wait when other high-priority requests hold every slot. iOS ignores it for now. |
@@ -190,12 +190,11 @@ Nothing else deletes them.
 different `url` or `method` counts as a different body. `mutate()` with an
 id that exists:
 
-- Same body: resume. New headers and `vars` replace the stored ones. On iOS
-  a new `expiresAt` does too; Android ignores `expiresAt`.
+- Same body: resume. New headers, `expiresAt`, and `vars` replace the stored
+  ones.
 - Different body (`data`, `form`, `file`, or `parts`) and the entry is not
   running (queued, paused, awaiting-auth, or settled): the descriptor, staged
-  body, `vars`, and headers are replaced (on iOS `expiresAt` too) and the
-  entry reopens.
+  body, `vars`, headers, and `expiresAt` are replaced and the entry reopens.
   It settles once more.
 - Different body, entry running: `mutate()` rejects with `E_RUNNING`.
 - A cancelled entry whose outcome is not yet acknowledged: a fresh
@@ -342,9 +341,8 @@ while the app was dead from being sent twice.
    never gives up on its own; the app decides a poison policy from that
    number.
 3. **One outcome per settle cycle.** `pause()` produces none, for the whole
-   queue or for a set of keys. On iOS a paused entry past `expiresAt`
-   settles `error` with `errorKind: 'expired'` when it is resumed. On
-   Android it runs again. A same-id
+   queue or for a set of keys. A paused entry past `expiresAt` settles
+   `error` with `errorKind: 'expired'` when it is resumed. A same-id
    `mutate()` on a settled entry reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise. While native has not answered `enqueue`, the id's
@@ -377,13 +375,13 @@ Retry classes:
 | Attempt outcome | Action |
 | --- | --- |
 | 2xx, or an `accept` rule matches | settle `completed` |
-| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2). On iOS until `expiresAt`. Android has no deadline: it retries until a later attempt settles the request (accepted, a terminal status, or a missing file) or the app calls `cancel()`. On Android a call whose every try failed while it connected waits at most 15 minutes |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt`. On Android a call whose every try failed while it connected waits at most 15 minutes |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
 | other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
 | other 4xx, or a rule past its `maxRetries` | settle `error` with `errorKind: 'http'`, response attached |
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
-| `expiresAt` passed (iOS only) | settle `error` with `errorKind: 'expired'`; bytes kept. Android never settles `expired`: it ignores `expiresAt` |
+| `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
 
 **Transient rule counts.** The library counts the responses each rule
@@ -478,7 +476,7 @@ reached its key before it; see rule 5 of "Reliable delivery".
 | Option | Notes |
 | --- | --- |
 | `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
-| `lifetimeMs` | Default `expiresAt` distance. Default 14 days. Android ignores it. |
+| `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
@@ -505,8 +503,8 @@ await Upload.resume({ keys: ['capture.upload'] }); // captures run
 
 Both states are persisted natively. Each entry that moves emits one `state`
 event (`paused`, then `queued`). No outcome is produced and the bytes are
-kept. On iOS a paused entry past `expiresAt` settles `error` with
-`errorKind: 'expired'` when it is resumed. On Android it runs again.
+kept. A paused entry past `expiresAt` settles `error` with
+`errorKind: 'expired'` when it is resumed.
 
 On Android, `resume()` also ends some retry backoff waits of the queued
 entries in its scope, and they run at once. `pause()` keeps an entry's

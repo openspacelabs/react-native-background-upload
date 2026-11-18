@@ -154,6 +154,8 @@ object EnqueueRules {
       state = if (running) EntryState.RUNNING else initialState(paused),
       attempts = if (reopen) 0 else existing.attempts,
       bytesSent = parts?.let { ChunkedParts.acceptedBytes(it) } ?: if (running) existing.bytesSent else 0L,
+      // Not read here. Written so that a downgrade does not expire the entry.
+      expiresAt = QueueEntry.NO_DEADLINE,
       updatedAt = now,
       nextAttemptAt = null,
       backoffStreak = 0,
