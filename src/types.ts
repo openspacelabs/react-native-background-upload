@@ -481,10 +481,11 @@ export type QueueOrphans = {
 };
 
 /**
- * Android boot snapshot: the queued entries by the wake row they sleep on.
- * Each entry counts once. `backoff`: a wake at the end of a backoff wait.
- * `wifi`: a wake that waits for Wi-Fi. `network`: a wake that waits for any
- * validated network. An entry with none of these is not counted.
+ * Android boot snapshot: the queued entries by what starts them. Each entry
+ * counts once. `backoff`: its wake at the end of a backoff wait. `network`:
+ * the doorbell that waits for any validated network. `wifi`: the doorbell
+ * that waits for Wi-Fi. An entry with a row of its own that is not a
+ * backoff wake is not counted.
  */
 export type BootWakeCounts = {
   backoff: number;
@@ -492,17 +493,24 @@ export type BootWakeCounts = {
   wifi: number;
 };
 
+/** Android boot snapshot: whether each doorbell row exists. */
+export type BootDoorbells = {
+  network: boolean;
+  wifi: boolean;
+};
+
 /**
  * A diagnostic record's structured fields. The boot snapshot (message
  * `'boot sweep'`) always has `v9Leftovers` and `orphans`. On Android it also
  * has `wifiOnly` (the queue's setting) and, when WorkManager could be read,
- * `entriesByWake`. Its other fields are untyped.
+ * `entriesByWake` and `doorbells`. Its other fields are untyped.
  */
 export type DiagnosticData = Record<string, unknown> & {
   v9Leftovers?: V9Leftovers;
   orphans?: QueueOrphans;
   wifiOnly?: boolean;
   entriesByWake?: BootWakeCounts;
+  doorbells?: BootDoorbells;
 };
 
 /**

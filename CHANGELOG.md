@@ -110,54 +110,65 @@ for the next, longer wait.
 
 **Behavior change:** on Android 11 and later (API 30), an upload that finds
 no usable network no longer polls inside a running job until the network
-returns. A run with no foreground mode checks every 10 s for at most
-60 s. Then the entry goes back to `queued` and sleeps on a WorkManager
-wake row that waits for a validated network, or a validated Wi-Fi network
-when Wi-Fi only applies to it. Android starts that row when the network is
-up. This is not a failure: `attempts`, the backoff step and the last
-failure's cause stay as they were, and the row shows no `nextAttemptAt`. A
-run that holds foreground mode polls for at most 30 minutes, then hands
-over the same way, because on Android 15 and later each minute of it uses
-the `dataSync` budget of 6 hours in 24. A run hands over only while none
-of its requests is on its way: a chunked part that waits for the network
-waits for a sibling part to finish sending, and once it hands over, no
-part starts a request. Before, the job used the app's job quota while it
-waited, Android stopped it at its time limit, and in the `rare` standby
-bucket it could wait without a network for the whole run. Android 10 (API
-29) keeps the poll, and its wake rows have no network rule, as before:
-there WorkManager registers one network callback per constrained row.
+returns. A run with no foreground mode checks every 10 s for at most 60 s.
+Then the entry goes back to `queued` with no WorkManager row of its own,
+and waits on a doorbell: one row for the whole queue that waits for a
+validated network, and a second one that waits for a validated Wi-Fi
+network, for the entries that Wi-Fi only applies to. When Android starts a
+doorbell, it sends nothing: it starts each waiting entry whose network
+fits on an ordinary row, and keeps a doorbell for the others. No row that
+runs an upload has a network rule, so WorkManager never stops an upload
+because the network rule is lost. However many entries wait, at most two
+rows sleep for them. The hand-over is not a failure: `attempts`, the
+backoff step and the last failure's cause stay as they were, and it sets
+no `nextAttemptAt`. A run hands over only while none of its requests is on
+its way: a chunked part that waits for the network waits for a sibling
+part to finish sending, and once it hands over, no part starts a request.
+Before, the job used the app's job quota while it waited (in the `rare`
+standby bucket, 10 minutes in 24 hours) and Android stopped it at its time
+limit. Android 10 (API 29) keeps the poll and has no doorbell.
 
-Android: backoff wakes (API 30 and later) now also wait for a validated
-network, so a wake does not start a run offline. A wake after a time-limit
-stop waits for the network the entry needs. A parked entry's expiry wake
-has no network rule. Main-chain rows still have none, and every run still
-checks the network itself before each attempt. One effect: an entry whose
-`expiresAt` passes while it sleeps on such a wake settles `expired` when
-the network returns or the app starts, not at that time.
+On Android 15 and later (API 35), a run that holds foreground mode polls
+for at most 30 minutes, then hands over the same way: each minute of it
+uses the `dataSync` budget of 6 hours in 24. Below API 35 it polls as
+before. Known limit: on API 31 and later a run that a doorbell starts in
+the background cannot take foreground mode, so a single body (`data`,
+`form`, `file`) that needs more than the 10-minute job limit cannot finish
+until the app is opened. Use `parts` for large bodies.
 
-Android: `setWifiOnly(false)` now runs at once each queued entry that
-follows the setting and has no wait and no worker, and cancels its
-Wi-Fi wake. The same value schedules nothing, and `setWifiOnly(true)`
-schedules nothing: a run that starts on another network hands over with
-the Wi-Fi rule.
+**Behavior change:** on Android 11 and later, the boot sweep, `resume()`,
+a return to the foreground, a same-id `mutate()` of a queued entry and
+`setWifiOnly()` start a queued entry with no backoff wait only when the
+network fits it now. Otherwise they add no row and make sure its doorbell
+exists. So an app start with no network starts no run. A new entry, and an
+entry that `updateHeaders()` takes out of `awaiting-auth`, start a run as
+before. Backoff wakes and a parked entry's expiry wake have no network
+rule, as before. An entry whose `expiresAt` passes while it waits for a
+doorbell settles `expired` when its next run starts: when the network
+returns, or at the next start, resume or foreground with a network.
 
-Android: an entry that sleeps on a network wake keeps it through the boot
-sweep, `resume()` and a same-id `mutate()`. The boot sweep and `resume()`
-still add a main row too, so a start never depends on WorkManager's
-constraint tracking alone; offline, that row waits up to 60 s and hands
-over again. A return to the foreground adds a main row only when the
-network fits the entry now, so it does not start a run offline.
+Android: `setWifiOnly(false)` now moves the queued entries that follow the
+setting from the Wi-Fi rule to any network: each one with no long backoff
+wait and no worker starts at once when a network fits, else it waits on
+the network doorbell. The same value, or `setWifiOnly(true)`, schedules
+nothing: a run that starts on another network hands over to the Wi-Fi
+doorbell. A run that hands over uses the setting at that moment.
 
 Android: a Wi-Fi-only upload now also waits while the app binds its
-process to a network that is not Wi-Fi (`bindProcessToNetwork`). Its
-sockets would use that network. The network check reads the system
-default network, which a bind does not change.
+process to a network that is not Wi-Fi (`bindProcessToNetwork`), because
+its sockets would use that network. The network check reads the system
+default network, which a bind does not change. Such a run keeps waiting
+and does not hand over, because the Wi-Fi doorbell would start it again at
+once. A network check that throws now reads as no network, so the upload
+waits. Before, the error settled the upload as failed.
 
 Android: the boot record (`takeDiagnostics()`, message `boot sweep`) now
-has `wifiOnly`, the queue's setting, and `entriesByWake`
-(`{ backoff, network, wifi }`): the queued entries by the wake row they
-sleep on. `entriesByWake` is left out when WorkManager could not be read.
-The `Diagnostic` type has both fields.
+has `wifiOnly`, the queue's setting; `entriesByWake`
+(`{ backoff, network, wifi }`), the queued entries a backoff wake, the
+network doorbell or the Wi-Fi doorbell starts; and `doorbells`
+(`{ network, wifi }`), whether each doorbell row exists. `entriesByWake`
+and `doorbells` are left out when WorkManager could not be read. The
+`Diagnostic` type has the three fields.
 
 ## 11.3.0
 

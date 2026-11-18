@@ -2,6 +2,7 @@
 // nothing here runs. Each @ts-expect-error line fails the build when the
 // error it expects goes away.
 import type {
+  BootDoorbells,
   BootWakeCounts,
   Diagnostic,
   Meta,
@@ -356,6 +357,12 @@ if (wakes) {
   expectType<number>(wakes.network);
   expectType<number>(wakes.wifi);
 }
+const bells = record.data?.doorbells;
+assertEqual<typeof bells, BootDoorbells | undefined>(true);
+if (bells) {
+  expectType<boolean>(bells.network);
+  expectType<boolean>(bells.wifi);
+}
 const wifiOnlySetting = record.data?.wifiOnly;
 assertEqual<typeof wifiOnlySetting, boolean | undefined>(true);
 expectType<boolean | undefined>(wifiOnlySetting);
@@ -363,7 +370,11 @@ const androidBoot: Diagnostic = {
   at: 1,
   level: 'info',
   message: 'boot sweep',
-  data: { wifiOnly: true, entriesByWake: { backoff: 1, network: 2, wifi: 0 } },
+  data: {
+    wifiOnly: true,
+    entriesByWake: { backoff: 1, network: 2, wifi: 0 },
+    doorbells: { network: true, wifi: false },
+  },
 };
 expectType<Diagnostic>(androidBoot);
 const wakesMissingWifi: Diagnostic = {
@@ -374,6 +385,14 @@ const wakesMissingWifi: Diagnostic = {
   data: { entriesByWake: { backoff: 1, network: 2 } },
 };
 expectType<Diagnostic>(wakesMissingWifi);
+const doorbellsMissingWifi: Diagnostic = {
+  at: 1,
+  level: 'info',
+  message: 'boot sweep',
+  // @ts-expect-error both doorbells are reported
+  data: { doorbells: { network: true } },
+};
+expectType<Diagnostic>(doorbellsMissingWifi);
 const wifiOnlyText: Diagnostic = {
   at: 1,
   level: 'info',
