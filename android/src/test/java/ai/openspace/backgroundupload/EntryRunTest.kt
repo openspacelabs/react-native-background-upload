@@ -321,6 +321,29 @@ class EntryRunTest {
   }
 
   @Test
+  fun `pause and resume do not spend a transient rule's retries`() {
+    // Probe P9: before, five pause and resume cycles used all 5 retries
+    // with no time between.
+    controller.configureRetry(
+      RetryDefaults(baseMs = 60_000, jitter = 0.0, transient = listOf(UploadOutcome.TransientRule(409, maxRetries = 5))),
+    )
+    controller.enqueue(parsed())
+    host.handler = { _, _ -> UploadResponse(409, "not yet", mapOf()) }
+    run()
+    val at = store.load("e1")!!.nextAttemptAt
+    repeat(20) {
+      controller.pause()
+      controller.resume()
+      run()
+    }
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(1, host.requests.size)
+    assertEquals(1, e.transientHitsByRule!!.values.sum())
+    assertEquals(at, e.nextAttemptAt)
+  }
+
+  @Test
   fun `a terminal response settles error http with the response and the live bytes`() {
     controller.enqueue(parsed())
     respond(400)
@@ -1168,6 +1191,40 @@ class EntryRunTest {
     // then one per run, each wait twice the one before.
     assertEquals(6 + 7, part0)
     assertEquals((6..13).toList(), streaks)
+  }
+
+  @Test
+  fun `a part that always fails takes the streak over from a slower part`() {
+    // Probe P8: part 1 held streak 9 and is in flight for the whole run.
+    // Before, part 0 started from 0 in every run and released at step 6,
+    // and the higher streak of part 1 hid it: 48 attempts in 8 runs.
+    val n = 40
+    val src = File(tmp.newFolder(), "video.bin").apply { writeBytes(ByteArray(n * 10) { it.toByte() }) }
+    controller.enqueue(
+      parsed(descriptor = desc(url = null, method = "PUT", file = src.path, parts = (0 until n).map { part(it * 10L, it * 10L + 10) })),
+    )
+    store.save(store.load("e1")!!.copy(backoffStreak = 9, backoffPartStart = 10))
+    var part0 = 0
+    host.handler = { r, _ ->
+      val index = r.url.substringAfter("start=").toInt() / 10
+      if (index == 0) {
+        kotlinx.coroutines.yield()
+        part0++
+        UploadResponse(503, "", mapOf())
+      } else {
+        awaitCancellation()
+      }
+    }
+    val streaks = mutableListOf<Int>()
+    repeat(8) {
+      run()
+      val e = store.load("e1")!!
+      streaks += e.backoffStreak
+      host.clock = e.nextAttemptAt ?: host.clock
+    }
+    assertEquals(6 + 7, part0)
+    assertEquals((6..13).toList(), streaks)
+    assertEquals(0L, store.load("e1")!!.backoffPartStart)
   }
 
   /** Four 10-byte parts. [code] answers each request by its part index and how many times that part was sent. */

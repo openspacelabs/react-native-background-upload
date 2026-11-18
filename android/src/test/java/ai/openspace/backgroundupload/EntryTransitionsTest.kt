@@ -89,19 +89,32 @@ class EntryTransitionsTest {
     assertEquals(6, sibling.backoffStreak)
     assertEquals(0L, sibling.backoffPartStart)
     assertEquals(WaitCause.NO_RESPONSE, sibling.waitCause)
+    // The part that releases the run takes the streak with its own count.
     val released = EntryTransitions.toReleased(sibling, 40_000, 2, now = 7, cause = WaitCause.RESPONSE, partStart = 10)
-    assertEquals(6, released.backoffStreak)
-    assertEquals(0L, released.backoffPartStart)
+    assertEquals(2, released.backoffStreak)
+    assertEquals(10L, released.backoffPartStart)
     // A simple entry's release sets the streak it is given, as before.
     assertEquals(2, EntryTransitions.toReleased(chunked.copy(backoffStreak = 6), 40_000, 2, now = 7).backoffStreak)
   }
 
   @Test
-  fun `pause keeps the parked generation and clears the wake time`() {
-    val p = EntryTransitions.toPaused(entry(state = EntryState.AWAITING_AUTH, parkedGeneration = 2, nextAttemptAt = 50), 9)
+  fun `pause keeps the parked generation and the wait, and the paused row does not show the wait`() {
+    val waiting = entry(state = EntryState.QUEUED, nextAttemptAt = 500).copy(waitCause = WaitCause.RESPONSE, failedAt = 5)
+    val p = EntryTransitions.toPaused(waiting.copy(parkedGeneration = 2), 9)
     assertEquals(EntryState.PAUSED, p.state)
     assertEquals(2, p.parkedGeneration)
-    assertNull(p.nextAttemptAt)
+    assertEquals(500L, p.nextAttemptAt)
+    assertEquals(WaitCause.RESPONSE, p.waitCause)
+    assertEquals(5L, p.failedAt)
+    assertNull(p.toRow().nextAttemptAt)
+    assertEquals(500L, waiting.toRow().nextAttemptAt)
+  }
+
+  @Test
+  fun `resume gives back what is left of the wait, and drops one that ended`() {
+    val paused = entry(state = EntryState.PAUSED, nextAttemptAt = 500)
+    assertEquals(500L, EntryTransitions.toResumed(paused, 9).nextAttemptAt)
+    assertNull(EntryTransitions.toResumed(paused, 500).nextAttemptAt)
   }
 
   @Test

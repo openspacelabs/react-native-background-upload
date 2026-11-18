@@ -50,7 +50,9 @@ internal class ChunkedTransfer(private val run: EntryRun) {
     run.progressStarted(total, acceptedBytes.get())
 
     try {
-      ChunkedEngine.run(pending) { index -> executePart(index, blob, start.backoffStreak, start.backoffPartStart) }
+      ChunkedEngine.run(pending) { index ->
+        executePart(index, blob, start.backoffStreak, start.backoffPartStart, parts[index].start)
+      }
     } catch (failed: PartFailed) {
       return failed.settlement
     }
@@ -75,10 +77,11 @@ internal class ChunkedTransfer(private val run: EntryRun) {
    * other parts count their own failures from 0, so an old streak does not
    * slow the parts that work. When no part is named (an older version, or a
    * stop that cut the run), every part uses the stored streak until a part
-   * is accepted in this run.
+   * is accepted in this run. [partStart] is the part's start from the
+   * entry the run began with: within one generation the parts keep their
+   * ranges and order.
    */
-  internal suspend fun executePart(index: Int, blob: File, initialStreak: Int, streakPart: Long?) {
-    val partStart = run.ops.latest(run.entryId, run.generation).descriptor!!.parts!![index].start
+  internal suspend fun executePart(index: Int, blob: File, initialStreak: Int, streakPart: Long?, partStart: Long) {
     var base = if (streakPart == null || streakPart == partStart) initialStreak else 0
     var failures = 0
     while (true) {

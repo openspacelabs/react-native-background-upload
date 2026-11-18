@@ -122,9 +122,11 @@ internal class FakeScheduler : WorkScheduler {
   val cancelledWakes = mutableListOf<String>()
   /** What libraryRuns() returns. */
   val runs = mutableListOf<PendingRun>()
-  /** What startableIds() returns. */
+  /** What rowSummary() returns as startable. */
   val startable = mutableSetOf<String>()
-  /** How many startableIds() calls were made. */
+  /** What rowSummary() returns as withRow, besides the startable ids. */
+  val withRow = mutableSetOf<String>()
+  /** How many rowSummary() calls were made. */
   var startableQueries = 0
 
   override fun schedule(entry: QueueEntry) {
@@ -150,9 +152,9 @@ internal class FakeScheduler : WorkScheduler {
 
   override fun libraryRuns(): List<PendingRun> = runs.toList()
 
-  override fun startableIds(): Set<String> {
+  override fun rowSummary(): RowSummary {
     startableQueries++
-    return startable.toSet()
+    return RowSummary(startable.toSet(), startable + withRow)
   }
 }
 

@@ -225,7 +225,10 @@ class QueueController(
     val now = clock()
     val result = transformAll { e ->
       when {
-        e.state == EntryState.PAUSED && !s.isPaused(e.key) -> EntryTransitions.toResumed(e, now)
+        e.state == EntryState.PAUSED && !s.isPaused(e.key) -> EntryTransitions.toResumed(e, now).let {
+          // The wait kept over the pause follows the clear rule too.
+          if (EntryTransitions.clearsWait(it, now)) EntryTransitions.toRetryNow(it, now) else it
+        }
         inScope(e, keys) && EntryTransitions.clearsWait(e, now) -> EntryTransitions.toRetryNow(e, now)
         else -> e
       }
@@ -244,9 +247,10 @@ class QueueController(
    * ([EntryTransitions.toRetryNow]) and is scheduled. A wait after a server
    * response keeps its time. A queued entry with no wait, whatever its last
    * failure, is scheduled only when no row of it can start now
-   * ([WorkScheduler.startableIds], one query): that is not a retry, it only
+   * ([WorkScheduler.rowSummary], one query): that is not a retry, it only
    * makes sure a row exists, and a row WorkManager holds back after a stop
-   * is replaced ([WorkScheduler.schedule]). Running, paused, parked and
+   * is replaced ([WorkScheduler.schedule]). A queued entry whose wait stays
+   * and that has no unfinished row at all gets its wake again (KEEP). Running, paused, parked and
    * settled entries are left alone. A queued entry sends nothing, and the
    * per-id gate holds any new row while a worker of the entry still winds
    * down, so this never starts a second transfer next to one in progress.
@@ -282,11 +286,16 @@ class QueueController(
       }
     }
     cleared.forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
+    val clearedIds = cleared.map { it.id }.toSet()
     val idle = queued.filter { it.nextAttemptAt == null }
-    if (idle.isNotEmpty()) {
-      val startable = runCatching { scheduler.startableIds() }.onFailure(::failed).getOrNull()
-      idle.filter { startable == null || it.id !in startable }
+    val waiting = queued.filter { it.nextAttemptAt != null && it.id !in clearedIds }
+    if (idle.isNotEmpty() || waiting.isNotEmpty()) {
+      val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
+      idle.filter { rows == null || it.id !in rows.startable }
         .forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
+      // A wait that stays needs its wake. KEEP leaves one that exists.
+      waiting.filter { rows == null || it.id !in rows.withRow }
+        .forEach { e -> runCatching { scheduleRun(e, keepWake = true) }.onFailure(::failed) }
     }
     cleared.forEach { events.state(it.toRow()) }
     first?.let { Diag.error("retryNow: $failures entry saves or WorkManager calls failed; the next app start or foreground tries again", it) }
@@ -651,8 +660,16 @@ class QueueController(
   // A running wake is the entry's worker; it finishes its own run.
   // [isWorkerRunning] reads the in-process gate, so it assumes WorkManager
   // runs workers in the app's process. The library sets no android:process.
+  //
+  // The caller's entry can be a stale snapshot: a worker may have released
+  // the entry with a long wait and made its wake since. So the stored entry
+  // is read again, and a wake it still needs is kept.
   private fun cancelStaleWake(id: String) {
-    if (!isWorkerRunning(id)) scheduler.cancelWake(id)
+    if (isWorkerRunning(id)) return
+    val stored = runCatching { store.load(id) }.getOrNull()
+    val at = stored?.nextAttemptAt
+    if (stored?.state == EntryState.QUEUED && at != null && at - clock() > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) return
+    scheduler.cancelWake(id)
   }
 
   /** The entries [transformAll] saved, and the saves that failed. */

@@ -226,16 +226,18 @@ class MainChainTest {
   }
 
   @Test
-  fun `startableIds lists the entries with a run in progress or a row due now`() {
+  fun `rowSummary lists the entries that can start, and the entries with any unfinished row`() {
     work.add("due")
     work.add("held", runAttemptCount = 8, lastEnqueueTime = work.now - minute)
     work.add("run", state = RUNNING, runAttemptCount = 1)
     work.add("later#wake", initialDelay = minute)
     work.add("blocked", state = BLOCKED)
     work.add("gone", state = CANCELLED)
-    assertEquals(setOf("due", "run"), scheduler.startableIds())
-    // One query, and it asks only for the states that can start.
-    assertEquals(listOf(listOf(ENQUEUED, RUNNING)), work.libraryQueries)
+    val rows = scheduler.rowSummary()
+    assertEquals(setOf("due", "run"), rows.startable)
+    assertEquals(setOf("due", "held", "run", "later", "blocked"), rows.withRow)
+    // One query, and it asks WorkManager for unfinished rows only.
+    assertEquals(listOf(listOf(ENQUEUED, RUNNING, BLOCKED)), work.libraryQueries)
   }
 
   @Test
@@ -284,15 +286,67 @@ class MainChainTest {
   }
 
   @Test
-  fun `retryNow costs no save and no WorkManager query for entries whose wait stays`() {
+  fun `retryNow costs no save and one WorkManager query for entries whose wait stays`() {
     for (n in 1..3) {
       store.save(transportWait("r$n").copy(waitCause = WaitCause.RESPONSE))
+      work.add("r$n#wake", initialDelay = 60 * minute)
     }
     controller.retryNow()
     assertEquals(0, work.nameQueries)
-    assertEquals(emptyList<List<androidx.work.WorkInfo.State>>(), work.libraryQueries)
+    assertEquals(1, work.libraryQueries.size)
     assertEquals(emptyList<String>(), rows.log)
     assertEquals(emptyList<String>(), events.log) // no save changed a row
+  }
+
+  @Test
+  fun `a return to the foreground makes the wake again for a wait that stays and has no row`() {
+    store.save(transportWait().copy(waitCause = WaitCause.RESPONSE))
+    controller.retryNow()
+    assertEquals(listOf("enqueue:e1#wake:KEEP"), rows.log)
+    assertEquals(listOf("e1#wake"), work.rows.filter { !it.state.isFinished }.map { it.name })
+    // With a wake there, KEEP adds nothing.
+    controller.retryNow()
+    assertEquals(1, work.rows.size)
+  }
+
+  @Test
+  fun `a stale snapshot does not cancel the wake a worker made meanwhile`() {
+    // Probe P7. retryNow read the entry queued with no wait. Then, before
+    // the wake cancel, a worker released it with a 60-minute wait and made
+    // its wake, and the fresh main row ran, kept that wake (ensureWake) and
+    // ended.
+    lateinit var ops: WorkerOps
+    var released = false
+    val racing = object : WorkRows by rows {
+      override fun library(states: List<androidx.work.WorkInfo.State>): List<WorkRow> {
+        if (!released) {
+          released = true
+          val e = store.load("e1")!!
+          store.save(e.copy(state = EntryState.RUNNING))
+          ops.release("e1", e.generation, work.now + 60 * minute, 7, cause = WaitCause.RESPONSE)
+        }
+        return work.library(states)
+      }
+
+      override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+        rows.enqueue(name, policy, entry, delayMs)
+        if (name == "e1") {
+          val row = work.rows.last()
+          row.state = RUNNING
+          val e = store.load("e1")!!
+          ops.ensureWake(e, e.nextAttemptAt!!)
+          row.state = androidx.work.WorkInfo.State.SUCCEEDED
+        }
+      }
+    }
+    val sched = RowScheduler(racing) { work.now }
+    ops = WorkerOps(store, journal, settings, events, sched) { work.now }
+    val c = QueueController(store, journal, settings, events, sched, { false }, { work.now })
+    store.save(entry(state = EntryState.QUEUED))
+    c.retryNow()
+    val e = store.load("e1")!!
+    assertEquals(work.now + 60 * minute, e.nextAttemptAt)
+    assertEquals(listOf("e1#wake"), work.rows.filter { !it.state.isFinished }.map { it.name })
   }
 
   @Test

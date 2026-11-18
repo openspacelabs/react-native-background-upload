@@ -165,7 +165,9 @@ data class QueueEntry(
     totalBytes = totalBytes,
     attempts = attempts,
     updatedAt = updatedAt,
-    nextAttemptAt = nextAttemptAt,
+    // A paused entry keeps its wait for resume(), but the row does not
+    // show it: the entry waits for resume(), not for that time.
+    nextAttemptAt = nextAttemptAt.takeIf { state == EntryState.QUEUED || state == EntryState.RUNNING },
     createdAt = createdAt,
   )
 

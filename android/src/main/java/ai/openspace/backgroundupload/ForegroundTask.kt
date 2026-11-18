@@ -1,5 +1,6 @@
 package ai.openspace.backgroundupload
 
+import android.os.SystemClock
 import java.util.concurrent.Executor
 
 /**
@@ -11,13 +12,15 @@ import java.util.concurrent.Executor
  *
  * The host's resume event fires on every Activity resume, also after a
  * permission dialog, a picker or a share sheet. So [retryNow] runs at most
- * once per [MIN_INTERVAL_MS]; the settings save runs every time.
+ * once per [MIN_INTERVAL_MS]; the settings save runs every time. The
+ * interval is measured on [elapsedClock], a monotonic clock
+ * (SystemClock.elapsedRealtime), so a wall clock set back cannot stop it.
  */
 internal class ForegroundTask(
   private val executor: Executor,
   private val saveSettings: () -> Unit,
   private val retryNow: () -> Unit,
-  private val clock: () -> Long = System::currentTimeMillis,
+  private val elapsedClock: () -> Long = SystemClock::elapsedRealtime,
 ) {
   companion object {
     const val MIN_INTERVAL_MS = 30_000L
@@ -29,7 +32,7 @@ internal class ForegroundTask(
   fun onForeground() {
     executor.execute {
       runCatching(saveSettings).onFailure { Diag.error("could not save the settings on return to the foreground", it) }
-      val now = clock()
+      val now = elapsedClock()
       val last = lastRetryAt
       if (last == null || now - last >= MIN_INTERVAL_MS) {
         lastRetryAt = now

@@ -123,12 +123,15 @@ interface WorkScheduler {
   /** Every unfinished WorkManager run of the library, main chains and wakes. For the boot snapshot. */
   fun libraryRuns(): List<PendingRun>
 
-  /**
-   * The entry ids that have a run in progress, or a row WorkManager may
-   * start now. One query for the whole library.
-   */
-  fun startableIds(): Set<String>
+  /** The library's unfinished rows by entry id. One query for the whole library. */
+  fun rowSummary(): RowSummary
 }
+
+/**
+ * [startable]: the ids with a run in progress, or a row WorkManager may
+ * start now. [withRow]: the ids with any unfinished row, main chain or wake.
+ */
+data class RowSummary(val startable: Set<String>, val withRow: Set<String>)
 
 /**
  * One unfinished WorkManager run. [entryId] comes from the run's id tag.
@@ -241,12 +244,13 @@ open class RowScheduler(
       )
     }
 
-  override fun startableIds(): Set<String> {
+  override fun rowSummary(): RowSummary {
     val now = clock()
-    return rows.library(listOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING))
-      .filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }
-      .mapNotNull { it.entryId }
-      .toSet()
+    val open = rows.library(UNFINISHED)
+    return RowSummary(
+      startable = open.filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
+      withRow = open.mapNotNull { it.entryId }.toSet(),
+    )
   }
 }
 

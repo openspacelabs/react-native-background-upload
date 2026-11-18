@@ -199,6 +199,15 @@ class RetryClassifierTest {
   }
 
   @Test
+  fun `a connect failure after an earlier try in the same call does not count`() {
+    // Probe P10. OkHttp attaches the earlier tries of a call as suppressed;
+    // the first may have sent the body on a pooled connection that died.
+    val error = java.net.ConnectException("Failed to connect to example.com")
+    error.addSuppressed(IOException("unexpected end of stream"))
+    assertFalse(RetryClassifier.reachedNoServer(error))
+  }
+
+  @Test
   fun `only a connect failure caps the policy at 15 minutes`() {
     val policy = RetryClassifier.Policy(1_000, 7_200_000, 0.0, listOf(404))
     assertEquals(RetryClassifier.TRANSPORT_FAILURE_MAX_MS, RetryClassifier.transportFailurePolicy(policy).maxMs)

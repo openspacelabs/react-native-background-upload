@@ -36,7 +36,7 @@ class ForegroundTaskTest {
   fun `a return to the foreground calls retryNow once, on the queue executor`() {
     val executor = HeldExecutor()
     val calls = mutableListOf<String>()
-    val task = ForegroundTask(executor, { calls += "save" }, { calls += "retryNow" })
+    val task = ForegroundTask(executor, { calls += "save" }, { calls += "retryNow" }) { 0L }
     task.onForeground()
     assertEquals(emptyList<String>(), calls) // nothing on the calling (UI) thread
     executor.runAll()
@@ -52,7 +52,7 @@ class ForegroundTaskTest {
     val task = ForegroundTask(executor, { throw IllegalStateException("settings") }, retryNow = {
       retried = true
       throw IllegalStateException("work")
-    })
+    }, elapsedClock = { 0L })
     task.onForeground()
     executor.runAll()
     assertEquals(true, retried)

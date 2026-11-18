@@ -58,10 +58,11 @@ object EntryTransitions {
 
   /**
    * A backoff too long to wait inside the worker. The streak is kept so the
-   * next wait keeps growing, with the failure's [cause] and time. A chunked
-   * part ([partStart] set) keeps a higher streak another part holds, so a
-   * part that keeps failing does not start over because a sibling released
-   * the run.
+   * next wait keeps growing, with the failure's [cause] and time. For a
+   * chunked entry the part that released the run ([partStart]) takes the
+   * streak with its own count, also over a higher one another part held:
+   * that part goes on from it in the next run, and a part that only was in
+   * flight, or a slower one, does not hide a part that fails every time.
    */
   fun toReleased(
     e: QueueEntry,
@@ -70,18 +71,15 @@ object EntryTransitions {
     now: Long,
     cause: String? = null,
     partStart: Long? = null,
-  ): QueueEntry {
-    val keepOther = partStart != null && e.backoffStreak > streak
-    return e.copy(
-      state = EntryState.QUEUED,
-      nextAttemptAt = nextAttemptAt,
-      backoffStreak = if (keepOther) e.backoffStreak else streak,
-      backoffPartStart = if (keepOther) e.backoffPartStart else partStart,
-      waitCause = cause,
-      failedAt = now,
-      updatedAt = now,
-    )
-  }
+  ) = e.copy(
+    state = EntryState.QUEUED,
+    nextAttemptAt = nextAttemptAt,
+    backoffStreak = streak,
+    backoffPartStart = partStart,
+    waitCause = cause,
+    failedAt = now,
+    updatedAt = now,
+  )
 
   fun toSettled(e: QueueEntry, state: EntryState, eventId: String, bytesSent: Long, now: Long) = e.copy(
     state = state,
@@ -94,19 +92,23 @@ object EntryTransitions {
 
   /**
    * pause(). parkedGeneration is kept so resume() can return the entry to
-   * awaiting-auth. nextAttemptAt is cleared: resume() retries at once.
+   * awaiting-auth. A backoff wait is kept with its cause and time:
+   * resume() ends it only as [clearsWait] allows, so a pause and resume
+   * cannot spend a transient rule's retries. A paused row does not show it.
    */
   fun toPaused(e: QueueEntry, now: Long) =
-    e.copy(state = EntryState.PAUSED, nextAttemptAt = null, updatedAt = now)
+    e.copy(state = EntryState.PAUSED, updatedAt = now)
 
   /**
    * resume(): back to awaiting-auth only when no updateHeaders() came in
    * between. It compares the entry's own headerGeneration, which
    * updateHeaders() saves with the new headers. The settings value can be
    * older after a settings write that never landed. Back to queued, the
-   * streak keeps at most [RetryClassifier.RETRY_NOW_MAX_STREAK] steps, as
-   * after a cleared wait: a pause and resume in normal work must not give a
-   * failing entry a burst of attempts.
+   * entry keeps what is left of its wait (resume() then applies
+   * [clearsWait]), and the streak keeps at most
+   * [RetryClassifier.RETRY_NOW_MAX_STREAK] steps, as after a cleared wait:
+   * a pause and resume in normal work must not give a failing entry a
+   * burst of attempts.
    */
   fun toResumed(e: QueueEntry, now: Long): QueueEntry =
     if (e.parkedGeneration != null && e.parkedGeneration == e.headerGeneration) {
@@ -116,6 +118,8 @@ object EntryTransitions {
         state = EntryState.QUEUED,
         parkedGeneration = null,
         backoffStreak = min(e.backoffStreak, RetryClassifier.RETRY_NOW_MAX_STREAK),
+        // The wait kept over the pause; one that ended during it is gone.
+        nextAttemptAt = e.nextAttemptAt?.takeIf { it > now },
         updatedAt = now,
       )
     }

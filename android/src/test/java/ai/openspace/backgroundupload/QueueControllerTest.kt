@@ -1309,6 +1309,21 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `pause and resume keep a no-response wait younger than 30 s, and clear an older one`() {
+    val at = now + 3_600_000
+    store.save(waitAfter("e1", WaitCause.NO_RESPONSE, age = 1_000, at = at))
+    controller.pause()
+    controller.resume()
+    assertEquals(at, store.load("e1")!!.nextAttemptAt)
+    assertEquals(listOf("e1" to at), scheduler.wakes) // it gets its wake back
+    controller.pause()
+    now += 30_000
+    controller.resume()
+    assertNull(store.load("e1")!!.nextAttemptAt)
+    assertEquals(5, store.load("e1")!!.backoffStreak)
+  }
+
+  @Test
   fun `retryNow writes no entry file whose wait stays`() {
     store.save(waitAfter("r", WaitCause.RESPONSE, age = 3_600_000))
     store.save(waitAfter("y", WaitCause.NO_RESPONSE, age = 1_000))
