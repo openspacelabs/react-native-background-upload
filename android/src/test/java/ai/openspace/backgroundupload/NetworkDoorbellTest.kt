@@ -411,6 +411,13 @@ class NetworkDoorbellTest {
     c.enqueue(parsed(id = "q6"))
     assertEquals(1, startable("q6").size)
     assertEquals(emptyList<Pair<Long, () -> Unit>>(), repairs)
+    // A later failure that is not a timeout asks for a repair, and the
+    // passes meanwhile still schedule: no stale timeout makes them wait.
+    work.unfinishedErrors = 1
+    c.enqueue(parsed(id = "q7"))
+    assertEquals(1, repairs.size)
+    c.enqueue(parsed(id = "q8"))
+    assertEquals(1, startable("q8").size)
   }
 
   @Test

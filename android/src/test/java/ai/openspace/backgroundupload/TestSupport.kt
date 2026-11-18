@@ -290,11 +290,18 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   /** How many unfinished(name) queries timed out. */
   var timedOutQueries = 0
 
+  /** How many of the next unfinished(name) queries fail with an error that is not a timeout. */
+  var unfinishedErrors = 0
+
   override fun unfinished(name: String): List<WorkRow> {
     if (unfinishedTimeouts > 0) {
       unfinishedTimeouts--
       timedOutQueries++
       throw java.util.concurrent.TimeoutException("WorkManager did not answer")
+    }
+    if (unfinishedErrors > 0) {
+      unfinishedErrors--
+      throw IllegalStateException("WorkManager failed")
     }
     nameQueries++
     return open(name).map(::view)

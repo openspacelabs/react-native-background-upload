@@ -818,16 +818,18 @@ class QueueController(
    * for the pass, and asks for [repairRows] later, which starts the entries
    * the pass left with no row.
    */
-  private inner class SchedulePass(val what: String, isRepair: Boolean = false) {
+  private inner class SchedulePass(val what: String) {
     private var failures = 0
     private var skipped = 0
     private var first: Throwable? = null
 
     /**
      * True from the start while an earlier timeout is not cleared and its
-     * repair is pending: this pass leaves its entries to that repair.
+     * repair is pending: this pass leaves its entries to that repair. The
+     * repair's own pass never is: its task clears [repairPending] before
+     * [repairRows] starts.
      */
-    private val leftToRepair = !isRepair && workManagerTimedOut && repairPending.get()
+    private val leftToRepair = workManagerTimedOut && repairPending.get()
     private var stopped = leftToRepair
 
     val anyFailed get() = failures + skipped > 0
@@ -893,7 +895,7 @@ class QueueController(
   fun repairRows() {
     val now = clock()
     val entries = store.all().filter { !it.legacy && (it.state == EntryState.QUEUED || it.state == EntryState.AWAITING_AUTH) }
-    val pass = SchedulePass("repair", isRepair = true)
+    val pass = SchedulePass("repair")
     if (entries.isNotEmpty()) {
       val rows = try {
         scheduler.rowSummary()
