@@ -32,6 +32,12 @@ export type SettledEvent = {
    * not emitted live. When native omits it, the JS layer treats it as 1.
    */
   deliveries?: number;
+  /**
+   * Attempts in this generation that ended with no server answer after the
+   * whole request can have reached the server. When native omits it, or it is
+   * not a whole number of 0 or more, the JS layer treats it as 0.
+   */
+  ambiguousAttempts?: number;
   /** The entry's real state, for the unhandled-key row. */
   state: RequestState;
   bytesSent?: number;
@@ -113,6 +119,8 @@ export const createDelivery = ({
   // Held outcomes whose key is now defined, by id, in their original order.
   // Each waits for its turn in its id's lane.
   const released = new Map<string, SettledEvent[]>();
+  // Keys already warned about an unknown body with no onBodyUnknown.
+  const bodyUnknownWarned = new Set<string>();
 
   const trackMutate = (id: string, pending: Promise<unknown>): void => {
     const settled = pending.then(
@@ -182,6 +190,21 @@ export const createDelivery = ({
       await definition.onSuccess?.(response, vars, meta);
       return;
     }
+    // The server accepted the request, but there is no body for the parser.
+    // It is not an error and never the truncated error.
+    if (response.bodyUnknown === true) {
+      if (definition.onBodyUnknown) {
+        await definition.onBodyUnknown(response, vars, meta);
+        return;
+      }
+      if (!bodyUnknownWarned.has(event.key)) {
+        bodyUnknownWarned.add(event.key);
+        warn(
+          `delivery: "${event.key}" got an accepted response whose body is unknown (id ${event.id}). Its parser and onSuccess did not run, and the outcome counts as handled. Add onBodyUnknown to the definition to handle this case.`,
+        );
+      }
+      return;
+    }
     if (response.bodyTruncated) {
       await definition.onError?.(
         {
@@ -218,6 +241,7 @@ export const createDelivery = ({
     event: SettledEvent,
     definition: AnyDefinition,
   ): Promise<boolean> => {
+    const ambiguous = event.ambiguousAttempts;
     const meta: Meta = {
       id: event.id,
       key: event.key,
@@ -228,6 +252,12 @@ export const createDelivery = ({
         typeof event.deliveries === 'number' && event.deliveries >= 1
           ? event.deliveries
           : 1,
+      ambiguousAttempts:
+        typeof ambiguous === 'number' &&
+        Number.isInteger(ambiguous) &&
+        ambiguous >= 0
+          ? ambiguous
+          : 0,
     };
     const timer = setTimeout(() => {
       warn(

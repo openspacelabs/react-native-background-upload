@@ -59,7 +59,9 @@ export type FakeEntry = {
 /**
  * The outcome to settle. Fields you omit get defaults: a completed response
  * is status 200 (none for a chunked upload) with `bodyTruncated: false`, an
- * error message is the errorKind, and a cancel reason is 'user'.
+ * error message is the errorKind, and a cancel reason is 'user'. For an
+ * accepted response whose body is unknown, pass
+ * `{ kind: 'completed', response: { status: 201, bodyUnknown: true } }`.
  */
 export type FakeOutcome =
   | { kind: 'completed'; response?: Partial<RawResponse> }
@@ -74,7 +76,10 @@ export type FakeOutcome =
     }
   | { kind: 'cancelled'; cancelReason?: CancelReason };
 
-/** Fields of the SettledEvent to set instead of the defaults. */
+/**
+ * Fields of the SettledEvent to set instead of the defaults. The fake leaves
+ * `ambiguousAttempts` out, as native that does not count it; set it here.
+ */
 export type SettledOverrides = Partial<
   Omit<SettledEvent, 'kind' | 'response' | 'error' | 'cancelReason'>
 >;

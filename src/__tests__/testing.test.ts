@@ -652,3 +652,57 @@ describe('holdNext', () => {
     await expect(fake.enqueue(entry({ id: 'b' }))).resolves.toBe('b');
   });
 });
+
+describe('attempts in doubt and an unknown body', () => {
+  it('leaves ambiguousAttempts out by default, as native that does not count it', async () => {
+    const fake = createFakeNative();
+    await fake.enqueue(entry());
+    const event = fake.buildSettled('a', { kind: 'completed' });
+    expect(event).not.toHaveProperty('ambiguousAttempts');
+  });
+
+  it('sets ambiguousAttempts from the overrides', async () => {
+    const fake = createFakeNative();
+    await fake.enqueue(entry());
+    const event = fake.buildSettled(
+      'a',
+      { kind: 'completed' },
+      { ambiguousAttempts: 2 },
+    );
+    expect(event).toMatchObject({ ambiguousAttempts: 2 });
+  });
+
+  it('builds a completed outcome whose body is unknown', async () => {
+    const fake = createFakeNative();
+    await fake.enqueue(entry());
+    const event = fake.buildSettled('a', {
+      kind: 'completed',
+      response: { status: 201, bodyUnknown: true },
+    });
+    expect(event).toMatchObject({
+      kind: 'completed',
+      response: { status: 201, bodyTruncated: false, bodyUnknown: true },
+    });
+    expect(event.kind === 'completed' && 'body' in event.response).toBe(false);
+  });
+
+  it('emits an attempt event with bodySent', () => {
+    const fake = createFakeNative();
+    const handler = jest.fn();
+    fake.onAttempt(handler);
+    const attempt = {
+      id: 'a',
+      key: 'item.create',
+      requestId: 'r1',
+      attempt: 1,
+      url: 'https://x/1',
+      method: 'POST' as const,
+      outcome: 'error' as const,
+      errorKind: 'network' as const,
+      bodySent: 'full' as const,
+      at: 1,
+    };
+    fake.emit.attempt(attempt);
+    expect(handler).toHaveBeenCalledWith(attempt);
+  });
+});

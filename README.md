@@ -351,6 +351,7 @@ Retry classes:
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
 | `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
+| accepted, but the response body was not received (`bodyUnknown`) | settle `completed`; never sent again. Without a `response` parser, `onSuccess` gets the response with `bodyUnknown: true`. With one, `onBodyUnknown` runs instead. See "Accepted, body unknown" below |
 
 **Transient rule counts.** The library counts the responses each rule
 excuses. It keeps the count by the rule's `status` and `bodyIncludes`, not by
@@ -366,6 +367,40 @@ its place in the list:
   cap, with that part's response.
 - A same-id `mutate()` that reopens a settled entry starts every count at 0.
   A same-id `mutate()` on a live entry keeps the counts.
+
+**Accepted, body unknown.** Sometimes the library knows the server accepted
+a request but did not get the response body. For example, the status line
+said 201 and the connection dropped before the body arrived. The request is
+done: the library does not send it again, and it is not an error. The
+outcome is `completed`, and its `RawResponse` has `bodyUnknown: true` and no
+`body`. This is not `bodyTruncated`, which means the body was over 1 MB.
+
+The app handles it in one place, typically by fetching the object from the
+server:
+
+- A definition without a `response` parser gets it in `onSuccess`, like any
+  completed outcome. Check `response.bodyUnknown` there.
+- A definition with a parser cannot get typed data, so the parser and
+  `onSuccess` do not run, and `onError` is not called. `onBodyUnknown(response,
+  vars, meta)` runs instead. A definition with a parser and no
+  `onBodyUnknown` calls no handler: the outcome is acknowledged, and the
+  client warns once per key (through `onWarning`).
+
+```ts
+const createNote = uploads.define({
+  key: 'note.create',
+  request: (vars: NoteVars) => ({ url: notesUrl(vars), data: vars.note }),
+  response: (raw) => noteSchema.parse(raw),
+  onSuccess: (note) => store.dispatch(noteSaved(note)),
+  // The server has the note, but its answer was lost. Fetch it.
+  onBodyUnknown: (_response, vars) => store.dispatch(fetchNote(vars.noteId)),
+});
+```
+
+As with the other handlers, the outcome is acknowledged after the handler's
+promise resolves, and a handler that rejects runs again at the next launch.
+
+Native code does not set `bodyUnknown` yet, so for now no outcome carries it.
 
 Every attempt sends an `X-Request-Id` header, minted per attempt. `Meta.requestId`
 carries the last one.
@@ -385,6 +420,7 @@ type Definition<V extends object | null, T> =
       response: (raw: unknown, vars: V) => T; // JSON-parsed body, or undefined when there is none
       onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
       onError?: (error: OutcomeError, vars: V, meta: Meta) => void | Promise<void>;
+      onBodyUnknown?: (response: RawResponse, vars: V, meta: Meta) => void | Promise<void>;
     }
   | {
       key: string;
@@ -399,7 +435,7 @@ type Definition<V extends object | null, T> =
 return type. `response` also receives the entry's `vars`, for a parser that
 needs the request context; a one-argument parser such as `schema.parse` is
 assignable as it is. Without `response`, `onSuccess` receives the `RawResponse`
-(`{ status?, headers?, body?, bodyTruncated }`), and an `onSuccess` annotated
+(`{ status?, headers?, body?, bodyTruncated, bodyUnknown? }`), and an `onSuccess` annotated
 with any other type is a compile error. `V` is any object or `null`, so a
 generated API request type works as it is. `mutate()` rejects vars and
 `data` that do not serialize: a cycle, a function, a BigInt, or a value that
@@ -408,16 +444,35 @@ dropped. A `request` that declares no parameter gives `V = null`, and
 `mutate()` then takes no arguments. When `response` is set and
 the body was truncated, `onError` gets `errorKind: 'truncated'`. When
 `response` throws, `onError` gets `errorKind: 'unknown'` with the thrown
-message; the entry still settles as completed. A key that is already defined
+message; the entry still settles as completed. When `response` is set and
+the server accepted the request but the body is unknown, `onBodyUnknown`
+runs instead of the parser and `onSuccess` (see "Accepted, body unknown").
+Only a definition with `response` takes `onBodyUnknown`. A key that is already defined
 is replaced, with a warning in development. A `cancelled` outcome calls no
 handler.
 
-`Meta` is `{ id, key, at, attempts, requestId?, deliveries }`; `at` is the
+`Meta` is `{ id, key, at, attempts, requestId?, deliveries, ambiguousAttempts }`; `at` is the
 native outcome time. `attempts` counts attempts in the current generation; a
 same-id `mutate()` that reopens the entry starts a new one. `deliveries`
 counts deliveries that reached a JS listener: 1 on the first, +1 per replay.
 An outcome journaled while no listener exists starts at 0 and is not emitted
-live, so its first delivery, at the boot replay, is 1.
+live, so its first delivery, at the boot replay, is 1. `ambiguousAttempts`
+counts the attempts of the current generation that ended with no answer from
+the server after the whole request can have reached it. The library always
+sends the request again after such an attempt, so a count above 0 means the
+server can have more than one copy. Native code does not count these yet, so
+for now it is 0, and an outcome journaled before the count existed reads 0.
+
+```ts
+onSuccess: (data, vars, meta) => {
+  if (meta.ambiguousAttempts > 0) {
+    analytics.track('upload sent in doubt', {
+      key: meta.key,
+      count: meta.ambiguousAttempts,
+    });
+  }
+},
+```
 
 ### `mutate(vars, { id? }): Promise<{ id }>`
 
@@ -779,7 +834,7 @@ Fires when the Android progress notification is pressed. No event data.
 | --- | --- |
 | `state` | A full `RequestRow`, one per transition, plus `reason: 'unhandled-key'` for an outcome whose key has no definition. A consumer's reducer is one upsert. |
 | `progress` | `{ id, bytesSent, totalBytes }`, byte-weighted across a chunked upload's parts. |
-| `attempt` | One HTTP attempt: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, at }`. `outcome` is `completed` for an accepted response (2xx or a matching `accept` rule). Any other HTTP response is `error` with `errorKind: 'http'`; a transport failure is `error` with its own `errorKind`. Pause, cancel, and supersede emit no attempt event. Live-only; never journaled or replayed. |
+| `attempt` | One HTTP attempt: `{ id, key, requestId, attempt, url, method, partIndex?, outcome, httpCode?, responseBody? (4 KB cap), responseBodyTruncated?, responseHeaders?, errorKind?, errorMessage?, bodySent?, at }`. `bodySent` is `'none'`, `'partial'` or `'full'`: how much of the request body (for a chunked upload, the part's range) had left when the attempt ended. It is absent when native does not report it; native code does not report it yet. `outcome` is `completed` for an accepted response (2xx or a matching `accept` rule). Any other HTTP response is `error` with `errorKind: 'http'`; a transport failure is `error` with its own `errorKind`. Pause, cancel, and supersede emit no attempt event. Live-only; never journaled or replayed. |
 
 Terminal outcomes do not appear here. They go to the definition's handlers.
 
@@ -902,6 +957,18 @@ model a journal and rows left by a dead session, so `configure()` replays
 them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
 `seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record
 with those counts, the others 0 and no ids.
+
+To test an accepted response whose body is unknown, settle it with the flag.
+To test the count of attempts in doubt, pass it in the overrides; the fake
+leaves it out by default, so `meta.ambiguousAttempts` is 0:
+
+```ts
+await native.settle(
+  id,
+  { kind: 'completed', response: { status: 201, bodyUnknown: true } },
+  { ambiguousAttempts: 1 },
+);
+```
 
 An app that builds its client at module load can use the fake from the mock
 for every client instead. Get it with

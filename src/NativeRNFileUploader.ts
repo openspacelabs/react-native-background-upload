@@ -132,7 +132,9 @@ export interface Spec extends TurboModule {
   // accepted response. Any other HTTP response is 'error' with errorKind
   // 'http'. A transport failure is 'error' with its own errorKind. Pause,
   // cancel, and supersede emit no attempt event. Live-only: never journaled,
-  // never replayed.
+  // never replayed. Optional bodySent: 'none' | 'partial' | 'full', how much
+  // of the request body (a part's range for a chunked upload) had left when
+  // the attempt ended.
   readonly onAttempt: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
   // The journaled terminal outcome, emitted after the journal write, in the
   // ./delivery SettledEvent shape: { eventId, id, key, vars, at, attempts,
@@ -144,6 +146,13 @@ export interface Spec extends TurboModule {
   // layer treats it as 1. No ordering
   // guarantee between different ids; the JS layer orders one id's outcomes.
   // ./delivery routes it to the definition's handlers.
+  //
+  // Optional ambiguousAttempts: attempts of this generation that ended with
+  // no server answer after the whole request can have reached the server.
+  // Persisted with the entry; JS reads a missing value as 0. A completed
+  // outcome whose status was accepted but whose body was not received sets
+  // response.bodyUnknown: true and leaves response.body out. It settles
+  // completed, is never sent again, and is never the truncated error.
   readonly onSettled: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
   readonly onNotification: CodegenTypes.EventEmitter<CodegenTypes.UnsafeObject>;
 }

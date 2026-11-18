@@ -156,6 +156,14 @@ export type RawResponse = {
   headers?: Record<string, string>;
   body?: string;
   bodyTruncated: boolean;
+  /**
+   * `true` when the server accepted the request but the library did not get
+   * the response body, for example when the status line said 201 and the
+   * connection dropped before the body arrived. `body` is then undefined. The
+   * request is done and is not sent again. Absent otherwise. Not the same as
+   * `bodyTruncated`, which means the body was over 1 MB.
+   */
+  bodyUnknown?: true;
 };
 
 /**
@@ -191,6 +199,14 @@ export type Meta = {
    * not emitted live, so its first delivery, at the boot replay, is 1.
    */
   deliveries: number;
+  /**
+   * Attempts in the current generation that ended with no answer from the
+   * server after the whole request can have reached it. The library sent the
+   * request again after each one, so the server can have more than one copy.
+   * 0 when native does not report the count: an older native build, or an
+   * outcome journaled before it.
+   */
+  ambiguousAttempts: number;
 };
 
 export type Outcome =
@@ -289,6 +305,12 @@ export type AttemptEvent = {
   responseHeaders?: Record<string, string>;
   errorKind?: ErrorKind;
   errorMessage?: string;
+  /**
+   * How much of the request body had left the phone when the attempt ended.
+   * For a chunked upload, the body is the part's byte range. Absent when
+   * native does not report it.
+   */
+  bodySent?: 'none' | 'partial' | 'full';
   /** Native stamp, epoch ms. */
   at: number;
 };
@@ -310,12 +332,29 @@ export type DefinitionWithResponse<V extends Vars, T> = DefinitionBase<V> & {
    */
   response: (raw: unknown, vars: V) => T;
   onSuccess?: (data: T, vars: V, meta: Meta) => void | Promise<void>;
+  /**
+   * Called instead of the parser and `onSuccess` when the server accepted
+   * the request but the response body is unknown (`response.bodyUnknown`).
+   * The request is done; a typical handler fetches the object from the
+   * server. Without this handler, such an outcome calls no handler, is
+   * acknowledged, and warns once per key.
+   */
+  onBodyUnknown?: (
+    response: RawResponse,
+    vars: V,
+    meta: Meta,
+  ) => void | Promise<void>;
 };
 
-/** A definition without a parser. `onSuccess` receives the `RawResponse`. */
+/**
+ * A definition without a parser. `onSuccess` receives the `RawResponse`,
+ * also when its body is unknown (`bodyUnknown`), so it takes no
+ * `onBodyUnknown`.
+ */
 export type DefinitionWithoutResponse<V extends Vars> = DefinitionBase<V> & {
   response?: undefined;
   onSuccess?: (data: RawResponse, vars: V, meta: Meta) => void | Promise<void>;
+  onBodyUnknown?: undefined;
 };
 
 /**

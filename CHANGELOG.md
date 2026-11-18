@@ -1,3 +1,30 @@
+## Unreleased
+
+Added, with no change in behavior until native code sends the new fields.
+This release adds the JavaScript side only.
+
+- `Meta.ambiguousAttempts` (a number) counts the attempts of the current
+  generation that ended with no answer from the server after the whole
+  request can have reached it. The library sends the request again after
+  each one, so a count above 0 means the server can have more than one copy.
+  It reads 0 when native does not send it, which is the case for now.
+- `AttemptEvent.bodySent` (`'none' | 'partial' | 'full'`, optional) says how
+  much of the request body had left when the attempt ended.
+- `RawResponse.bodyUnknown` (`true`, optional) marks a request the server
+  accepted whose response body the library did not get. The outcome is
+  `completed`, is never sent again, and is never the `truncated` error. A
+  definition without a `response` parser gets it in `onSuccess`. A
+  definition with one gets the new optional handler
+  `onBodyUnknown(response, vars, meta)` instead of the parser and
+  `onSuccess`; without that handler, no handler runs, the outcome is
+  acknowledged, and the client warns once per key.
+- `createFakeNative()` can settle such an outcome
+  (`response: { bodyUnknown: true }`) and set `ambiguousAttempts` in the
+  overrides.
+
+`Meta` gained a required field, so a `Meta` object built by hand, for
+example in a test, needs `ambiguousAttempts` to compile.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
