@@ -377,7 +377,7 @@ Retry classes:
 | Attempt outcome | Action |
 | --- | --- |
 | 2xx, or an `accept` rule matches | settle `completed` |
-| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2). On iOS until `expiresAt`. Android has no deadline: it retries until a response settles the request or the app calls `cancel()`. On Android a call whose every try failed while it connected waits at most 15 minutes |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2). On iOS until `expiresAt`. Android has no deadline: it retries until a later attempt settles the request (accepted, a terminal status, or a missing file) or the app calls `cancel()`. On Android a call whose every try failed while it connected waits at most 15 minutes |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
 | other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
