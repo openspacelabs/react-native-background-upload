@@ -10,7 +10,18 @@ import type {
   Vars,
 } from './types';
 
-export const DEFAULT_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
+/**
+ * The `expiresAt` that every enqueue sends. The library has no deadlines, and
+ * native ignores the field. Native on 11.3.0 and earlier rejects an entry
+ * with no `expiresAt` number, so the field still crosses. This value is the
+ * largest valid `Date`, so a native that still expires never reaches it.
+ */
+export const NO_DEADLINE_EXPIRES_AT = 8_640_000_000_000_000;
+
+/** The deprecation warning for a descriptor that sets `expiresAt`. */
+const expiresAtWarning = (key: string): string =>
+  `mutate: the descriptor of "${key}" sets expiresAt. expiresAt is deprecated and ignored: the library has no deadlines. To bound a request, call cancel(id). It leaves the types in the next major release.`;
+
 /**
  * How long mutate() waits for native enqueue() before it warns. mutate()
  * keeps waiting after the warning and settles only with native's answer.
@@ -61,7 +72,6 @@ const ANDROID_KEYS = ['noNotification'];
 
 /** The JS-side settings that `configure()` stores. */
 export type Settings = {
-  lifetimeMs: number;
   enqueueTimeoutMs: number;
   maxVarsBytes: number;
   headers?: () => Record<string, string>;
@@ -87,6 +97,7 @@ export const warnIfSlow = (
  * The descriptor as it crosses to native. `dataJson` is `JSON.stringify(data)`
  * and replaces `data`. It is absent for a bodiless request. `wifiOnly` crosses
  * only when the definition set it; absent means "follow setWifiOnly()".
+ * `expiresAt` is always `NO_DEADLINE_EXPIRES_AT`, whatever the definition set.
  */
 export type NativeDescriptor = Omit<RequestDescriptor, 'data'> & {
   dataJson?: string;
@@ -118,7 +129,6 @@ type RegistryDeps = {
   /** Called after `define()` has registered `key`. */
   onDefine?: (key: string) => void;
   warn?: (message: string) => void;
-  now?: () => number;
 };
 
 /**
@@ -564,14 +574,9 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
   ) {
     throw new Error("mutate: priority must be 'high' or 'normal' when present");
   }
-  if (
-    d.expiresAt !== undefined &&
-    (!Number.isFinite(d.expiresAt) || d.expiresAt <= 0)
-  ) {
-    throw new Error(
-      `mutate: expiresAt must be a finite epoch-ms timestamp, got ${d.expiresAt}`,
-    );
-  }
+  // expiresAt is not checked: it is deprecated and ignored, and an ignored
+  // value must never be the reason a request is refused. It stays in
+  // DESCRIPTOR_KEYS, so a descriptor that sets it is accepted.
   const { data, ...rest } = d;
   return data === undefined ? rest : { ...rest, dataJson: serializeData(data) };
 };
@@ -579,8 +584,9 @@ export const validateDescriptor = (descriptor: unknown): NativeDescriptor => {
 /**
  * Holds the definitions of one client and builds `define()`. Every `mutate()`
  * validates `vars` and the descriptor, merges the configured headers under the
- * descriptor's (names matched without regard to case), defaults `expiresAt`,
- * hands the entry to native, and resolves with the entry's own id.
+ * descriptor's (names matched without regard to case), sets `expiresAt` to
+ * `NO_DEADLINE_EXPIRES_AT`, hands the entry to native, and resolves with the
+ * entry's own id.
  */
 export const createRegistry = ({
   native,
@@ -589,8 +595,9 @@ export const createRegistry = ({
   trackMutate,
   onDefine,
   warn = console.warn,
-  now = Date.now,
 }: RegistryDeps): Registry => {
+  // The expiresAt deprecation warns one time per client.
+  let warnedExpiresAt = false;
   // The overloads on Define keep the with-parser and without-parser shapes
   // apart for callers. The client applies them; one implementation serves
   // both.
@@ -639,6 +646,10 @@ export const createRegistry = ({
       if (!isPlainObject(provided)) {
         throw new Error('mutate: configure().headers() must return an object');
       }
+      if (descriptor.expiresAt !== undefined && !warnedExpiresAt && isDev()) {
+        warnedExpiresAt = true;
+        warn(expiresAtWarning(key));
+      }
       const entry: EnqueueEntry = {
         id: options?.id ?? uuidV4(),
         key,
@@ -646,7 +657,7 @@ export const createRegistry = ({
         descriptor: {
           ...descriptor,
           headers: mergeHeaders(provided, descriptor.headers),
-          expiresAt: descriptor.expiresAt ?? now() + settings.lifetimeMs,
+          expiresAt: NO_DEADLINE_EXPIRES_AT,
         },
       };
       // mutate() settles only with native's answer. A late answer is not a

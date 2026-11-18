@@ -17,7 +17,6 @@ import {
 import {
   createRegistry,
   DEFAULT_ENQUEUE_TIMEOUT_MS,
-  DEFAULT_LIFETIME_MS,
   isDev,
   MAX_VARS_BYTES,
   type AnyDefinition,
@@ -98,7 +97,6 @@ export const createUploadClient = ({
   native = NativeRNFileUploader,
 }: UploadClientOptions = {}): UploadClient => {
   const settings: Settings = {
-    lifetimeMs: DEFAULT_LIFETIME_MS,
     enqueueTimeoutMs: DEFAULT_ENQUEUE_TIMEOUT_MS,
     maxVarsBytes: MAX_VARS_BYTES,
   };
@@ -152,6 +150,8 @@ export const createUploadClient = ({
   // already warned about.
   let listedKeys: Set<string> | undefined;
   const warnedKeys = new Set<string>();
+  // The lifetimeMs deprecation warns one time per client.
+  let warnedLifetimeMs = false;
 
   const onDefine = (key: string): void => {
     if (
@@ -179,15 +179,19 @@ export const createUploadClient = ({
 
   /**
    * One-time setup. Call it at boot, after every define() call. Stores the
-   * lifetime, the vars cap, the headers provider, the warning sink and the
-   * retry defaults, forwards the
-   * lifetime, retry and Android notification settings to native, then starts
-   * replaying journaled outcomes. A second call updates the settings and does
-   * not replay again. Each call replaces the full configuration.
+   * vars cap, the enqueue warning time, the headers provider, the warning
+   * sink and the retry defaults, forwards the retry and Android notification
+   * settings to native, then starts replaying journaled outcomes. A second
+   * call updates the settings and does not replay again. Each call replaces
+   * the full configuration.
    *
    * `definitions` is optional. Each listed handle came from define(), so its
    * key is registered already. The list only pins the keys, so that a later
    * define() of another key warns in development.
+   *
+   * `lifetimeMs` is deprecated and ignored: any value is accepted, it does
+   * not cross to native, and in development the first call that sets it
+   * warns.
    */
   const configure = (options: ConfigureOptions): void => {
     // Every check runs before any setting changes, so a rejected call leaves
@@ -203,12 +207,6 @@ export const createUploadClient = ({
     ) {
       throw new Error(
         'configure: definitions must be an array of the handles that define() returned',
-      );
-    }
-    const lifetimeMs = options.lifetimeMs ?? DEFAULT_LIFETIME_MS;
-    if (!Number.isFinite(lifetimeMs) || lifetimeMs <= 0) {
-      throw new Error(
-        `configure: lifetimeMs must be a positive number, got ${options.lifetimeMs}`,
       );
     }
     const enqueueTimeoutMs =
@@ -232,16 +230,21 @@ export const createUploadClient = ({
         `configure: onWarning must be a function when given, got ${typeof options.onWarning}`,
       );
     }
-    settings.lifetimeMs = lifetimeMs;
     settings.enqueueTimeoutMs = enqueueTimeoutMs;
     settings.maxVarsBytes = maxVarsBytes;
     settings.headers = options.headers;
     settings.retry = options.retry;
     settings.onWarning = options.onWarning;
-    const forwarded: Record<string, unknown> = {
-      lifetimeMs,
-      ...options.android,
-    };
+    // After the sink is set, so the warning goes to this call's onWarning.
+    if (options.lifetimeMs !== undefined && !warnedLifetimeMs && isDev()) {
+      warnedLifetimeMs = true;
+      warn(
+        'configure: lifetimeMs is deprecated and ignored: the library has no deadlines. To bound a request, call cancel(id). It leaves the types in the next major release.',
+      );
+    }
+    // lifetimeMs does not cross: native never needed it, because JS used to
+    // turn it into each entry's expiresAt.
+    const forwarded: Record<string, unknown> = { ...options.android };
     if (options.retry !== undefined) {
       forwarded.retry = options.retry;
     }
@@ -256,8 +259,8 @@ export const createUploadClient = ({
   /**
    * No scope pauses the whole queue. `{ keys }` pauses the entries of those
    * keys, queued and future. No outcome is produced; live rows show
-   * 'paused'. A paused entry past its expiresAt settles error/expired when
-   * it resumes.
+   * 'paused'. A paused entry waits with no time limit; it runs again when it
+   * resumes.
    */
   const pause = async (scope?: PauseScope): Promise<void> =>
     native.pause(toNativeScope('pause', scope));

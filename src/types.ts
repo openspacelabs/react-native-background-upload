@@ -24,14 +24,20 @@ export type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'GET';
 /**
  * Why a request failed. `http` means the server answered and the status was
  * not accepted. `network` is a transport failure. `file` means the payload is
- * missing on disk, so a retry can never succeed. `expired` means `expiresAt`
- * passed. `truncated` means the response body hit the 1 MB cap, so the
- * `response` parser could not run. `unknown` covers a parser throw.
+ * missing on disk, so a retry can never succeed. `truncated` means the
+ * response body hit the 1 MB cap, so the `response` parser could not run.
+ * `unknown` covers a parser throw.
+ *
+ * `expired` is deprecated. The library has no deadlines and no longer
+ * produces it. Only an entry that settled under an earlier version, and whose
+ * outcome was not yet acknowledged, carries it; that outcome still reaches
+ * `onError`. It leaves the type in the next major release.
  */
 export type ErrorKind =
   | 'http'
   | 'network'
   | 'file'
+  /** @deprecated Produced only by an earlier version. See `ErrorKind`. */
   | 'expired'
   | 'truncated'
   | 'unknown';
@@ -126,7 +132,12 @@ export type RequestDescriptor = {
   /** Chunked over `file`. Each part sends its own byte range. */
   parts?: Part[];
   accept?: AcceptRule[];
-  /** Epoch ms. Default now + `lifetimeMs`. */
+  /**
+   * @deprecated Ignored. The library has no deadlines: it keeps an entry
+   * until the retry rules settle it or the app calls `cancel(id)`. To bound
+   * a request, call `cancel(id)`. Any value is accepted. Leaves the type in
+   * the next major release.
+   */
   expiresAt?: number;
   retry?: Partial<RetryPolicy>;
   /**
@@ -395,7 +406,11 @@ export type ConfigureOptions = {
    * unlisted key still receives its outcomes.
    */
   definitions?: readonly AnyDefined[];
-  /** Default 14 days. Sets the default `expiresAt` of every entry. */
+  /**
+   * @deprecated Ignored. The library has no deadlines. To bound a request,
+   * call `cancel(id)`. Any value is accepted. Leaves the type in the next
+   * major release.
+   */
   lifetimeMs?: number;
   /**
    * Default 1 MB. `mutate()` rejects `vars` whose JSON is longer. Only `vars`

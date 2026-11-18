@@ -50,7 +50,10 @@ type Target = {
   host: string;
   /** Starts with the mode, for example /ok/json/abc. */
   path: string;
-  /** Seconds from mutate() to expiresAt. Absent means the default. */
+  /**
+   * Seconds from mutate() to expiresAt. expiresAt is deprecated and
+   * ignored, so this checks that nothing expires. Absent sends none.
+   */
   expiresInS?: number;
   silent?: boolean;
 };

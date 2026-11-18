@@ -10,7 +10,10 @@
  * The fake keeps a small model of the native queue. enqueue() adds a row,
  * settle() journals an outcome and emits it, and ackEvents() forgets a
  * completed or cancelled row. It emits a 'state' row for each of these
- * transitions, as native does. It never sends HTTP and never retries.
+ * transitions, as native does. It never sends HTTP and never retries. Like
+ * native, it never expires an entry. To test an `expired` outcome that an
+ * earlier version journaled, pass an event from buildSettled() to
+ * seedUnacknowledged().
  * pause() and resume() keep the whole-queue gate and the paused-keys set,
  * and move rows between 'paused' and 'queued' as native does. It records
  * setWifiOnly() and a descriptor's wifiOnly but has no network to gate.

@@ -12,7 +12,8 @@ import { TurboModuleRegistry } from 'react-native';
 // README's "API" and "Reliable delivery" sections and the plan's sections 5.4
 // and 6 mirror them.
 export interface Spec extends TurboModule {
-  // Queue-wide settings: { lifetimeMs, retry, ...androidNotificationConfig }.
+  // Queue-wide settings: { retry?, ...androidNotificationConfig }. JS no
+  // longer sends lifetimeMs; native ignores it when an older JS sends it.
   // Android persists the notification config, so a headless WorkManager
   // relaunch (no JS) can read it. Each call replaces the full configuration.
   configure(options: CodegenTypes.UnsafeObject): void;
@@ -25,6 +26,11 @@ export interface Spec extends TurboModule {
   // { status: null } would arrive as {}. Native parses them. dataJson
   // "null" is the JSON body null, a real body, not an absent one.
   //
+  // No deadlines: native never expires an entry. descriptor.expiresAt is
+  // ignored, and native accepts an entry with or without it. JS always sends
+  // 8_640_000_000_000_000 (the largest valid Date), because native on 11.3.0
+  // and earlier rejects an entry with no expiresAt number.
+  //
   // Resolves AFTER the row and every staged body copy are durably on disk
   // (tmp file + rename), never on the network. Staging copies a `file` body
   // and form `path` parts, so a large file takes longer. The caller may
@@ -36,12 +42,11 @@ export interface Spec extends TurboModule {
   //
   // Same id, again. The body is data/form/file/parts, and a different url or
   // method is a different body.
-  // - Same body: resume. New headers, expiresAt and vars replace the stored
-  //   ones.
+  // - Same body: resume. New headers and vars replace the stored ones.
   // - Different body (data/form/file/parts) and the entry is NOT running
   //   (queued, paused, awaiting-auth, or settled): replace the descriptor,
-  //   staged body, vars, headers and expiresAt, and reopen the entry. It
-  //   settles once more.
+  //   staged body, vars and headers, and reopen the entry. It settles once
+  //   more.
   // - Different body, entry running: reject E_RUNNING.
   // - Cancelled-but-unacked entry: a fresh generation. ack forgets the entry
   //   only when the generation matches.
@@ -63,8 +68,7 @@ export interface Spec extends TurboModule {
   // Each live entry that becomes paused moves to 'paused', and each that
   // stops being paused moves back to 'queued', with one 'state' event per
   // entry. A running attempt stops. No outcome is produced and no attempt
-  // event is emitted. A paused entry past expiresAt settles error/expired
-  // when it stops being paused.
+  // event is emitted. A paused entry waits with no time limit.
   //
   // pause, resume, setWifiOnly, updateHeaders and configure apply the new
   // settings in memory, then save them best-effort. A failed settings save
@@ -104,7 +108,8 @@ export interface Spec extends TurboModule {
   getRequests(): CodegenTypes.UnsafeObject[];
   // Settled outcomes that JS has not acknowledged, in the onSettled shape,
   // including ones journaled while JS was dead. Internal: ./delivery drains
-  // them after configure().
+  // them after configure(). An outcome journaled by an earlier version can
+  // carry errorKind 'expired'; it is returned like any other.
   getUnacknowledgedEvents(): Promise<CodegenTypes.UnsafeObject[]>;
   // Removes journaled outcomes by eventId. Resolves void. Idempotent; unknown
   // ids are ignored. An acknowledged 'completed' is the one moment native

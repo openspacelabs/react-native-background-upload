@@ -88,8 +88,9 @@ writes the bytes at their offset into `example/server/received/`. It prints
   requests use the same value.
 - **Options for new requests.** The server mode. "Id" sets the id of the next
   request (blank gives a UUID). "Expires in s" sets `expiresAt` to now plus
-  that many seconds. "File size MiB" sets the size of the file and chunked
-  uploads (chunked parts are 5 MiB). "Silent" sends
+  that many seconds. The library ignores `expiresAt` (it has no deadlines),
+  so this only checks that nothing expires. "File size MiB" sets the size of
+  the file and chunked uploads (chunked parts are 5 MiB). "Silent" sends
   `android: { noNotification: true }`. "Handlers throw" makes `onSuccess` and
   `onError` throw after they log, so outcomes stay unacknowledged. The app
   keeps these two switches and the server field after a relaunch.
@@ -176,11 +177,11 @@ back to `Bearer bad` before a step that needs a 401.
    time. Keep it for 10 minutes: the gaps keep growing (64 s, 128 s, and on)
    and do not drop back to 1 s. `adb shell dumpsys jobscheduler | grep -A3 '#wake'`
    shows the wake job. Cancel the row after.
-9. **Expiry.** Mode `down`, "Expires in s" 20. Press "JSON POST". Pass: an
-   outcome `error errorKind=expired` at about 20 s. The row stays `error`.
-   "Cancel" clears it. Variant: mode `auth` with `Bearer bad`, expiry 20:
-   the row parks, then settles `expired` at about 20 s. Clear "Expires in s"
-   after.
+9. **No deadline.** Mode `down`, "Expires in s" 20. Press "JSON POST".
+   Pass: after 60 s there is no outcome, attempts keep coming with backoff,
+   and the row is `running` or `queued`. Variant: mode `auth` with
+   `Bearer bad`, "Expires in s" 20: the row parks on `awaiting-auth` and
+   stays there after 60 s. Cancel the rows and clear "Expires in s" after.
 10. **Kill and relaunch.** Mode `ok`, size 50. Press "Chunked PUT" and kill
     the app at about 40 %. Pass: the server keeps getting parts and prints
     `ASSEMBLED`, and a file appears in `rnbgupload-settled/`. Open the app.
@@ -280,10 +281,9 @@ step says otherwise.
     phone at once for 1 minute. Pass: the server shows hits 1, 2, and 3 at
     about 0 s, +1 s, and +3 s. After unlock, the outcome is `ok` with
     `attempts=3`. The row shows "next in Ns" between attempts.
-13. **Expired.** Mode `down`, "Expires in s" 60. Press "JSON POST". Pass: an
-    outcome `errorKind=expired` about 60 s later, and the row stays `error`.
-    Press "Same id, same body" on it. Pass: the entry opens again and runs
-    (a new generation). Cancel it and clear "Expires in s".
+13. **No deadline.** Mode `down`, "Expires in s" 20. Press "JSON POST".
+    Pass: after 60 s there is no outcome, and attempts keep coming with
+    backoff. Cancel it and clear "Expires in s".
 14. **v9 import.** Install the v9.0.0 build. Start one chunked upload (half
     done) and one simple upload that errors, then kill the app. Install this
     build. Pass: the rows show a `legacy` row for the errored upload, and

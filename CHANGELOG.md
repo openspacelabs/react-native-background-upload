@@ -1,3 +1,25 @@
+## Unreleased
+
+The library has no deadlines. It never expires a request: it keeps an
+entry, and retries it, until the retry rules settle it or the app calls
+`cancel(id)`. An app that needs a bound calls `cancel(id)` itself.
+`expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
+deprecated and ignored. They stay in the types, so code written for 11.3.0
+compiles and runs with no change, and they leave the types in the next
+major release. `mutate()` and `configure()` no longer reject a value for
+them that is not finite, zero or negative. In development, the first
+`mutate()` whose descriptor sets `expiresAt`, and the first `configure()`
+that sets `lifetimeMs`, warn one time per client (to `onWarning`, or
+`console.warn` when none is set).
+`configure()` no longer sends `lifetimeMs` to native. Every enqueue sends
+`expiresAt: 8640000000000000` (the largest valid `Date`), because native in
+11.3.0 and earlier rejects an entry without one. Entries queued by an
+earlier version keep going. `errorKind: 'expired'` is deprecated: only an
+outcome that an earlier version journaled, and that was not yet
+acknowledged, carries it, and it still reaches `onError`. The fake native
+module never expired an entry and still does not. This JS change ships in
+the same release as the Android and iOS changes that remove expiry.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
