@@ -1,6 +1,6 @@
 ## Unreleased
 
-The library has no deadlines. It never expires a request: it keeps an
+The library has no deadlines. It sets no deadline on a request: it keeps an
 entry, and retries it, until the retry rules settle it or the app calls
 `cancel(id)`. An app that needs a bound calls `cancel(id)` itself.
 `expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
@@ -13,11 +13,14 @@ that sets `lifetimeMs`, warn one time per client (to `onWarning`, or
 `console.warn` when none is set).
 `configure()` no longer sends `lifetimeMs` to native. Every enqueue sends
 `expiresAt: 8640000000000000` (the largest valid `Date`), because native in
-11.3.0 and earlier rejects an entry without one. Entries queued by an
-earlier version keep going. `errorKind: 'expired'` is deprecated: only an
-outcome that an earlier version journaled, and that was not yet
-acknowledged, carries it, and it still reaches `onError`. The fake native
-module never expired an entry and still does not. This JS change ships in
+11.3.0 and earlier rejects an entry without one. So every new or re-queued
+request cannot expire. A live entry that an earlier version queued, and
+that is never queued again, keeps its stored deadline until the native side
+stops reading it, in the same release; after that it keeps going. An entry
+that settled `expired` under an earlier version stays an `error` row until
+`cancel()` or a same-id `mutate()`, and an unacknowledged `expired` outcome
+still reaches `onError`. `errorKind: 'expired'` is deprecated. The fake
+native module never expired an entry and still does not. This JS change ships in
 the same release as the Android and iOS changes that remove expiry.
 
 ## 11.3.0

@@ -286,20 +286,23 @@ while the app was dead from being sent twice.
 
 # Reliable delivery
 
-**No deadlines.** The library never expires a request. It keeps an entry,
-and retries it, until the retry rules below settle it or the app calls
-`cancel(id)`.
+**No deadlines.** The library sets no deadline on a request. It keeps an
+entry, and retries it, until the retry rules below settle it or the app
+calls `cancel(id)`.
 
 - `expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
   deprecated and do nothing. `mutate()` and `configure()` accept any value
   for them, and in development the first call that sets one logs a warning.
   They leave the types in the next major release.
 - An app that needs a bound keeps its own clock and calls `cancel(id)`.
-- Entries queued by an earlier version keep going. The deadline they stored
-  is ignored too.
-- An outcome with `errorKind: 'expired'` that an earlier version journaled,
-  and that was not yet acknowledged, still reaches `onError` after the
-  upgrade. The library produces no new `expired` outcomes.
+- JS sends every new or re-queued request to native with a fixed far-future
+  deadline, so it cannot expire.
+- A live entry that an earlier version queued, and that is never queued
+  again, keeps its stored deadline until the native side stops reading it,
+  in the same release. After that it keeps going.
+- An entry that settled `expired` under an earlier version stays an `error`
+  row until `cancel()` or a same-id `mutate()`. If its outcome was not yet
+  acknowledged, the outcome still reaches `onError` after the upgrade.
 
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
    attempt. `mutate()` resolves after the row and every staged body copy are
@@ -910,9 +913,10 @@ behind a held one, as they do on a device. On release they all run in order,
 as usual, and a failure that `failNext()` queued goes to the first call that
 runs. `reset()` drops held calls and the calls behind them. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
-them. Like native, the fake never expires an entry. To test the `expired`
-outcome an earlier version may have journaled, seed one:
-`native.seedUnacknowledged([native.buildSettled(id, { kind: 'error', error: { errorKind: 'expired' } })])`.
+them. The fake never expires an entry. To test the `expired` outcome an
+earlier version may have journaled, seed one with `deliveries: 0`, so its
+first delivery counts 1:
+`native.seedUnacknowledged([native.buildSettled(id, { kind: 'error', error: { errorKind: 'expired' } }, { deliveries: 0 })])`.
 `seedDiagnostics()` adds records for `takeDiagnostics()`, and
 `seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record
 with those counts, the others 0 and no ids.

@@ -28,10 +28,12 @@ export type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'GET';
  * response body hit the 1 MB cap, so the `response` parser could not run.
  * `unknown` covers a parser throw.
  *
- * `expired` is deprecated. The library has no deadlines and no longer
- * produces it. Only an entry that settled under an earlier version, and whose
- * outcome was not yet acknowledged, carries it; that outcome still reaches
- * `onError`. It leaves the type in the next major release.
+ * `expired` is deprecated. JS sends every new or re-queued request with a
+ * fixed far-future deadline, so such a request never settles `expired`. Only
+ * an entry that an earlier version queued can: its stored deadline holds
+ * until the native side stops reading it, in the same release. An `expired`
+ * outcome that was not yet acknowledged still reaches `onError`. It leaves
+ * the type in the next major release.
  */
 export type ErrorKind =
   | 'http'

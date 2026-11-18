@@ -26,10 +26,12 @@ export interface Spec extends TurboModule {
   // { status: null } would arrive as {}. Native parses them. dataJson
   // "null" is the JSON body null, a real body, not an absent one.
   //
-  // No deadlines: native never expires an entry. descriptor.expiresAt is
-  // ignored, and native accepts an entry with or without it. JS always sends
+  // descriptor.expiresAt is deprecated. JS always sends
   // 8_640_000_000_000_000 (the largest valid Date), because native on 11.3.0
-  // and earlier rejects an entry with no expiresAt number.
+  // rejects an entry with no expiresAt number. So a new or re-queued entry
+  // cannot expire. A live entry that an earlier version queued, and that is
+  // never queued again, keeps its stored deadline until the native side
+  // stops reading it, in the same release.
   //
   // Resolves AFTER the row and every staged body copy are durably on disk
   // (tmp file + rename), never on the network. Staging copies a `file` body
