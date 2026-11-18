@@ -39,6 +39,43 @@ internal class EntryRun(
 
   class ExpiredException : Exception("expired before completion")
 
+  /**
+   * The run waited long enough for the network and hands the wait to a
+   * WorkManager wake that waits for [network] ([WorkerOps.awaitNetwork]).
+   */
+  class AwaitNetworkException(val network: RequiredNetwork) : Exception("waiting for the network")
+
+  /**
+   * Keeps a hand-over away from a request on its way. Chunked parts run
+   * side by side, and a part that hands over stops its siblings. So a part
+   * hands over only when no request of the run is sending, and once it does,
+   * no part starts a request: [beginSend] throws instead.
+   */
+  class SendGate {
+    private var sending = 0
+    private var handOver: RequiredNetwork? = null
+
+    /** Before the write-ahead of a request. Throws when a hand-over began. */
+    @Synchronized
+    fun beginSend() {
+      handOver?.let { throw AwaitNetworkException(it) }
+      sending++
+    }
+
+    @Synchronized
+    fun endSend() {
+      sending--
+    }
+
+    /** True when no request is sending; from then on no request starts. */
+    @Synchronized
+    fun tryHandOver(network: RequiredNetwork): Boolean {
+      if (sending > 0) return false
+      handOver = network
+      return true
+    }
+  }
+
   /** The entry was paused (whole queue or its key) between the module's pause and the work cancel reaching us. */
   class PausedException : Exception("paused")
 
@@ -78,6 +115,19 @@ internal class EntryRun(
     /** The poll while the network is unusable (offline, or waiting for wifi). */
     const val CONNECTIVITY_POLL_MS = 10_000L
 
+    /**
+     * How long a run with no foreground mode waits for the network before it
+     * hands over to a wake that waits for it. JobScheduler counts the wait
+     * against the app's job quota, and Android may stop the job meanwhile.
+     */
+    const val HEADLESS_NETWORK_WAIT_MS = 60_000L
+
+    /**
+     * The same for a run that holds foreground mode. On Android 15 and later
+     * each minute of it uses the dataSync budget of 6 hours in 24.
+     */
+    const val FOREGROUND_NETWORK_WAIT_MS = 30 * 60_000L
+
     /** The poll while a short backoff remainder runs out before the run starts. */
     private const val WAIT_POLL_MS = 10_000L
 
@@ -95,6 +145,12 @@ internal class EntryRun(
   @Volatile
   var liveBytes = 0L
     private set
+
+  /** Whether the run holds foreground mode. Once it does, it keeps it until the worker ends. */
+  @Volatile
+  private var holdsForeground = false
+
+  private val sends = SendGate()
 
   /** A cancel reached a request after its write-ahead. Chunked parts set it from their own coroutines. */
   @Volatile
@@ -130,7 +186,7 @@ internal class EntryRun(
         stopCutRequest = false
         if (!first) current = ops.latest(entryId, generation)
         first = false
-        host.foreground(current)
+        holdsForeground = host.foreground(current) || holdsForeground
         val settlement = transfer(current)
         endProgress(completed = settlement is Settlement.Completed)
         ops.settle(entryId, generation, settlement)
@@ -152,6 +208,12 @@ internal class EntryRun(
         return
       } catch (error: PausedException) {
         endProgress(completed = false)
+        return
+      } catch (wait: AwaitNetworkException) {
+        // No request is on its way (SendGate). A wake that fails to enqueue
+        // throws, and the worker returns retry.
+        endProgress(completed = false)
+        ops.awaitNetwork(entryId, generation, wait.network)
         return
       } catch (error: CancellationException) {
         // A system stop moves a running entry back to queued. A pause or a
@@ -295,14 +357,29 @@ internal class EntryRun(
    * Waits until the network fits the entry's Wi-Fi rule: its own wifiOnly,
    * else the queue's setting. Re-reads the settings and the entry at every
    * poll, so a setWifiOnly() toggle reaches an entry that follows it.
+   *
+   * On API 30 and later the run does not poll without end. After
+   * [HEADLESS_NETWORK_WAIT_MS] with no foreground mode, or
+   * [FOREGROUND_NETWORK_WAIT_MS] with it, it throws [AwaitNetworkException]
+   * and the entry sleeps on a wake that WorkManager starts once the network
+   * is up. It hands over only while no request of the run is sending
+   * ([SendGate]). API 29 keeps the poll: there WorkManager registers one
+   * network callback per constrained row.
    */
   suspend fun waitForNetwork() {
+    val since = host.now()
     while (true) {
       val s = ops.settings()
       val entry = ops.latest(entryId, generation)
       if (s.isPaused(entry.key)) throw PausedException()
       if (RetryClassifier.isExpired(host.now(), entry.expiresAt)) throw ExpiredException()
-      if (host.connectivity(s.wifiOnlyFor(entry)) == Connectivity.Ok) return
+      val wifiOnly = s.wifiOnlyFor(entry)
+      if (host.connectivity(wifiOnly) == Connectivity.Ok) return
+      val limit = if (holdsForeground) FOREGROUND_NETWORK_WAIT_MS else HEADLESS_NETWORK_WAIT_MS
+      if (host.networkWakes() && host.now() - since >= limit) {
+        val network = if (wifiOnly) RequiredNetwork.WIFI else RequiredNetwork.CONNECTED
+        if (sends.tryHandOver(network)) throw AwaitNetworkException(network)
+      }
       host.sleep(CONNECTIVITY_POLL_MS)
     }
   }
@@ -333,11 +410,17 @@ internal class EntryRun(
     var failure: Throwable? = null
     val response = try {
       host.withSlot(highPriority) {
-        val e = ops.recordAttempt(entryId, generation, requestId)
-        written = e
-        val d = e.descriptor!!
-        val part = partIndex?.let { d.parts!![it] }
-        host.send(TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
+        // A sibling part that handed over meanwhile: no request starts.
+        sends.beginSend()
+        try {
+          val e = ops.recordAttempt(entryId, generation, requestId)
+          written = e
+          val d = e.descriptor!!
+          val part = partIndex?.let { d.parts!![it] }
+          host.send(TransferRequest(part?.url ?: d.url!!, d.method, headersFor(d, part, requestId), body(d, part)), onProgress)
+        } finally {
+          sends.endSend()
+        }
       }
     } catch (error: CancellationException) {
       // A stop after the write-ahead cut a request that was on its way.

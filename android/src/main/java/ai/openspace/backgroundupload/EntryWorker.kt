@@ -50,6 +50,10 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
   @Volatile
   private var showsNotification = false
 
+  /** setForeground succeeded in this run. WorkManager keeps the run in foreground mode until it ends. */
+  @Volatile
+  private var inForeground = false
+
   /** When this run began. WorkManager set the row RUNNING before it. */
   private var startedAt = 0L
 
@@ -93,10 +97,13 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
       return connectivity
     }
 
-    override suspend fun foreground(entry: QueueEntry) {
+    override suspend fun foreground(entry: QueueEntry): Boolean {
       showsNotification = entry.descriptor?.noNotification == false
-      startForeground()
+      if (startForeground()) inForeground = true
+      return inForeground
     }
+
+    override fun networkWakes() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
     override fun progressStarted(id: String, total: Long, sent: Long) {
       UploadProgress.add(id, total)
@@ -133,16 +140,18 @@ open class EntryWorker(protected val context: Context, params: WorkerParameters)
   // WorkManager relaunch) is not a failure; the transfer runs without
   // foreground priority, under JobScheduler's time limit (see
   // [EntryRun.releaseAfterTimeout]). Any other failure is logged and the run
-  // goes on.
-  private suspend fun startForeground() {
-    if (!showsNotification) return
-    try {
+  // goes on. Returns whether setForeground succeeded.
+  private suspend fun startForeground(): Boolean {
+    if (!showsNotification) return false
+    return try {
       ensureNotificationChannel(notificationManager, config)
       setForeground(getForegroundInfo())
+      true
     } catch (error: CancellationException) {
       throw error
     } catch (error: Throwable) {
       if (!isForegroundStartDenied(error)) Diag.warn("foreground start failed; running without it", error)
+      false
     }
   }
 

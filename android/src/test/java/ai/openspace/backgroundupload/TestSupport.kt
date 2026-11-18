@@ -116,16 +116,22 @@ internal class FakeScheduler : WorkScheduler {
   val wakes = mutableListOf<Pair<String, Long>>()
   /** The replace argument of every scheduleWake, in order. REPLACE makes a fresh row. */
   val wakeReplaces = mutableListOf<Boolean>()
+  /** The network argument of every scheduleWake, in order. */
+  val wakeNetworks = mutableListOf<RequiredNetwork>()
   /** How many of the next scheduleWake calls throw, as a failed WorkManager enqueue. */
   var wakeFailures = 0
   val cancelled = mutableListOf<String>()
   val cancelledWakes = mutableListOf<String>()
+  /** The keepNetworkWake argument of every cancelWake, in order. */
+  val cancelWakeKeeps = mutableListOf<Boolean>()
   /** What libraryRuns() returns. */
   val runs = mutableListOf<PendingRun>()
   /** What rowSummary() returns as startable. */
   val startable = mutableSetOf<String>()
   /** What rowSummary() returns as withWake. */
   val withWake = mutableSetOf<String>()
+  /** What rowSummary() returns as networkWait. */
+  val networkWait = mutableSetOf<String>()
   /** How many rowSummary() calls were made. */
   var startableQueries = 0
 
@@ -133,28 +139,30 @@ internal class FakeScheduler : WorkScheduler {
     scheduled += entry.id
   }
 
-  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
+  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean, network: RequiredNetwork) {
     if (wakeFailures > 0) {
       wakeFailures--
       throw IllegalStateException("enqueue failed")
     }
     wakes += entry.id to at
     wakeReplaces += replace
+    wakeNetworks += network
   }
 
   override fun cancel(id: String) {
     cancelled += id
   }
 
-  override fun cancelWake(id: String) {
+  override fun cancelWake(id: String, keepNetworkWake: Boolean) {
     cancelledWakes += id
+    cancelWakeKeeps += keepNetworkWake
   }
 
   override fun libraryRuns(): List<PendingRun> = runs.toList()
 
   override fun rowSummary(): RowSummary {
     startableQueries++
-    return RowSummary(startable.toSet(), withWake.toSet())
+    return RowSummary(startable.toSet(), withWake.toSet(), networkWait.toSet())
   }
 }
 
@@ -172,6 +180,11 @@ internal class FakeScheduler : WorkScheduler {
  *   lastEnqueueTime + initialDelay.
  * - When a row finishes, the rows blocked behind it become ENQUEUED with a
  *   new lastEnqueueTime.
+ * - A row with a network constraint is ENQUEUED like any other, and
+ *   nextScheduleTimeMillis does not look at the constraint: it is
+ *   lastEnqueueTime + initialDelay (WorkSpec.WorkInfoPojo.calculateNextRunTimeMillis
+ *   passes no constraint to calculateNextRunTime). WorkManager starts the
+ *   row only once that time has come and its network is up.
  */
 internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   class Row(
@@ -182,9 +195,16 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
     var runAttemptCount: Int,
     var lastEnqueueTime: Long,
     val initialDelay: Long,
+    val network: RequiredNetwork = RequiredNetwork.NONE,
   )
 
   val rows = mutableListOf<Row>()
+
+  /** The best network up now: NONE offline, CONNECTED a validated network that is not Wi-Fi, WIFI a validated Wi-Fi network. */
+  var network = RequiredNetwork.WIFI
+
+  /** Whether [r]'s network constraint holds now. */
+  fun constraintMet(r: Row) = r.network.ordinal <= network.ordinal
   private var serial = 0
 
   fun nextScheduleAt(r: Row): Long = when {
@@ -203,14 +223,15 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
     runAttemptCount: Int = 0,
     lastEnqueueTime: Long = now,
     initialDelay: Long = 0,
-  ): Row = Row(serial++, name, name.substringBefore("#"), state, runAttemptCount, lastEnqueueTime, initialDelay)
+    network: RequiredNetwork = RequiredNetwork.NONE,
+  ): Row = Row(serial++, name, name.substringBefore("#"), state, runAttemptCount, lastEnqueueTime, initialDelay, network)
     .also { rows += it }
 
   fun open(name: String) = rows.filter { it.name == name && !it.state.isFinished }
 
-  /** The rows WorkManager may start now. */
+  /** The rows WorkManager may start now: due, and their network is up. */
   fun startableNow(): List<Row> =
-    rows.filter { it.state == WorkInfo.State.ENQUEUED && nextScheduleAt(it) <= now }
+    rows.filter { it.state == WorkInfo.State.ENQUEUED && nextScheduleAt(it) <= now && constraintMet(it) }
 
   override fun unfinished(name: String): List<WorkRow> {
     nameQueries++
@@ -228,7 +249,7 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
     return rows.filter { it.state in states }.map(::view)
   }
 
-  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
+  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork) {
     val open = open(name)
     val state = when (policy) {
       ExistingWorkPolicy.KEEP -> if (open.isNotEmpty()) return else WorkInfo.State.ENQUEUED
@@ -241,7 +262,7 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
         if (open.isNotEmpty()) WorkInfo.State.BLOCKED else WorkInfo.State.ENQUEUED
       else -> error("unused policy $policy")
     }
-    rows += Row(serial++, name, entry.id, state, 0, now, delayMs)
+    rows += Row(serial++, name, entry.id, state, 0, now, delayMs, network)
   }
 
   override fun cancel(name: String) {
@@ -259,5 +280,5 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
     row.state = WorkInfo.State.ENQUEUED
   }
 
-  private fun view(r: Row) = WorkRow(r.entryId, r.state, r.runAttemptCount, nextScheduleAt(r), r.initialDelay > 0)
+  private fun view(r: Row) = WorkRow(r.entryId, r.state, r.runAttemptCount, nextScheduleAt(r), r.initialDelay > 0, r.network)
 }

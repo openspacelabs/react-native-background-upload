@@ -53,7 +53,10 @@ class UploaderModule(context: ReactApplicationContext) :
   private val journal = EventJournal.get(context)
   private val settings = QueueSettingsStore.get(context)
   private val scheduler = WorkManagerScheduler(context)
-  private val controller = QueueController(store, journal, settings, EventReporter, scheduler)
+  private val controller = QueueController(
+    store, journal, settings, EventReporter, scheduler,
+    networkFits = { validateConnectivity(context, settings.load().wifiOnlyFor(it)) == Connectivity.Ok },
+  )
 
   // Before init: the lifecycle listener it registers can fire at once.
   private val foreground = ForegroundTask(queueExecutor, { settings.saveIfBehind() }, { controller.retryNow() })

@@ -21,6 +21,8 @@ class QueueController(
   private val scheduler: WorkScheduler,
   private val isWorkerRunning: (id: String) -> Boolean = WorkerGate::isRunning,
   private val clock: () -> Long = System::currentTimeMillis,
+  /** Whether the network now fits the entry's Wi-Fi rule, as a run checks it. */
+  private val networkFits: (QueueEntry) -> Boolean = { true },
 ) {
 
   // MARK: - enqueue
@@ -249,10 +251,14 @@ class QueueController(
    * failure, is scheduled only when no row of it can start now
    * ([WorkScheduler.rowSummary], one query): that is not a retry, it only
    * makes sure a row exists, and a row WorkManager holds back after a stop
-   * is replaced ([WorkScheduler.schedule]). A queued entry whose wait stays
-   * and that has no delayed wake row gets its wake again (KEEP), also when
-   * it has a main row: WorkManager may hold that row back for hours. Running, paused, parked and
-   * settled entries are left alone. A queued entry sends nothing, and the
+   * is replaced ([WorkScheduler.schedule]). An entry that sleeps on a wake
+   * that waits for the network gets a main row only when the network fits
+   * now ([networkFits]); offline, the wake stays its only row, so a
+   * foreground does not start a run that polls and hands over again. A
+   * queued entry whose wait stays and that has no delayed wake row gets its
+   * wake again (KEEP), also when it has a main row: WorkManager may hold
+   * that row back for hours. Running, paused, parked and settled entries
+   * are left alone. A queued entry sends nothing, and the
    * per-id gate holds any new row while a worker of the entry still winds
    * down, so this never starts a second transfer next to one in progress.
    *
@@ -292,12 +298,17 @@ class QueueController(
     val waiting = queued.filter { it.nextAttemptAt != null && it.id !in clearedIds }
     if (idle.isNotEmpty() || waiting.isNotEmpty()) {
       val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
-      idle.filter { rows == null || it.id !in rows.startable }
+      // An entry that sleeps on a network wake waits for WorkManager while
+      // the network does not fit. When it fits, a main row starts the entry
+      // now too, so a start never depends on WorkManager's constraint
+      // tracking alone. The per-id gate runs the two rows one after the
+      // other, and the second finds the entry no longer queued.
+      idle.filter { rows == null || (it.id !in rows.startable && (it.id !in rows.networkWait || networkFits(it))) }
         .forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
       // A wait that stays needs its wake. KEEP leaves one that exists, so
       // this is at most one enqueue per entry that lacks a wake.
       waiting.filter { rows == null || it.id !in rows.withWake }
-        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false) }.onFailure(::failed) }
+        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false, requiredNetwork(e, settings.load())) }.onFailure(::failed) }
     }
     cleared.forEach { events.state(it.toRow()) }
     first?.let { Diag.error("retryNow: $failures entry saves or WorkManager calls failed; the next app start or foreground tries again", it) }
@@ -406,9 +417,28 @@ class QueueController(
    * The settings calls (this one, [pause], [resume], [configureRetry],
    * [updateHeaders]) never throw for a failed settings write. See
    * [QueueSettingsStore.update].
+   *
+   * A change to off runs now every queued entry that follows the setting
+   * and has no wait and no worker: such an entry may sleep on a wake that
+   * waits for Wi-Fi, which no longer fits. That wake is cancelled once the
+   * main row is made. A change to on needs no work: a run that starts on
+   * another network fails the check and hands over with the Wi-Fi rule.
+   * The same value schedules nothing. A failed WorkManager call is logged
+   * and the next entry goes on.
    */
   fun setWifiOnly(enabled: Boolean) {
-    settings.update { it.copy(wifiOnly = enabled) }
+    val before = settings.load().wifiOnly
+    val after = settings.update { it.copy(wifiOnly = enabled) }.wifiOnly
+    if (!before || after) return
+    store.all()
+      .filter {
+        !it.legacy && it.state == EntryState.QUEUED && it.nextAttemptAt == null &&
+          it.descriptor?.wifiOnly == null && !isWorkerRunning(it.id)
+      }
+      .forEach { e ->
+        runCatching { scheduleRun(e, keepNetworkWake = false) }
+          .onFailure { Diag.error("setWifiOnly: could not schedule '${e.id}'", it) }
+      }
   }
 
   fun configureRetry(defaults: RetryDefaults) {
@@ -612,7 +642,7 @@ class QueueController(
     val removed = store.removeOrphans(counted.orphanDirs, now)
     Diag.info(
       BootSnapshot.MESSAGE,
-      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed)),
+      BootSnapshot.of(found, runs, now, counted.afterCleanup(removed), s.wifiOnly),
       replaceUntaken = true,
     )
     changed.forEach { events.state(it.toRow()) }
@@ -632,26 +662,28 @@ class QueueController(
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
    * to the wake; a parked entry gets a wake at its expiry, so it settles
    * 'expired' on time, once that expiry is near (see [EXPIRY_WAKE_HORIZON_MS]).
-   * Any other wake of the entry is stale, so it is cancelled.
+   * Any other wake of the entry is stale, so it is cancelled, except a wake
+   * that waits for the network ([keepNetworkWake]): the entry may sleep on
+   * it, and it starts the entry when the network is back.
    */
-  private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false) {
+  private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false, keepNetworkWake: Boolean = true) {
     val now = clock()
     when (entry.state) {
       EntryState.QUEUED -> {
         val at = entry.nextAttemptAt
         if (at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) {
-          scheduler.scheduleWake(entry, at, replace = !keepWake)
+          scheduler.scheduleWake(entry, at, replace = !keepWake, requiredNetwork(entry, settings.load()))
         } else {
           // The main row first: these are two separate WorkManager calls,
           // and a process death between them must not leave the entry
           // with neither a wake nor a main row.
           scheduler.schedule(entry)
-          cancelStaleWake(entry.id)
+          cancelStaleWake(entry.id, keepNetworkWake)
         }
       }
       EntryState.AWAITING_AUTH ->
         if (expiryWakeIsNear(entry.expiresAt, now)) {
-          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
+          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake, requiredNetwork(entry, settings.load()))
         } else {
           cancelStaleWake(entry.id)
         }
@@ -665,13 +697,16 @@ class QueueController(
   //
   // The caller's entry can be a stale snapshot: a worker may have released
   // the entry with a long wait and made its wake since. So the stored entry
-  // is read again, and a wake it still needs is kept.
-  private fun cancelStaleWake(id: String) {
+  // is read again, and a wake it still needs is kept. A queued entry with no
+  // long wait may sleep on a wake that waits for the network (a run handed
+  // over, or a worker did that since the snapshot): that wake is kept too,
+  // unless [keepNetworkWake] is false.
+  private fun cancelStaleWake(id: String, keepNetworkWake: Boolean = true) {
     if (isWorkerRunning(id)) return
     val stored = runCatching { store.load(id) }.getOrNull()
     val at = stored?.nextAttemptAt
     if (stored?.state == EntryState.QUEUED && at != null && at - clock() > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS) return
-    scheduler.cancelWake(id)
+    scheduler.cancelWake(id, keepNetworkWake = keepNetworkWake && stored?.state == EntryState.QUEUED)
   }
 
   /** The entries [transformAll] saved, and the saves that failed. */

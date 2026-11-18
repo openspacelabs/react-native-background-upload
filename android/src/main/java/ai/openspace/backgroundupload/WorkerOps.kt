@@ -329,7 +329,7 @@ class WorkerOps(
     if (result == ParkResult.PARKED && next != null) {
       events.state(next.toRow())
       // A parked entry still expires on time. A far expiry waits for a later boot sweep.
-      if (expiryWakeIsNear(next.expiresAt, now)) scheduler.scheduleWake(next, next.expiresAt, replace = true)
+      if (expiryWakeIsNear(next.expiresAt, now)) scheduler.scheduleWake(next, next.expiresAt, replace = true, requiredNetwork(next, settings()))
     }
     return result
   }
@@ -361,7 +361,7 @@ class WorkerOps(
     events.state(next.toRow())
     if (!wake) return true
     try {
-      scheduler.scheduleWake(next, nextAttemptAt, replace = true)
+      scheduler.scheduleWake(next, nextAttemptAt, replace = true, requiredNetwork(next, settings()))
     } catch (error: Exception) {
       throw WakeNotScheduledException(id, error)
     }
@@ -379,7 +379,7 @@ class WorkerOps(
    * entry save and WorkManager's commit. Never throws.
    */
   fun ensureWake(entry: QueueEntry, at: Long) {
-    runCatching { scheduler.scheduleWake(entry, at, replace = false) }
+    runCatching { scheduler.scheduleWake(entry, at, replace = false, requiredNetwork(entry, settings())) }
       .onFailure { Diag.error("could not schedule a wake for '${entry.id}'", it) }
   }
 
@@ -391,7 +391,9 @@ class WorkerOps(
    * nextAttemptAt or now. A time-limit stop needs it when WorkManager holds
    * the stopped row back: it runs that row again only after its own
    * backoff, which grows with every start of that row (up to 5 hours). A
-   * fresh row starts its count at 0.
+   * fresh row starts its count at 0. The wake waits for the network the
+   * entry needs ([requiredNetwork]), so a run stopped while it waited for
+   * the network does not start again offline.
    */
   fun stopped(id: String, generation: Int, wake: Boolean = false) {
     val now = clock()
@@ -409,9 +411,42 @@ class WorkerOps(
     if (wake) {
       // A stop must not throw past the run. Without the wake, the stopped
       // row still runs again, after WorkManager's own backoff.
-      runCatching { scheduler.scheduleWake(next, next.nextAttemptAt ?: now, replace = true) }
+      runCatching { scheduler.scheduleWake(next, next.nextAttemptAt ?: now, replace = true, requiredNetwork(next, settings())) }
         .onFailure { Diag.error("could not schedule a wake for '$id' after a stop", it) }
     }
+  }
+
+  /**
+   * The run found no usable network and hands the wait to WorkManager:
+   * back to queued, and a wake now that waits for [network]. Not a failure:
+   * no attempt, no backoff step, no wait cause, no nextAttemptAt
+   * ([EntryTransitions.toStopped] keeps what the last failure saved). The
+   * wake replaces any other wake of the entry. False when the run no
+   * longer owns the entry (a pause, cancel or replace landed first); then
+   * nothing is scheduled.
+   *
+   * Throws [WakeNotScheduledException] when the wake could not be
+   * enqueued. The entry is saved queued. The caller's worker then returns
+   * retry, so WorkManager runs its row again; the boot sweep and a return
+   * to the foreground also start a queued entry with no row that can start.
+   */
+  fun awaitNetwork(id: String, generation: Int, network: RequiredNetwork): Boolean {
+    val now = clock()
+    var applied = false
+    val next = store.compute(id) { e ->
+      if (EntryTransitions.isOwnedRun(e, generation)) {
+        applied = true
+        EntryTransitions.toStopped(e!!, now)
+      } else e
+    }
+    if (!applied || next == null) return false
+    events.state(next.toRow())
+    try {
+      scheduler.scheduleWake(next, now, replace = true, network)
+    } catch (error: Exception) {
+      throw WakeNotScheduledException(id, error)
+    }
+    return true
   }
 
   fun settings(): QueueSettings = settings.load()

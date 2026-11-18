@@ -26,19 +26,31 @@ internal enum class Connectivity { NoWifi, NoInternet, Ok }
 @Synchronized
 internal fun validateConnectivity(context: Context, wifiOnly: Boolean): Connectivity {
   val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-  val network = manager.activeNetwork
-  val capabilities = manager.getNetworkCapabilities(network)
+  // activeNetwork is the system default network, not a network the process
+  // is bound to (ConnectivityManager docs).
+  val capabilities = manager.getNetworkCapabilities(manager.activeNetwork)
+  // While the app binds the process to a network (bindProcessToNetwork), new
+  // sockets and DNS use that network, also OkHttp's.
+  val bound = manager.boundNetworkForProcess
+  return connectivityOf(
+    wifiOnly = wifiOnly,
+    validated = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true,
+    defaultWifi = capabilities?.hasTransport(TRANSPORT_WIFI) == true,
+    boundWifi = bound?.let { manager.getNetworkCapabilities(it)?.hasTransport(TRANSPORT_WIFI) == true },
+  )
+}
 
-  val hasInternet = capabilities?.hasCapability(NET_CAPABILITY_VALIDATED) == true
-
-  // not wifiOnly, return early
-  if (!wifiOnly) return if (hasInternet) Connectivity.Ok else Connectivity.NoInternet
-
-  // handle wifiOnly
-  return if (hasInternet && capabilities?.hasTransport(TRANSPORT_WIFI) == true)
-    Connectivity.Ok
-  else
-    Connectivity.NoWifi // don't return NoInternet here, more direct to request to join wifi
+/**
+ * The network check. The default network must be validated. Wi-Fi only
+ * also needs it to be Wi-Fi, and a process bound to a network that is not
+ * Wi-Fi fails it: its sockets would send over that network. [boundWifi] is
+ * null when the process is not bound. Wi-Fi only answers NoWifi, not
+ * NoInternet: asking the user to join Wi-Fi is the more direct hint.
+ */
+internal fun connectivityOf(wifiOnly: Boolean, validated: Boolean, defaultWifi: Boolean, boundWifi: Boolean?): Connectivity = when {
+  !wifiOnly -> if (validated) Connectivity.Ok else Connectivity.NoInternet
+  validated && defaultWifi && boundWifi != false -> Connectivity.Ok
+  else -> Connectivity.NoWifi
 }
 
 // Makes sure that the channel for the foreground notification exists. It makes

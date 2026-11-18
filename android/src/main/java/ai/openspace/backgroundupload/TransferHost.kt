@@ -25,8 +25,18 @@ internal interface TransferHost {
   /** The network state for the queue's wifi-only setting. The notification shows it. */
   fun connectivity(wifiOnly: Boolean): Connectivity
 
-  /** Foreground mode for an entry that shows the notification. Never throws. */
-  suspend fun foreground(entry: QueueEntry)
+  /**
+   * Foreground mode for an entry that shows the notification. Never throws.
+   * Returns whether the run holds foreground mode.
+   */
+  suspend fun foreground(entry: QueueEntry): Boolean
+
+  /**
+   * Whether a run that finds no network may hand the wait to a wake row
+   * with a network constraint: API 30 and later. On API 29 WorkManager
+   * tracks each constrained row with its own network callback.
+   */
+  fun networkWakes(): Boolean
 
   fun progressStarted(id: String, total: Long, sent: Long)
 

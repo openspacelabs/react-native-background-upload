@@ -1,7 +1,12 @@
 package ai.openspace.backgroundupload
 
 import android.content.Context
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Build
+import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
@@ -49,6 +54,34 @@ internal object WorkManagerBackoff {
     val exponent = runAttemptCountAtStart.coerceIn(0, 40)
     return startedAt + min(DELAY_MS.toDouble() * Math.pow(2.0, exponent.toDouble()), MAX_MS.toDouble()).toLong()
   }
+}
+
+/**
+ * The network a wake row waits for, as a WorkManager constraint. Both
+ * network rules need a validated network, as the in-worker check does.
+ *
+ * - NONE: no constraint.
+ * - CONNECTED: NetworkType.CONNECTED. WorkManager 2.12.0 turns it into a
+ *   request with INTERNET and VALIDATED (NetworkTypeCompatKt.toNetworkRequest).
+ * - WIFI: a NetworkRequest with TRANSPORT_WIFI, INTERNET and VALIDATED.
+ */
+enum class RequiredNetwork { NONE, CONNECTED, WIFI }
+
+/**
+ * The network rule of a wake row for [entry], as saved.
+ *
+ * - A parked entry's wake only settles its expiry: NONE.
+ * - A backoff wait (nextAttemptAt set): CONNECTED. The run checks the Wi-Fi
+ *   rule and hands over again when it must, so a backoff wake never keeps a
+ *   stale Wi-Fi rule.
+ * - Otherwise the entry waits for the network its run needs: WIFI when its
+ *   own wifiOnly, else the queue's setting, says so; else CONNECTED.
+ */
+internal fun requiredNetwork(entry: QueueEntry, settings: QueueSettings): RequiredNetwork = when {
+  entry.state == EntryState.AWAITING_AUTH -> RequiredNetwork.NONE
+  entry.nextAttemptAt != null -> RequiredNetwork.CONNECTED
+  settings.wifiOnlyFor(entry) -> RequiredNetwork.WIFI
+  else -> RequiredNetwork.CONNECTED
 }
 
 /** What [RowScheduler.schedule] does to an entry's main chain. */
@@ -108,17 +141,22 @@ interface WorkScheduler {
   fun schedule(entry: QueueEntry)
 
   /**
-   * A run at [at] under a second unique name. Used for long backoffs and for
-   * the expiry of a parked entry. [replace] false keeps a wake that already
-   * exists (the boot sweep).
+   * A run at [at] under a second unique name. Used for long backoffs, for
+   * the expiry of a parked entry, and for an entry that waits for the
+   * network ([network], see [requiredNetwork]). [replace] false keeps a wake
+   * that already exists (the boot sweep).
    */
-  fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean)
+  fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean, network: RequiredNetwork)
 
   /** Cancels the main chain and the wake. */
   fun cancel(id: String)
 
-  /** Cancels the wake only. A wake that is no longer needed still holds a WorkManager slot. */
-  fun cancelWake(id: String)
+  /**
+   * Cancels the wake only. A wake that is no longer needed still holds a
+   * WorkManager slot. [keepNetworkWake] keeps a wake with no delay that
+   * waits for a network: the wake of an entry that waits for the network.
+   */
+  fun cancelWake(id: String, keepNetworkWake: Boolean = false)
 
   /** Every unfinished WorkManager run of the library, main chains and wakes. For the boot snapshot. */
   fun libraryRuns(): List<PendingRun>
@@ -128,16 +166,24 @@ interface WorkScheduler {
 }
 
 /**
- * [startable]: the ids with a run in progress, or a row WorkManager may
- * start now. [withWake]: the ids with an unfinished delayed row. Only a wake
- * has an initial delay; a main-chain row never does.
+ * [startable]: the ids with a run in progress, or a row with no network rule
+ * that WorkManager may start now. [networkWait]: the ids with a due wake
+ * that waits for a network ([isNetworkWake]); WorkManager starts it once
+ * its network is up, which the summary cannot see. [withWake]: the ids with
+ * an unfinished delayed row or network wake. Only a wake has an initial
+ * delay or a network constraint; a main-chain row has neither.
  */
-data class RowSummary(val startable: Set<String>, val withWake: Set<String>)
+data class RowSummary(
+  val startable: Set<String>,
+  val withWake: Set<String>,
+  val networkWait: Set<String> = emptySet(),
+)
 
 /**
  * One unfinished WorkManager run. [entryId] comes from the run's id tag.
  * [delayed] is a run enqueued with an initial delay, which only a wake has.
- * [nextScheduleAt] is null when WorkManager reports none.
+ * [nextScheduleAt] is null when WorkManager reports none. [network] is its
+ * network constraint; only a wake has one.
  */
 data class PendingRun(
   val entryId: String?,
@@ -145,12 +191,16 @@ data class PendingRun(
   val runAttemptCount: Int,
   val nextScheduleAt: Long?,
   val delayed: Boolean,
+  val network: RequiredNetwork = RequiredNetwork.NONE,
 )
 
 /**
  * One unfinished WorkManager row. [nextScheduleAt] is the earliest time
  * WorkManager starts it (`WorkInfo.nextScheduleTimeMillis`): Long.MAX_VALUE
- * for a row that is not ENQUEUED.
+ * for a row that is not ENQUEUED. WorkManager 2.12.0 leaves the network
+ * constraint out of that time (WorkSpec.WorkInfoPojo.calculateNextRunTimeMillis):
+ * a constrained row reports its enqueue time plus its delay, and starts
+ * once that time has come and its [network] is up.
  */
 data class WorkRow(
   val entryId: String?,
@@ -158,7 +208,11 @@ data class WorkRow(
   val runAttemptCount: Int,
   val nextScheduleAt: Long,
   val delayed: Boolean,
+  val network: RequiredNetwork = RequiredNetwork.NONE,
 )
+
+/** A wake with no delay that waits for a network: an entry that waits for the network sleeps on it. */
+internal val WorkRow.isNetworkWake get() = !delayed && network != RequiredNetwork.NONE
 
 /** The WorkManager calls [RowScheduler] makes. Tests run the same rules against a fake. */
 interface WorkRows {
@@ -168,7 +222,7 @@ interface WorkRows {
   /** Every row of the library, main chains and wakes, in one of [states]. One query. */
   fun library(states: List<WorkInfo.State>): List<WorkRow>
 
-  fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long)
+  fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork)
 
   fun cancel(name: String)
 }
@@ -187,8 +241,22 @@ interface WorkRows {
  * back every later "run now" appended behind it. They use the wake name
  * (`<id>#wake`) with an initial delay instead.
  *
- * No WorkManager Constraints: connectivity and wifi-only are checked inside
- * the worker, as v9, because the constraint path was unreliable.
+ * Main-chain rows carry no WorkManager constraint. A constrained row does
+ * not start while the app is visible and offline, so it could not take
+ * foreground mode then; its constraint is fixed when it is made, so a
+ * setWifiOnly() change would leave stale rows; and on API 29 WorkManager
+ * registers one network callback per constrained row. Only a wake row
+ * carries a network rule ([RequiredNetwork]): a backoff wake, and the wake
+ * of an entry whose run found no network ([EntryRun.waitForNetwork]). The
+ * worker checks the network itself before every attempt, also on a row a
+ * constraint started.
+ *
+ * Earlier versions used no constraint at all, because the constraint path
+ * was unreliable. The WorkManager release notes for 2.10.1 to 2.12.0 list
+ * fixes for network constraints that were not met while the network was
+ * up, a stale capability set, an identical second constraint, and a
+ * blocked network (Android 15) that passed the constraint. The library is
+ * on 2.12.0.
  */
 open class RowScheduler(
   private val rows: WorkRows,
@@ -205,18 +273,19 @@ open class RowScheduler(
   override fun schedule(entry: QueueEntry) {
     when (mainChainStep(rows.unfinished(entry.id), clock())) {
       MainChainStep.NONE -> Unit
-      MainChainStep.APPEND -> rows.enqueue(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L)
-      MainChainStep.REPLACE -> rows.enqueue(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L)
+      MainChainStep.APPEND -> rows.enqueue(entry.id, ExistingWorkPolicy.APPEND_OR_REPLACE, entry, 0L, RequiredNetwork.NONE)
+      MainChainStep.REPLACE -> rows.enqueue(entry.id, ExistingWorkPolicy.REPLACE, entry, 0L, RequiredNetwork.NONE)
     }
   }
 
-  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean) {
+  override fun scheduleWake(entry: QueueEntry, at: Long, replace: Boolean, network: RequiredNetwork) {
     val delay = WorkManagerScheduler.initialDelayMs(at, clock())
     rows.enqueue(
       WorkManagerScheduler.wakeName(entry.id),
       if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
       entry,
       delay,
+      network,
     )
   }
 
@@ -227,9 +296,12 @@ open class RowScheduler(
 
   // A cancel reschedules all pending work even when the name has none, and
   // the boot sweep calls this for every queued entry.
-  override fun cancelWake(id: String) {
+  override fun cancelWake(id: String, keepNetworkWake: Boolean) {
     val name = WorkManagerScheduler.wakeName(id)
-    if (rows.unfinished(name).isNotEmpty()) rows.cancel(name)
+    val open = rows.unfinished(name)
+    if (open.isEmpty()) return
+    if (keepNetworkWake && open.any { it.isNetworkWake }) return
+    rows.cancel(name)
   }
 
   // One query for every row, not one per entry: the boot sweep runs this on
@@ -242,6 +314,7 @@ open class RowScheduler(
         runAttemptCount = row.runAttemptCount,
         nextScheduleAt = row.nextScheduleAt.takeIf { it != Long.MAX_VALUE },
         delayed = row.delayed,
+        network = row.network,
       )
     }
 
@@ -249,8 +322,10 @@ open class RowScheduler(
     val now = clock()
     val open = rows.library(UNFINISHED)
     return RowSummary(
-      startable = open.filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
-      withWake = open.filter { it.delayed }.mapNotNull { it.entryId }.toSet(),
+      startable = open.filter { it.state == WorkInfo.State.RUNNING || (it.startsBy(now) && !it.isNetworkWake) }
+        .mapNotNull { it.entryId }.toSet(),
+      withWake = open.filter { it.delayed || it.network != RequiredNetwork.NONE }.mapNotNull { it.entryId }.toSet(),
+      networkWait = open.filter { it.isNetworkWake && it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
     )
   }
 }
@@ -296,8 +371,8 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
       WorkQuery.Builder.fromTags(listOf(WorkManagerScheduler.WORK_TAG)).addStates(states).build(),
     ).get().map(::row)
 
-  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
-    workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue()
+  override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long, network: RequiredNetwork) {
+    workManager.beginUniqueWork(name, policy, request(entry, delayMs, network)).enqueue()
   }
 
   override fun cancel(name: String) {
@@ -311,9 +386,21 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
     runAttemptCount = info.runAttemptCount,
     nextScheduleAt = info.nextScheduleTimeMillis,
     delayed = info.initialDelayMillis > 0,
+    network = networkOf(info.constraints),
   )
 
-  private fun request(entry: QueueEntry, delayMs: Long): OneTimeWorkRequest {
+  // On API 28 and later setRequiredNetworkRequest stores the request and
+  // sets the type to NOT_REQUIRED (Constraints.Builder in 2.12.0).
+  private fun networkOf(c: Constraints): RequiredNetwork {
+    val request = c.requiredNetworkRequest
+    return when {
+      request != null && request.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> RequiredNetwork.WIFI
+      request != null || c.requiredNetworkType != NetworkType.NOT_REQUIRED -> RequiredNetwork.CONNECTED
+      else -> RequiredNetwork.NONE
+    }
+  }
+
+  private fun request(entry: QueueEntry, delayMs: Long, network: RequiredNetwork): OneTimeWorkRequest {
     val builder = if (entry.body?.kind == StagedBody.CHUNKED) {
       OneTimeWorkRequestBuilder<ChunkedUploadWorker>()
     } else {
@@ -327,6 +414,42 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
       .addTag(WorkManagerScheduler.ID_TAG_PREFIX + entry.id)
       .setInputData(workDataOf(WorkManagerScheduler.ENTRY_ID_KEY to entry.id))
       .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
+      .setConstraints(constraints(network))
       .build()
   }
+
+  /**
+   * The Wi-Fi request is the in-worker check's rule: a validated Wi-Fi
+   * network. WorkManager uses the request on API 28 and later (minSdk is
+   * 29); UNMETERED is only its fallback for older API levels. A new
+   * NetworkRequest.Builder also asks for NOT_VPN and NOT_RESTRICTED;
+   * WorkManager 2.12.0 removes both from the request it builds for
+   * CONNECTED (NetworkTypeCompatKt.toNetworkRequest), and so does this one.
+   *
+   * API 29 gets no constraint, as before: there WorkManager tracks each
+   * constrained row with its own network callback (IndividualNetworkCallback),
+   * and the app's callbacks share a limit of 100. Its runs keep the
+   * in-worker poll ([TransferHost.networkWakes]).
+   */
+  private fun constraints(network: RequiredNetwork): Constraints {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return Constraints.NONE
+    return when (network) {
+      RequiredNetwork.NONE -> Constraints.NONE
+      RequiredNetwork.CONNECTED -> Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+      RequiredNetwork.WIFI -> Constraints.Builder()
+        .setRequiredNetworkRequest(
+          NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            // As WorkManager's own CONNECTED request: a VPN over Wi-Fi counts.
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .build(),
+          NetworkType.UNMETERED,
+        )
+        .build()
+    }
+  }
+
 }
