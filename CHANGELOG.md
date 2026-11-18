@@ -1,7 +1,10 @@
 ## Unreleased
 
-Added, with no change in behavior until native code sends the new fields.
-This release adds the JavaScript side only.
+Added the JavaScript side of two native changes that come later. One
+behavior changes now: every handler's `meta` has `ambiguousAttempts`, which
+is 0 for today's events. A test that compares the whole `meta` object, and a
+`Meta` built by hand, need the new field. Nothing else changes until native
+code sends the new fields.
 
 - `Meta.ambiguousAttempts` (a number) counts the attempts of the current
   generation that ended with no answer from the server after the whole
@@ -16,14 +19,14 @@ This release adds the JavaScript side only.
   definition without a `response` parser gets it in `onSuccess`. A
   definition with one gets the new optional handler
   `onBodyUnknown(response, vars, meta)` instead of the parser and
-  `onSuccess`; without that handler, no handler runs, the outcome is
-  acknowledged, and the client warns once per key.
+  `onSuccess`. A definition with a parser and `onSuccess` but no
+  `onBodyUnknown` gets no call: the outcome is held unacknowledged with a
+  warning per outcome, and is delivered when a `define()` of the key adds
+  the handler, or at the next launch. With neither `onSuccess` nor
+  `onBodyUnknown`, the outcome is acknowledged with no call.
 - `createFakeNative()` can settle such an outcome
   (`response: { bodyUnknown: true }`) and set `ambiguousAttempts` in the
   overrides.
-
-`Meta` gained a required field, so a `Meta` object built by hand, for
-example in a test, needs `ambiguousAttempts` to compile.
 
 ## 11.3.0
 

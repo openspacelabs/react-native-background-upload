@@ -132,3 +132,54 @@ const settledUnknown: FakeOutcome = {
 void settledUnknown;
 const overrides: SettledOverrides = { ambiguousAttempts: 2 };
 void overrides;
+
+// The README examples for this feature, as written there. A Redux-style
+// dispatch returns the action, so a handler must use a block body to return
+// void.
+type NoteVars = { noteId: string; siteId: string; note: { text: string } };
+type Note = { id: string; text: string };
+type Action = { type: string };
+declare const store: { dispatch: <A extends Action>(action: A) => A };
+declare const notesUrl: (vars: NoteVars) => string;
+declare const noteSchema: { parse: (input: unknown) => Note };
+declare const noteSaved: (note: Note) => Action;
+declare const fetchNote: (noteId: string) => Action;
+declare const analytics: {
+  track: (name: string, props: Record<string, unknown>) => void;
+};
+declare const uploads: UploadClient;
+
+const createNote = uploads.define({
+  key: 'note.create',
+  request: (vars: NoteVars) => ({ url: notesUrl(vars), data: vars.note }),
+  response: (raw) => noteSchema.parse(raw),
+  onSuccess: (note) => {
+    store.dispatch(noteSaved(note));
+  },
+  // The server has the note, but its answer was lost. Fetch it.
+  onBodyUnknown: (_response, vars) => {
+    store.dispatch(fetchNote(vars.noteId));
+  },
+});
+void createNote;
+// The expression-body form the README used before does not compile.
+uploads.define({
+  key: 'note.create.expression',
+  request: (vars: NoteVars) => ({ url: notesUrl(vars), data: vars.note }),
+  response: (raw) => noteSchema.parse(raw),
+  // @ts-expect-error a handler returns void or a Promise, not the action
+  onSuccess: (note) => store.dispatch(noteSaved(note)),
+});
+
+uploads.define({
+  key: 'note.count',
+  request: (_vars: null) => ({ url: 'https://x' }),
+  onSuccess: (data, vars, meta) => {
+    if (meta.ambiguousAttempts > 0) {
+      analytics.track('upload sent in doubt', {
+        key: meta.key,
+        count: meta.ambiguousAttempts,
+      });
+    }
+  },
+});

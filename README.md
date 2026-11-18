@@ -351,7 +351,7 @@ Retry classes:
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
 | `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
-| accepted, but the response body was not received (`bodyUnknown`) | settle `completed`; never sent again. Without a `response` parser, `onSuccess` gets the response with `bodyUnknown: true`. With one, `onBodyUnknown` runs instead. See "Accepted, body unknown" below |
+| accepted, but the response body was not received (`bodyUnknown`; not yet sent by native) | settle `completed`; never sent again. Without a `response` parser, `onSuccess` gets the response with `bodyUnknown: true`. With one, `onBodyUnknown` runs instead. See "Accepted, body unknown" below |
 
 **Transient rule counts.** The library counts the responses each rule
 excuses. It keeps the count by the rule's `status` and `bodyIncludes`, not by
@@ -379,21 +379,34 @@ The app handles it in one place, typically by fetching the object from the
 server:
 
 - A definition without a `response` parser gets it in `onSuccess`, like any
-  completed outcome. Check `response.bodyUnknown` there.
+  completed outcome. Check `response.bodyUnknown` there. Once native sends
+  the flag, an `onSuccess` that reads `response.body` without that check
+  throws on such a response, and a handler that throws is delivered again
+  at every launch.
 - A definition with a parser cannot get typed data, so the parser and
   `onSuccess` do not run, and `onError` is not called. `onBodyUnknown(response,
-  vars, meta)` runs instead. A definition with a parser and no
-  `onBodyUnknown` calls no handler: the outcome is acknowledged, and the
-  client warns once per key (through `onWarning`).
+  vars, meta)` runs instead.
+- A definition with a parser and `onSuccess` but no `onBodyUnknown` gets no
+  call. The outcome is held unacknowledged, as for a key with no
+  definition: native keeps the row, the client warns through `onWarning`
+  for each outcome (the detail is the outcome, with its `vars`), and the
+  outcome is delivered when a `define()` of the key adds `onBodyUnknown`, or
+  at the next launch, with `meta.deliveries` grown. A definition with a
+  parser and neither `onSuccess` nor `onBodyUnknown` asked for no result, so
+  its outcome is acknowledged with no call and no warning.
 
 ```ts
 const createNote = uploads.define({
   key: 'note.create',
   request: (vars: NoteVars) => ({ url: notesUrl(vars), data: vars.note }),
   response: (raw) => noteSchema.parse(raw),
-  onSuccess: (note) => store.dispatch(noteSaved(note)),
+  onSuccess: (note) => {
+    store.dispatch(noteSaved(note));
+  },
   // The server has the note, but its answer was lost. Fetch it.
-  onBodyUnknown: (_response, vars) => store.dispatch(fetchNote(vars.noteId)),
+  onBodyUnknown: (_response, vars) => {
+    store.dispatch(fetchNote(vars.noteId));
+  },
 });
 ```
 
