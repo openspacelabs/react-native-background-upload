@@ -43,6 +43,11 @@ class UploaderModule(context: ReactApplicationContext) :
     var instance: UploaderModule? = null
       private set
 
+    /** Waits out a repair delay, then hands the repair to [queueExecutor]. */
+    private val repairTimer by lazy {
+      Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "RNFileUploader.repair").apply { isDaemon = true } }
+    }
+
     /** One thread for every module-side disk operation. It outlives a JS reload. */
     val queueExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
       Thread(r, "RNFileUploader.queue")
@@ -58,6 +63,9 @@ class UploaderModule(context: ReactApplicationContext) :
     store, journal, settings, EventReporter, scheduler,
     networkFits = { wifiOnly -> networkFitsNow(context, wifiOnly) },
     doorbells = Build.VERSION.SDK_INT >= EntryRun.DOORBELL_MIN_SDK,
+    // A pass whose WorkManager calls failed asks for a repair: it runs on
+    // the queue executor after the wait.
+    repairLater = { delayMs, task -> repairTimer.schedule({ queueExecutor.execute(task) }, delayMs, TimeUnit.MILLISECONDS) },
   )
 
   // Before init: the lifecycle listener it registers can fire at once.

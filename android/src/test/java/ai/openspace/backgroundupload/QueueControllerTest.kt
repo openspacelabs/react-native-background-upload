@@ -828,6 +828,80 @@ class QueueControllerTest {
   private fun withNetwork(fits: Boolean, doorbells: Boolean = true) =
     QueueController(store, journal, settings, events, scheduler, { it in running }, { now }, { fits }, doorbells)
 
+  /** The controller's later repairs, and a controller that records them. */
+  private val repairs = mutableListOf<Pair<Long, () -> Unit>>()
+
+  private fun withRepairs() =
+    QueueController(store, journal, settings, events, scheduler, { it in running }, { now }, { true }, true) { delay, task -> repairs += delay to task }
+
+  private fun errorsIn(file: File) = DiagnosticLog(file).drain().filter { it.level == DiagnosticLog.ERROR }
+
+  @Test
+  fun `enqueue resolves when the schedule times out, and the repair schedules the entry`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    val c = withRepairs()
+    scheduler.scheduleTimeouts = 1
+    assertEquals("e1", c.enqueue(parsed()))
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    assertEquals(listOf("state:e1:queued"), events.log)
+    assertEquals(1, errorsIn(file).size)
+    repairs.single().second()
+    assertEquals(listOf("e1"), scheduler.scheduled)
+  }
+
+  @Test
+  fun `resume stops scheduling at a timeout, does not reject, and the repair schedules the rest`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    for (n in 1..3) store.save(entry(id = "q$n", state = EntryState.QUEUED))
+    val c = withRepairs()
+    scheduler.scheduleTimeouts = 1
+    c.resume()
+    assertEquals(emptyList<String>(), scheduler.scheduled)
+    assertEquals(1, errorsIn(file).size)
+    repairs.single().second()
+    assertEquals(setOf("q1", "q2", "q3"), scheduler.scheduled.toSet())
+  }
+
+  @Test
+  fun `updateHeaders does not reject on a schedule timeout, and the repair schedules the unparked entries`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    for (n in 1..2) store.save(entry(id = "p$n", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
+    val c = withRepairs()
+    scheduler.scheduleTimeouts = 1
+    c.updateHeaders(mapOf("Authorization" to "Bearer new"))
+    assertEquals(EntryState.QUEUED, store.load("p1")!!.state)
+    assertEquals(1, errorsIn(file).size)
+    repairs.single().second()
+    assertEquals(setOf("p1", "p2"), scheduler.scheduled.toSet())
+  }
+
+  @Test
+  fun `the boot sweep writes its snapshot after a schedule timeout, and the repair schedules the rest`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    for (n in 1..3) store.save(entry(id = "q$n", state = EntryState.QUEUED))
+    val c = withRepairs()
+    scheduler.scheduleTimeouts = 1
+    c.sweep()
+    val records = DiagnosticLog(file).drain()
+    assertEquals(1, records.count { it.message == BootSnapshot.MESSAGE })
+    assertEquals(1, records.count { it.level == DiagnosticLog.ERROR })
+    repairs.single().second()
+    assertEquals(setOf("q1", "q2", "q3"), scheduler.scheduled.toSet())
+  }
+
+  @Test
+  fun `a failed pass asks for one repair at a time`() {
+    val c = withRepairs()
+    scheduler.scheduleTimeouts = 2
+    c.enqueue(parsed(id = "a"))
+    c.enqueue(parsed(id = "b"))
+    assertEquals(1, repairs.size)
+  }
+
   @Test
   fun `setWifiOnly(false) starts the queued entries that follow the setting when the network fits`() {
     val c = withNetwork(fits = true)

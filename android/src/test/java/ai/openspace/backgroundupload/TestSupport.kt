@@ -135,7 +135,14 @@ internal class FakeScheduler : WorkScheduler {
   /** How many rowSummary() calls were made. */
   var startableQueries = 0
 
+  /** How many of the next schedule() calls time out, as a WorkManager that does not answer. */
+  var scheduleTimeouts = 0
+
   override fun schedule(entry: QueueEntry) {
+    if (scheduleTimeouts > 0) {
+      scheduleTimeouts--
+      throw java.util.concurrent.TimeoutException("WorkManager did not answer")
+    }
     scheduled += entry.id
   }
 
@@ -277,7 +284,18 @@ internal class FakeWorkManager(var now: Long = 10_000L) : WorkRows {
   /** The rows that start now with the app process dead. */
   fun startableWhileDead(): List<Row> = jobSchedulerRows().filter { it in startableNow() }
 
+  /** How many of the next unfinished(name) queries time out, as a WorkManager that does not answer. */
+  var unfinishedTimeouts = 0
+
+  /** How many unfinished(name) queries timed out. */
+  var timedOutQueries = 0
+
   override fun unfinished(name: String): List<WorkRow> {
+    if (unfinishedTimeouts > 0) {
+      unfinishedTimeouts--
+      timedOutQueries++
+      throw java.util.concurrent.TimeoutException("WorkManager did not answer")
+    }
     nameQueries++
     return open(name).map(::view)
   }

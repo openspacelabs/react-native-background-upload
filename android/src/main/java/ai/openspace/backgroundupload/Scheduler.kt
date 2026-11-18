@@ -428,7 +428,7 @@ private class WorkManagerRows(private val workManager: WorkManager) : WorkRows {
   override fun library(states: List<WorkInfo.State>): List<WorkRow> =
     workManager.getWorkInfos(
       WorkQuery.Builder.fromTags(listOf(WorkManagerScheduler.WORK_TAG)).addStates(states).build(),
-    ).get().map(::row)
+    ).get(WorkManagerScheduler.WORK_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS).map(::row)
 
   override fun enqueue(name: String, policy: ExistingWorkPolicy, entry: QueueEntry, delayMs: Long) {
     workManager.beginUniqueWork(name, policy, request(entry, delayMs)).enqueue()

@@ -199,18 +199,19 @@ class NetworkDoorbellTest {
   }
 
   @Test
-  fun `a doorbell whose library check keeps refusing rings at most once every 30 s`() {
+  fun `while the library check keeps refusing, each ring is followed by the next one at least 30 s later`() {
     // Review probe P2: WorkManager says the rule is met; the library's check says no.
     network(RequiredNetwork.NONE)
     handedOver("a")
     network(RequiredNetwork.CONNECTED)
     fitsThrows = true
     val rings = mutableListOf<Long>()
-    repeat(20) {
+    // Ten minutes, a WorkManager look every second.
+    repeat(600) {
       if (ringDoorbells().isNotEmpty()) rings += work.now
       work.now += 1_000
     }
-    assertTrue("rings at $rings", rings.size >= 1)
+    assertTrue("rings at $rings", rings.size in 10..21)
     assertTrue("rings at $rings", rings.zipWithNext().all { (x, y) -> y - x >= 30_000 })
     assertTrue("rows: ${work.rows.size}", work.rows.count { it.doorbell != null } <= rings.size + 1)
     assertEquals(1, doorbellRows().size)
@@ -332,6 +333,64 @@ class NetworkDoorbellTest {
     // The app opens with the network: a foreground starts the entry at once.
     controller.retryNow()
     assertEquals(1, startable("a").size)
+  }
+
+  // MARK: - a WorkManager that does not answer (delta review)
+
+  /** The controller's later repairs, in order: the delay and the task. */
+  private val repairs = mutableListOf<Pair<Long, () -> Unit>>()
+
+  private fun controllerWithRepairs() = QueueController(
+    store, journal, settings, events, scheduler, { it in running }, { work.now },
+    networkFits = { wifiOnly -> work.network.ordinal >= (if (wifiOnly) RequiredNetwork.WIFI else RequiredNetwork.CONNECTED).ordinal },
+    repairLater = { delayMs, task -> repairs += delayMs to task },
+  )
+
+  @Test
+  fun `a doorbell ring stops at the first WorkManager timeout, writes one record and asks to ring again`() {
+    val file = File(tmp.newFolder(), "diagnostics.json")
+    Diag.log = DiagnosticLog(file)
+    try {
+      for (n in 1..250) store.save(entry(id = "q$n"))
+      network(RequiredNetwork.CONNECTED)
+      work.unfinishedTimeouts = 1_000
+      assertFalse(newController().answerDoorbell(RequiredNetwork.CONNECTED))
+      assertEquals(1, work.timedOutQueries)
+      assertEquals(1, DiagnosticLog(file).drain().count { it.level == DiagnosticLog.ERROR })
+    } finally {
+      Diag.log = null
+    }
+  }
+
+  @Test
+  fun `an entry saved while WorkManager does not answer is started later with no app call`() {
+    val c = controllerWithRepairs()
+    network(RequiredNetwork.CONNECTED)
+    work.unfinishedTimeouts = 1
+    // mutate() resolves: the entry is saved.
+    assertEquals("e1", c.enqueue(parsed()))
+    assertEquals(EntryState.QUEUED, store.load("e1")!!.state)
+    assertEquals(emptyList<FakeWorkManager.Row>(), uploadRows())
+    // The queue executor runs the repair it asked for.
+    val (delay, task) = repairs.single()
+    assertEquals(QueueController.REPAIR_FIRST_MS, delay)
+    work.now += delay
+    task()
+    assertEquals(1, startable().size)
+  }
+
+  @Test
+  fun `a repair that fails again asks for itself again, later each time`() {
+    val c = controllerWithRepairs()
+    network(RequiredNetwork.CONNECTED)
+    work.unfinishedTimeouts = 3
+    c.enqueue(parsed())
+    repairs.removeAt(0).second()
+    repairs.removeAt(0).second()
+    assertEquals(listOf(4 * QueueController.REPAIR_FIRST_MS), repairs.map { it.first })
+    repairs.removeAt(0).second()
+    assertEquals(1, startable().size)
+    assertEquals(emptyList<Pair<Long, () -> Unit>>(), repairs)
   }
 
   // MARK: - the fake follows WorkManager 2.12.0

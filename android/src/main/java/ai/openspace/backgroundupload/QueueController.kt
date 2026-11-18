@@ -28,7 +28,24 @@ class QueueController(
   private val networkFits: (wifiOnly: Boolean) -> Boolean = { true },
   /** Whether an entry with no network may wait on a doorbell: API 30 and later. */
   private val doorbells: Boolean = true,
+  /**
+   * Runs [task] on the queue executor after [delayMs]. A pass whose
+   * WorkManager calls failed asks for [repairRows] this way, so an entry
+   * left with no row is started with no app call.
+   */
+  private val repairLater: (delayMs: Long, task: () -> Unit) -> Unit = { _, _ -> },
 ) {
+
+  companion object {
+    /** The first wait before [repairRows] runs after a failed pass; it doubles up to [REPAIR_MAX_MS]. */
+    const val REPAIR_FIRST_MS = 30_000L
+    const val REPAIR_MAX_MS = 300_000L
+  }
+
+  private val repairPending = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  @Volatile
+  private var repairDelayMs = REPAIR_FIRST_MS
 
   // MARK: - enqueue
 
@@ -66,8 +83,12 @@ class QueueController(
     result.entry?.let { entry ->
       // New work starts a run, which shows the notification and may take
       // foreground mode. A same-id enqueue of a queued entry is a repair.
-      scheduleRun(entry, probe = if (result.repair) NetworkProbe() else null)
+      // The entry is saved: a WorkManager call that fails or times out does
+      // not reject mutate(). The repair below starts the entry later.
+      val pass = SchedulePass("enqueue")
+      pass.schedule { scheduleRun(entry, probe = if (result.repair) NetworkProbe() else null) }
       events.state(entry.toRow())
+      pass.finish()
     }
     return p.id
   }
@@ -246,7 +267,9 @@ class QueueController(
     result.changed.forEach { events.state(it.toRow()) }
     // Every queued entry, not only the resumed ones: a run is idempotent.
     val probe = NetworkProbe()
-    store.all().forEach { scheduleRun(it, probe = probe) }
+    val pass = SchedulePass("resume")
+    store.all().forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
+    pass.finish()
     result.throwIfFailed("resume")
   }
 
@@ -277,12 +300,8 @@ class QueueController(
     val now = clock()
     val queued = store.all().filter { !it.legacy && it.state == EntryState.QUEUED && inScope(it, keys) }
     val cleared = mutableListOf<QueueEntry>()
-    var failures = 0
-    var first: Throwable? = null
-    fun failed(error: Throwable) {
-      failures++
-      if (first == null) first = error
-    }
+    val pass = SchedulePass("retryNow")
+    fun failed(error: Throwable) = pass.failed(error)
     store.locked {
       queued.filter { EntryTransitions.clearsWait(it, now) }.forEach { e ->
         try {
@@ -298,7 +317,7 @@ class QueueController(
       }
     }
     val probe = NetworkProbe()
-    cleared.forEach { e -> runCatching { scheduleRun(e, probe = probe) }.onFailure(::failed) }
+    cleared.forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
     val clearedIds = cleared.map { it.id }.toSet()
     // A wait that is due, or shorter than a worker sleeps out, is no wait
     // here: such an entry follows the network rule like any other (a
@@ -309,14 +328,14 @@ class QueueController(
     if (idle.isNotEmpty() || waiting.isNotEmpty()) {
       val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
       idle.filter { rows == null || it.id !in rows.startable }
-        .forEach { e -> runCatching { scheduleRun(e, probe = probe) }.onFailure(::failed) }
+        .forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
       // A wait that stays needs its wake. KEEP leaves one that exists, so
       // this is at most one enqueue per entry that lacks a wake.
       waiting.filter { rows == null || it.id !in rows.withWake }
-        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false) }.onFailure(::failed) }
+        .forEach { e -> pass.schedule { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false) } }
     }
     cleared.forEach { events.state(it.toRow()) }
-    first?.let { Diag.error("retryNow: $failures entry saves or WorkManager calls failed; the next app start or foreground tries again", it) }
+    pass.finish()
   }
 
   private fun inScope(e: QueueEntry, keys: List<String>?) = keys == null || e.key in keys
@@ -336,24 +355,25 @@ class QueueController(
     val s = settings.load()
     val waiting = store.all().filter { requiredNetwork(it, s, now) != RequiredNetwork.NONE }
     if (waiting.isEmpty()) return true
-    val rows = runCatching { scheduler.rowSummary() }
-      .onFailure { Diag.error("doorbell: could not read WorkManager; it rings again", it) }
-      .getOrNull() ?: return false
+    val pass = SchedulePass("doorbell")
+    val rows = try {
+      scheduler.rowSummary()
+    } catch (error: Exception) {
+      pass.failed(error)
+      pass.finish(repair = false)
+      return false
+    }
     // WorkManager saw [rung]'s network. When the library's check does not,
     // the doorbell queued behind this one waits DOORBELL_REPEAT_MS.
     val probe = NetworkProbe(repeatOf = rung, awaitRows = true)
-    var answered = true
     // Only an ENQUEUED row that starts now covers an entry. A worker of the
     // entry, or a RUNNING row, may be one that handed over and is on its way
     // out; schedule() then queues one row behind it, and the per-id gate
-    // runs them one after the other.
-    waiting.filter { it.id !in rows.due }.forEach { e ->
-      runCatching { scheduleRun(e, probe = probe) }.onFailure {
-        answered = false
-        Diag.error("doorbell: could not schedule '${e.id}'; it rings again", it)
-      }
-    }
-    return answered
+    // runs them one after the other. The pass stops at the first
+    // WorkManager timeout: the doorbell returns retry and rings again.
+    waiting.filter { it.id !in rows.due }.forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
+    pass.finish(repair = false)
+    return !pass.anyFailed
   }
 
   /**
@@ -490,18 +510,18 @@ class QueueController(
     // Off: the entries that follow the setting now wait for any network.
     // Each one with no long wait starts when that fits, else it waits on
     // the CONNECTED doorbell. A worker of the entry may be one that handed
-    // over and is on its way out: schedule() queues one row behind it. A Wi-Fi doorbell left behind
-    // finds nothing to start and ends. On needs no work: a run that starts
-    // on another network fails the check and hands over to the Wi-Fi doorbell.
+    // over and is on its way out: schedule() queues one row behind it. A
+    // Wi-Fi doorbell left behind finds nothing to start and ends. On needs
+    // no work: a run that starts on another network fails the check and
+    // hands over to the Wi-Fi doorbell.
     val now = clock()
     val s = settings.load()
     val probe = NetworkProbe()
+    val pass = SchedulePass("setWifiOnly")
     store.all()
       .filter { it.descriptor?.wifiOnly == null && requiredNetwork(it, s, now) != RequiredNetwork.NONE }
-      .forEach { e ->
-        runCatching { scheduleRun(e, probe = probe) }
-          .onFailure { Diag.error("setWifiOnly: could not schedule '${e.id}'", it) }
-      }
+      .forEach { e -> pass.schedule { scheduleRun(e, probe = probe) } }
+    pass.finish()
   }
 
   fun configureRetry(defaults: RetryDefaults) {
@@ -533,10 +553,12 @@ class QueueController(
       unparkedIds += e.id
       EntryTransitions.toUnparked(patched, s.isPaused(patched.key), now)
     }
+    val pass = SchedulePass("updateHeaders")
     result.changed.filter { it.id in unparkedIds }.forEach { entry ->
-      scheduleRun(entry)
+      pass.schedule { scheduleRun(entry) }
       events.state(entry.toRow())
     }
+    pass.finish()
     result.throwIfFailed("updateHeaders")
   }
 
@@ -696,7 +718,8 @@ class QueueController(
     val runs = runCatching { scheduler.libraryRuns() }.getOrNull()
     toForget.forEach { scheduler.cancel(it) }
     val probe = NetworkProbe()
-    toSchedule.forEach { scheduleRun(it, keepWake = true, probe = probe) }
+    val pass = SchedulePass("boot sweep")
+    toSchedule.forEach { e -> pass.schedule { scheduleRun(e, keepWake = true, probe = probe) } }
     // Every start, even an idle one: a v9 leftover count of zero is a value
     // the app reports. It replaces a snapshot JS has not taken yet, so
     // launches with no takeDiagnostics() do not push out real warnings.
@@ -710,6 +733,7 @@ class QueueController(
       replaceUntaken = true,
     )
     changed.forEach { events.state(it.toRow()) }
+    pass.finish()
   }
 
   private fun trySave(entry: QueueEntry): Boolean = try {
@@ -764,6 +788,98 @@ class QueueController(
   }
 
   /**
+   * The scheduling of one pass. A WorkManager call that fails is caught per
+   * entry, so the pass goes on and the caller does not reject. At the first
+   * timeout (a WorkManager that does not answer) the pass stops scheduling:
+   * each further call would hold the queue executor, which also serves
+   * every JS call, for 10 s more. [finish] writes one diagnostics record
+   * for the pass, and asks for [repairRows] later, which starts the entries
+   * the pass left with no row.
+   */
+  private inner class SchedulePass(val what: String) {
+    private var failures = 0
+    private var skipped = 0
+    private var first: Throwable? = null
+    private var stopped = false
+
+    val anyFailed get() = failures + skipped > 0
+
+    fun failed(error: Throwable) {
+      failures++
+      if (first == null) first = error
+      if (isTimeout(error)) stopped = true
+    }
+
+    fun schedule(block: () -> Unit) {
+      if (stopped) {
+        skipped++
+        return
+      }
+      try {
+        block()
+      } catch (error: Exception) {
+        failed(error)
+      }
+    }
+
+    fun finish(repair: Boolean = true) {
+      if (!anyFailed) return
+      val tail = if (stopped) "; stopped at a WorkManager timeout with $skipped left" else ""
+      Diag.error("$what: $failures entry saves or WorkManager calls failed$tail; the queue tries again", first)
+      if (repair) requestRepair()
+    }
+  }
+
+  private fun isTimeout(error: Throwable) =
+    generateSequence(error) { it.cause }.any { it is java.util.concurrent.TimeoutException }
+
+  /** Asks for one [repairRows] run later; one is pending at a time. The wait doubles after each failed repair. */
+  private fun requestRepair() {
+    if (!repairPending.compareAndSet(false, true)) return
+    repairLater(repairDelayMs) {
+      repairPending.set(false)
+      repairRows()
+    }
+  }
+
+  /**
+   * Starts every queued entry that has nothing to start it: after a pass
+   * whose WorkManager calls failed. One WorkManager query. An entry with
+   * no long wait and no row that can start now is scheduled as a repair
+   * (its main row when the network fits, else its doorbell); an entry with
+   * a long wait and no wake gets its wake (KEEP); a parked entry gets its
+   * expiry wake. It does not end a backoff wait. When it fails too, it
+   * asks for itself again, later each time, up to [REPAIR_MAX_MS].
+   */
+  fun repairRows() {
+    val now = clock()
+    val entries = store.all().filter { !it.legacy && (it.state == EntryState.QUEUED || it.state == EntryState.AWAITING_AUTH) }
+    val pass = SchedulePass("repair")
+    if (entries.isNotEmpty()) {
+      val rows = try {
+        scheduler.rowSummary()
+      } catch (error: Exception) {
+        pass.failed(error)
+        null
+      }
+      if (rows != null) {
+        val probe = NetworkProbe()
+        for (e in entries) {
+          val at = e.nextAttemptAt
+          val longWait = at != null && at - now > RetryClassifier.IN_WORKER_BACKOFF_MAX_MS
+          when {
+            e.state == EntryState.AWAITING_AUTH || longWait ->
+              if (e.id !in rows.withWake) pass.schedule { scheduleRun(e, keepWake = true) }
+            e.id !in rows.startable -> pass.schedule { scheduleRun(e, probe = probe) }
+          }
+        }
+      }
+    }
+    repairDelayMs = if (pass.anyFailed) minOf(repairDelayMs * 2, REPAIR_MAX_MS) else REPAIR_FIRST_MS
+    pass.finish()
+  }
+
+  /**
    * True when [entry]'s network does not fit now and its doorbell is
    * stored. False when it fits, on API 29, or when the doorbell failed.
    */
@@ -777,6 +893,8 @@ class QueueController(
     return runCatching { scheduler.ensureDoorbell(network, delay) }
       .onSuccess { probe.ensured += network }
       .onFailure {
+        // A WorkManager that does not answer: the pass stops (SchedulePass).
+        if (isTimeout(it)) throw it
         // One record per pass: the other entries of this rule skip the doorbell.
         probe.failed += network
         Diag.error("could not store the ${network.name} doorbell; its waiting entries start a run instead", it)
