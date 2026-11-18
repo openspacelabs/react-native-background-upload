@@ -59,6 +59,10 @@ class EntryTransitionsTest {
     assertEquals(3, EntryTransitions.toResumed(paused.copy(backoffStreak = 3), 9).backoffStreak)
     val parked = paused.copy(parkedGeneration = 3, headerGeneration = 3)
     assertEquals(9, EntryTransitions.toResumed(parked, 9).backoffStreak)
+    // A wait kept over the pause keeps its streak; one that ended does not.
+    val waiting = paused.copy(nextAttemptAt = 500)
+    assertEquals(9, EntryTransitions.toResumed(waiting, 9).backoffStreak)
+    assertEquals(5, EntryTransitions.toResumed(waiting, 500).backoffStreak)
   }
 
   @Test

@@ -226,7 +226,7 @@ class MainChainTest {
   }
 
   @Test
-  fun `rowSummary lists the entries that can start, and the entries with any unfinished row`() {
+  fun `rowSummary lists the entries that can start, and the entries with a delayed wake row`() {
     work.add("due")
     work.add("held", runAttemptCount = 8, lastEnqueueTime = work.now - minute)
     work.add("run", state = RUNNING, runAttemptCount = 1)
@@ -235,7 +235,7 @@ class MainChainTest {
     work.add("gone", state = CANCELLED)
     val rows = scheduler.rowSummary()
     assertEquals(setOf("due", "run"), rows.startable)
-    assertEquals(setOf("due", "held", "run", "later", "blocked"), rows.withRow)
+    assertEquals(setOf("later"), rows.withWake)
     // One query, and it asks WorkManager for unfinished rows only.
     assertEquals(listOf(listOf(ENQUEUED, RUNNING, BLOCKED)), work.libraryQueries)
   }
@@ -307,6 +307,19 @@ class MainChainTest {
     // With a wake there, KEEP adds nothing.
     controller.retryNow()
     assertEquals(1, work.rows.size)
+  }
+
+  @Test
+  fun `a return to the foreground makes the wake for a wait that stays when only a held-back main row exists`() {
+    // Probe Q4: a 10-minute wait, no wake, and a main row WorkManager holds
+    // for hours. Before, that main row counted as "a row", so the entry
+    // waited for it.
+    store.save(transportWait(streak = 9).copy(waitCause = WaitCause.RESPONSE, nextAttemptAt = work.now + 10 * minute))
+    work.add("e1", runAttemptCount = 10, lastEnqueueTime = work.now - minute)
+    controller.retryNow()
+    assertEquals(listOf("enqueue:e1#wake:KEEP"), rows.log)
+    val wake = work.rows.single { it.name == "e1#wake" }
+    assertEquals(work.now + 10 * minute, work.nextScheduleAt(wake))
   }
 
   @Test

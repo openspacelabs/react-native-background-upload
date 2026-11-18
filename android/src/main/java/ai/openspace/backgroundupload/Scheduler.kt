@@ -129,9 +129,10 @@ interface WorkScheduler {
 
 /**
  * [startable]: the ids with a run in progress, or a row WorkManager may
- * start now. [withRow]: the ids with any unfinished row, main chain or wake.
+ * start now. [withWake]: the ids with an unfinished delayed row. Only a wake
+ * has an initial delay; a main-chain row never does.
  */
-data class RowSummary(val startable: Set<String>, val withRow: Set<String>)
+data class RowSummary(val startable: Set<String>, val withWake: Set<String>)
 
 /**
  * One unfinished WorkManager run. [entryId] comes from the run's id tag.
@@ -249,7 +250,7 @@ open class RowScheduler(
     val open = rows.library(UNFINISHED)
     return RowSummary(
       startable = open.filter { it.state == WorkInfo.State.RUNNING || it.startsBy(now) }.mapNotNull { it.entryId }.toSet(),
-      withRow = open.mapNotNull { it.entryId }.toSet(),
+      withWake = open.filter { it.delayed }.mapNotNull { it.entryId }.toSet(),
     )
   }
 }

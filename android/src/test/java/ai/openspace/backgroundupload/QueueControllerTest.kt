@@ -1324,6 +1324,29 @@ class QueueControllerTest {
   }
 
   @Test
+  fun `resume keeps the streak of a wait after a server response that stays`() {
+    val at = now + 3_600_000
+    store.save(waitAfter("e1", WaitCause.RESPONSE, age = 60_000, at = at))
+    controller.pause()
+    controller.resume()
+    assertEquals(at, store.load("e1")!!.nextAttemptAt)
+    assertEquals(9, store.load("e1")!!.backoffStreak)
+  }
+
+  @Test
+  fun `the sweep's resume repair keeps the streak of a wait that stays`() {
+    // A death partway through resume(): the row is paused, the settings are not.
+    val at = now + 3_600_000
+    store.save(waitAfter("e1", WaitCause.RESPONSE, age = 60_000, at = at).copy(state = EntryState.PAUSED))
+    controller.sweep()
+    val e = store.load("e1")!!
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(at, e.nextAttemptAt)
+    assertEquals(9, e.backoffStreak)
+    assertEquals(listOf("e1" to at), scheduler.wakes)
+  }
+
+  @Test
   fun `retryNow writes no entry file whose wait stays`() {
     store.save(waitAfter("r", WaitCause.RESPONSE, age = 3_600_000))
     store.save(waitAfter("y", WaitCause.NO_RESPONSE, age = 1_000))

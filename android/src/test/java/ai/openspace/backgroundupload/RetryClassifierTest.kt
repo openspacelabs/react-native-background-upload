@@ -199,6 +199,20 @@ class RetryClassifierTest {
   }
 
   @Test
+  fun `every address of the host refused counts, also when OkHttp nests the failures`() {
+    val twoAddresses = java.net.ConnectException("Failed to connect to /10.0.0.2")
+    twoAddresses.addSuppressed(java.net.ConnectException("Failed to connect to /10.0.0.1"))
+    assertTrue(RetryClassifier.reachedNoServer(twoAddresses))
+    val nested = java.net.ConnectException("Failed to connect to /10.0.0.3")
+    nested.addSuppressed(java.net.UnknownHostException("a").apply { addSuppressed(java.net.ConnectException("b")) })
+    assertTrue(RetryClassifier.reachedNoServer(nested))
+    // A sent try nested inside a connect failure still rules it out.
+    val hidden = java.net.ConnectException("Failed to connect to /10.0.0.3")
+    hidden.addSuppressed(java.net.ConnectException("b").apply { addSuppressed(IOException("unexpected end of stream")) })
+    assertFalse(RetryClassifier.reachedNoServer(hidden))
+  }
+
+  @Test
   fun `a connect failure after an earlier try in the same call does not count`() {
     // Probe P10. OkHttp attaches the earlier tries of a call as suppressed;
     // the first may have sent the body on a pooled connection that died.

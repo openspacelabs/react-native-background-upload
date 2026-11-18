@@ -124,8 +124,8 @@ internal class FakeScheduler : WorkScheduler {
   val runs = mutableListOf<PendingRun>()
   /** What rowSummary() returns as startable. */
   val startable = mutableSetOf<String>()
-  /** What rowSummary() returns as withRow, besides the startable ids. */
-  val withRow = mutableSetOf<String>()
+  /** What rowSummary() returns as withWake. */
+  val withWake = mutableSetOf<String>()
   /** How many rowSummary() calls were made. */
   var startableQueries = 0
 
@@ -154,7 +154,7 @@ internal class FakeScheduler : WorkScheduler {
 
   override fun rowSummary(): RowSummary {
     startableQueries++
-    return RowSummary(startable.toSet(), startable + withRow)
+    return RowSummary(startable.toSet(), withWake.toSet())
   }
 }
 

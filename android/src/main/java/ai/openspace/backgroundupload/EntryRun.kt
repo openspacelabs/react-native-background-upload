@@ -373,8 +373,8 @@ internal class EntryRun(
         AttemptResult.Terminal(verdict.errorKind, verdict.message, null)
       } else AttemptResult.Transient
       // The attempt started on a validated network (waitForNetwork). A call
-      // that failed while it connected, with no earlier try in the call,
-      // waits at most 15 minutes; any other failure keeps the entry's maximum.
+      // whose every try failed while it connected waits at most 15 minutes;
+      // any other failure keeps the entry's maximum.
       val waitPolicy = if (RetryClassifier.reachedNoServer(error)) RetryClassifier.transportFailurePolicy(policy) else policy
       return Attempt(entry, url, waitPolicy, result, WaitCause.NO_RESPONSE)
     }

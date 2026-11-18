@@ -105,23 +105,26 @@ object EntryTransitions {
    * updateHeaders() saves with the new headers. The settings value can be
    * older after a settings write that never landed. Back to queued, the
    * entry keeps what is left of its wait (resume() then applies
-   * [clearsWait]), and the streak keeps at most
-   * [RetryClassifier.RETRY_NOW_MAX_STREAK] steps, as after a cleared wait:
-   * a pause and resume in normal work must not give a failing entry a
-   * burst of attempts.
+   * [clearsWait]). A kept wait keeps its streak too, so the waits after it
+   * grow as they would with no pause. When the wait ended during the pause,
+   * the streak keeps at most [RetryClassifier.RETRY_NOW_MAX_STREAK] steps,
+   * as after a cleared wait: a pause and resume in normal work must not
+   * give a failing entry a burst of attempts.
    */
   fun toResumed(e: QueueEntry, now: Long): QueueEntry =
     if (e.parkedGeneration != null && e.parkedGeneration == e.headerGeneration) {
       e.copy(state = EntryState.AWAITING_AUTH, updatedAt = now)
     } else {
-      e.copy(
-        state = EntryState.QUEUED,
-        parkedGeneration = null,
-        backoffStreak = min(e.backoffStreak, RetryClassifier.RETRY_NOW_MAX_STREAK),
-        // The wait kept over the pause; one that ended during it is gone.
-        nextAttemptAt = e.nextAttemptAt?.takeIf { it > now },
-        updatedAt = now,
-      )
+      // The wait kept over the pause; one that ended during it is gone.
+      e.nextAttemptAt?.takeIf { it > now }.let { left ->
+        e.copy(
+          state = EntryState.QUEUED,
+          parkedGeneration = null,
+          backoffStreak = if (left != null) e.backoffStreak else min(e.backoffStreak, RetryClassifier.RETRY_NOW_MAX_STREAK),
+          nextAttemptAt = left,
+          updatedAt = now,
+        )
+      }
     }
 
   /**

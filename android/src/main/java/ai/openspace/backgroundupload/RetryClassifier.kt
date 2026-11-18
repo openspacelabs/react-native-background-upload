@@ -41,8 +41,8 @@ object RetryClassifier {
   const val IN_WORKER_BACKOFF_MAX_MS = 30_000L
 
   /**
-   * The longest wait after a call that failed while it connected, with no
-   * earlier try in the call ([reachedNoServer]). Every attempt starts on a
+   * The longest wait after a call whose every try failed while it
+   * connected ([reachedNoServer]). Every attempt starts on a
    * network Android reports as validated, so such a failure says little
    * about the server, and a network change cannot wake a queued entry.
    * Every other failure keeps the policy's maxMs: a failure after the
@@ -55,9 +55,9 @@ object RetryClassifier {
   const val CLEAR_MIN_AGE_MS = 30_000L
 
   /**
-   * Whether this call failed while it connected, with no earlier try inside
-   * the same call. Then this call sent no request. (An earlier attempt, in
-   * an earlier call, may still have reached the server.)
+   * Whether every try of this call failed while it connected. Then this
+   * call sent no request. (An earlier attempt, in an earlier call, may
+   * still have reached the server.)
    *
    * From OkHttp 4.12.0: RealConnection.connectSocket throws ConnectException
    * ("Failed to connect to"); the DNS lookup (Dns.SYSTEM) throws
@@ -67,20 +67,24 @@ object RetryClassifier {
    * SSLPeerUnverifiedException. OkHttp retries inside one call: it throws
    * the last failure with the earlier tries it recovered from attached as
    * suppressed (Util.withSuppressed in RetryAndFollowUpInterceptor), and a
-   * RouteException adds later connect failures as suppressed too. An
-   * earlier try may have sent the body, so any suppressed exception rules
-   * the failure out. A SocketTimeoutException is left out: a connect
-   * timeout and a read or write timeout throw the same class.
+   * RouteException adds the failures of the host's other addresses as
+   * suppressed too. So each suppressed exception, and each one nested in
+   * it, must be a connect failure as well: then every try failed while it
+   * connected (for example, every address of the host refused). Any other
+   * suppressed exception is an earlier try that may have sent the body,
+   * and rules the failure out. A SocketTimeoutException is left out: a
+   * connect timeout and a read or write timeout throw the same class.
    */
   fun reachedNoServer(error: Throwable): Boolean =
-    error.suppressed.isEmpty() && (
-      error is java.net.ConnectException ||
-        error is java.net.UnknownHostException ||
-        error is java.net.NoRouteToHostException ||
-        error is java.net.PortUnreachableException ||
-        error is javax.net.ssl.SSLHandshakeException ||
-        error is javax.net.ssl.SSLPeerUnverifiedException
-      )
+    isConnectFailure(error) && error.suppressed.all(::reachedNoServer)
+
+  private fun isConnectFailure(error: Throwable) =
+    error is java.net.ConnectException ||
+      error is java.net.UnknownHostException ||
+      error is java.net.NoRouteToHostException ||
+      error is java.net.PortUnreachableException ||
+      error is javax.net.ssl.SSLHandshakeException ||
+      error is javax.net.ssl.SSLPeerUnverifiedException
 
   /**
    * The highest backoff streak an entry keeps when the app clears its wait.

@@ -250,7 +250,8 @@ class QueueController(
    * ([WorkScheduler.rowSummary], one query): that is not a retry, it only
    * makes sure a row exists, and a row WorkManager holds back after a stop
    * is replaced ([WorkScheduler.schedule]). A queued entry whose wait stays
-   * and that has no unfinished row at all gets its wake again (KEEP). Running, paused, parked and
+   * and that has no delayed wake row gets its wake again (KEEP), also when
+   * it has a main row: WorkManager may hold that row back for hours. Running, paused, parked and
    * settled entries are left alone. A queued entry sends nothing, and the
    * per-id gate holds any new row while a worker of the entry still winds
    * down, so this never starts a second transfer next to one in progress.
@@ -293,9 +294,10 @@ class QueueController(
       val rows = runCatching { scheduler.rowSummary() }.onFailure(::failed).getOrNull()
       idle.filter { rows == null || it.id !in rows.startable }
         .forEach { e -> runCatching { scheduleRun(e) }.onFailure(::failed) }
-      // A wait that stays needs its wake. KEEP leaves one that exists.
-      waiting.filter { rows == null || it.id !in rows.withRow }
-        .forEach { e -> runCatching { scheduleRun(e, keepWake = true) }.onFailure(::failed) }
+      // A wait that stays needs its wake. KEEP leaves one that exists, so
+      // this is at most one enqueue per entry that lacks a wake.
+      waiting.filter { rows == null || it.id !in rows.withWake }
+        .forEach { e -> runCatching { scheduler.scheduleWake(e, e.nextAttemptAt!!, replace = false) }.onFailure(::failed) }
     }
     cleared.forEach { events.state(it.toRow()) }
     first?.let { Diag.error("retryNow: $failures entry saves or WorkManager calls failed; the next app start or foreground tries again", it) }
