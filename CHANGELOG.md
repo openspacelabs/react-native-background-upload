@@ -71,8 +71,9 @@ last failure; entries saved by an older version read as unknown.
 its cause. `resume()` gives the entry back what is left of it, ended only
 by the rule above. Before, `pause()` cleared the wait, so a pause and a
 resume sent the request again at once, also after a server response. A
-paused row still does not show `nextAttemptAt`. A paused entry that
-`resume()` moves back to `queued` keeps at most 5 backoff steps.
+paused row still does not show `nextAttemptAt`. An entry whose wait stays
+keeps its backoff steps, so the waits after it grow as with no pause. When
+the wait ended or is cleared, it keeps at most 5 steps.
 
 Android: the boot sweep, `resume()`, a return to the foreground,
 `updateHeaders()` and a same-id `mutate()` now replace a WorkManager row
@@ -85,15 +86,17 @@ of the entry's main chain runs, and keeps a row that WorkManager starts
 within 30 s. It makes the new row before it cancels the old wake, and it
 keeps a wake that the stored entry still needs. A return to the foreground
 also makes the wake again (KEEP) for a queued entry whose wait stays and
-that has no WorkManager row at all.
+that has no wake row, also when it has a main row that WorkManager holds
+back.
 
-Android: a call that failed while it connected, with no earlier try inside
-the same call, now waits at most 15 minutes. Such a call sent no request.
-The failures are `ConnectException`, `UnknownHostException`,
-`NoRouteToHostException`, `PortUnreachableException`,
-`SSLHandshakeException` and `SSLPeerUnverifiedException`, with no
-suppressed exception (OkHttp attaches the earlier tries of a call as
-suppressed, and an earlier try may have sent the body). Every attempt
+Android: a call whose every try failed while it connected now waits at
+most 15 minutes. Such a call sent no request. The failures are
+`ConnectException`, `UnknownHostException`, `NoRouteToHostException`,
+`PortUnreachableException`, `SSLHandshakeException` and
+`SSLPeerUnverifiedException`. OkHttp attaches the earlier tries of a call
+as suppressed exceptions; each of them must be one of these too, as when
+every address of a host refuses. Any other earlier try may have sent the
+body, and then the cap does not apply. Every attempt
 starts on a network that Android reports as validated. Every other
 failure, a timeout included, keeps the retry policy's `maxMs` (2 hours by
 default), because the server may have the request.

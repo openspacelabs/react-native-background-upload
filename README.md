@@ -358,7 +358,7 @@ Retry classes:
 | Attempt outcome | Action |
 | --- | --- |
 | 2xx, or an `accept` rule matches | settle `completed` |
-| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt`. On Android a call that failed while it connected, with no earlier try inside the call, waits at most 15 minutes |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt`. On Android a call whose every try failed while it connected waits at most 15 minutes |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
 | other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
@@ -492,8 +492,9 @@ kept. A paused entry past `expiresAt` settles `error` with
 On Android, `resume()` also ends some retry backoff waits of the queued
 entries in its scope, and they run at once. `pause()` keeps an entry's
 wait, and `resume()` gives back what is left of it under the same rule. A
-resumed entry keeps at most 5 backoff steps. See "Backoff and the app"
-under Android platform notes.
+kept wait keeps its backoff steps; when the wait ended or is cleared, the
+entry keeps at most 5. See "Backoff and the app" under Android platform
+notes.
 
 Neither call rejects because the settings cannot be saved. On Android,
 either call can still reject `E_STORAGE` when an entry file cannot be saved.
