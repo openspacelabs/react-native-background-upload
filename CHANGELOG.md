@@ -2,8 +2,8 @@
 
 Fixed (iOS): a late result from an earlier use of a request id could change
 a later request with the same id. An app may call `mutate()` with an id
-again after its row is gone (its outcome was acknowledged, or it was
-cancelled). The new request starts again at attempt 1, so a result of the
+again after its row is gone (its outcome was acknowledged, or `cancel(id)`
+removed it). The new request starts again at attempt 1, so a result of the
 earlier request that arrived late could match it. A late 2xx then completed
 the new request with the old response and cancelled its task, so the new
 body was not sent. A late 4xx failed it, a late 5xx counted as one of its
@@ -55,8 +55,7 @@ failed save, two retry paths then tried again with no network request in
 between, in a tight loop. A NaN or infinite `baseMs` could crash the app
 when a retry was scheduled. Now no retry on iOS waits less than 1 s: a
 computed wait under 1 s, or one that is not a finite number, becomes 1 s.
-Android already replaces a `baseMs` or `maxMs` of 0 or less with its
-default. What an app sees: with the default policy, the first retry now
+What an app sees: with the default policy, the first retry now
 waits 1 to 1.2 s (before: 0.8 to 1.2 s). Later waits do not change.
 
 ## 11.3.0

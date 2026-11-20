@@ -60,6 +60,7 @@ struct QueueEntry: Codable, Equatable {
   /// an id share one. Part tasks and simple tasks carry it, so a late
   /// callback from a replaced plan or from an earlier use of the id is
   /// dropped. A same-body reopen keeps it: the generation tells those apart.
+  /// A v9 chunked upload that create() resumes keeps its v9 value.
   var incarnation: String
   /// The merged request headers. updateHeaders() patches them.
   var headers: [String: String]
@@ -206,9 +207,8 @@ extension QueueEntry {
 
   /// Rule 3, same body: the new vars, headers and descriptor fields replace
   /// the stored ones, and expiresAt becomes noDeadline. The body, url,
-  /// method, accepted parts,
-  /// generation and createdAt stay (a different url or method is a different
-  /// body). `resetBudget` (a reopen, which starts a new generation) also
+  /// method, accepted parts, generation and createdAt stay (a different url
+  /// or method is a different body). `resetBudget` (a reopen, which starts a new generation) also
   /// resets attempts, part rejections and every transient count: attempts
   /// count one generation. A live entry keeps its counts, the parts' included.
   func resumed(with p: ParsedEnqueue, resetBudget: Bool, now: Double) -> QueueEntry {

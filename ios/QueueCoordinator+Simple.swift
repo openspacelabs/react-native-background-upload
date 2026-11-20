@@ -317,10 +317,10 @@ extension QueueCoordinator {
   ///
   /// A floor under the backoff, as a safety net: the next attempt never
   /// begins within baseMs (at least minBackoffMs) of the previous one's
-  /// start, however that one
-  /// ended. One that ended before its own start (the daemon dropped a
-  /// delayed task at once, in a way taskCompletedLocked did not catch) gets
-  /// no task for baseMs, so such failures cannot spin. That wait is in this
+  /// start, however that one ended. One that ended before its own start
+  /// (the daemon dropped a delayed task at once, in a way
+  /// taskCompletedLocked did not catch) gets no task for baseMs, so such
+  /// failures cannot spin. That wait is in this
   /// process, and bounded, so a clock that moved cannot stall the retry.
   /// The floor is in memory only: a relaunch starts without it.
   func scheduleRetry(_ e: QueueEntry) {
