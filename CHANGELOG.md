@@ -49,6 +49,16 @@ and re-queued requests store an `expiresAt` of 8640000000000000 (the largest
 JS `Date`). Versions 10.0.0 to 11.3.0 read this field and never reach that
 time, so an app that goes back to one of them does not expire the request.
 
+Fixed (iOS): a retry could start with no wait. A retry policy with
+`baseMs` or `maxMs` of 0 or less could give retries with no wait. After a
+failed save, two retry paths then tried again with no network request in
+between, in a tight loop. A NaN or infinite `baseMs` could crash the app
+when a retry was scheduled. Now no retry on iOS waits less than 1 s: a
+computed wait under 1 s, or one that is not a finite number, becomes 1 s.
+Android already replaces a `baseMs` or `maxMs` of 0 or less with its
+default. What an app sees: with the default policy, the first retry now
+waits 1 to 1.2 s (before: 0.8 to 1.2 s). Later waits do not change.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

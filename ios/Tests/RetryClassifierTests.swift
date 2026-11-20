@@ -134,7 +134,9 @@ final class RetryClassifierTests: XCTestCase {
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 2, policy: p, random: { 0.5 }), 2_000)
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 3, policy: p, random: { 0.5 }), 4_000)
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 40, policy: p, random: { 0.5 }), 7_200_000, "capped at max")
-    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 0 }), 800, "jitter low bound")
+    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 0 }), 1_000,
+                   "jitter low bound, raised to the 1 s minimum")
+    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 2, policy: p, random: { 0 }), 1_600, "jitter low bound")
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 1 }), 1_200, "jitter high bound")
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 0, policy: p, random: { 0.5 }), 1_000, "attempt < 1 clamps")
     var noJitter = p

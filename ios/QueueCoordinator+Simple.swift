@@ -316,14 +316,15 @@ extension QueueCoordinator {
   /// settles it or the app cancels it: there is no deadline.
   ///
   /// A floor under the backoff, as a safety net: the next attempt never
-  /// begins within baseMs of the previous one's start, however that one
+  /// begins within baseMs (at least minBackoffMs) of the previous one's
+  /// start, however that one
   /// ended. One that ended before its own start (the daemon dropped a
   /// delayed task at once, in a way taskCompletedLocked did not catch) gets
   /// no task for baseMs, so such failures cannot spin. That wait is in this
   /// process, and bounded, so a clock that moved cannot stall the retry.
   /// The floor is in memory only: a relaunch starts without it.
   func scheduleRetry(_ e: QueueEntry) {
-    let base = policy(e).baseMs
+    let base = RetryClassifier.atLeastMinimum(policy(e).baseMs)
     var delay = RetryClassifier.backoffMs(attempt: max(e.attempts, 1), policy: policy(e), random: random)
     let start = attemptStarts[e.id]
     let endedBeforeStart = start.map { now() < $0 } ?? false

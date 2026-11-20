@@ -56,13 +56,25 @@ enum RetryClassifier {
     }
   }
 
+  /// The shortest wait before any retry, whatever the policy says. 1 s, the
+  /// default baseMs on iOS and Android.
+  static let minBackoffMs = 1_000
+
   /// Jittered exponential backoff. `attempt` is 1-based: 1 gives about base.
-  /// min(base * 2^(attempt-1), max), times (1 + jitter * (2r - 1)), >= 0.
+  /// min(base * 2^(attempt-1), max), times (1 + jitter * (2r - 1)), and at
+  /// least minBackoffMs (see atLeastMinimum).
   static func backoffMs(attempt: Int, policy: RetryPolicy, random: () -> Double) -> Int {
     let exponent = Double(min(max(attempt - 1, 0), 40))
     let raw = min(policy.baseMs * pow(2, exponent), policy.maxMs)
     let jittered = raw * (1 + policy.jitter * (2 * random() - 1))
-    return Int(max(jittered, 0).rounded())
+    return Int(atLeastMinimum(jittered).rounded())
+  }
+
+  /// `ms` when it is a finite number of at least minBackoffMs, else
+  /// minBackoffMs. So a policy with 0, NaN or an infinity gives a wait of
+  /// 1 s, never none, and never traps in the conversion to Int.
+  static func atLeastMinimum(_ ms: Double) -> Double {
+    ms.isFinite && ms > Double(minBackoffMs) ? ms : Double(minBackoffMs)
   }
 
   /// The errorKind taxonomy shared with Android: a missing or unreadable
