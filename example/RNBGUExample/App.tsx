@@ -320,7 +320,7 @@ const App = () => {
             onChangeText={setCustomId}
           />
           <Field
-            label="Expires in s (blank = default)"
+            label="Expires in s (ignored; blank = none)"
             value={expiresInS}
             onChangeText={setExpiresInS}
             keyboardType="number-pad"

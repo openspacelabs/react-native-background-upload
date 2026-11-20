@@ -1,6 +1,5 @@
 import {
   createRegistry,
-  DEFAULT_LIFETIME_MS,
   MAX_VARS_BYTES,
   utf8ByteLength,
   uuidV4,
@@ -9,7 +8,9 @@ import {
   type Settings,
 } from '../registry';
 
-const NOW = 1_700_000_000_000;
+// The expiresAt that every enqueue sends: the largest valid Date. Native on
+// 11.3.0 and earlier requires a number there, and never reaches this one.
+const NO_DEADLINE = 8_640_000_000_000_000;
 
 const setup = (settings: Partial<Settings> = {}) => {
   const enqueue = jest.fn(async (entry: EnqueueEntry) => entry.id);
@@ -17,7 +18,6 @@ const setup = (settings: Partial<Settings> = {}) => {
   const trackMutate = jest.fn();
   const warn = jest.fn();
   const current: Settings = {
-    lifetimeMs: DEFAULT_LIFETIME_MS,
     enqueueTimeoutMs: 10_000,
     maxVarsBytes: MAX_VARS_BYTES,
     ...settings,
@@ -28,7 +28,6 @@ const setup = (settings: Partial<Settings> = {}) => {
     getSettings: () => current,
     trackMutate,
     warn,
-    now: () => NOW,
   });
   const lastEntry = (): EnqueueEntry => enqueue.mock.calls.at(-1)![0];
   return { ...registry, enqueue, definitions, trackMutate, warn, lastEntry };
@@ -443,12 +442,20 @@ describe('mutate', () => {
       ).rejects.toThrow(/method must be one of/);
     });
 
-    it.each([NaN, Infinity, 0, -5])(
-      'rejects expiresAt %p',
+    // expiresAt is deprecated and ignored. An ignored value must never be
+    // the reason a request is refused.
+    it.each([NaN, Infinity, 0, -5, 42, 'soon', null])(
+      'accepts expiresAt %p and sends the no-deadline value',
       async (expiresAt) => {
-        await expect(
-          mutateWith({ url: 'https://x', data: {}, expiresAt }).promise,
-        ).rejects.toThrow(/expiresAt/);
+        const { promise, enqueue } = mutateWith({
+          url: 'https://x',
+          data: {},
+          expiresAt,
+        });
+        await expect(promise).resolves.toBeDefined();
+        expect(enqueue.mock.calls[0]![0].descriptor.expiresAt).toBe(
+          NO_DEADLINE,
+        );
       },
     );
 
@@ -843,30 +850,18 @@ describe('mutate', () => {
     });
   });
 
-  describe('expiresAt', () => {
-    it('defaults to now + lifetimeMs', async () => {
-      const { define, lastEntry } = setup({ lifetimeMs: 1000 });
-      const send = define({
-        key: 'k',
-        request: (_vars: null) => ({ url: 'https://x', data: {} }),
-      });
-      await send.mutate(null);
-      expect(lastEntry().descriptor.expiresAt).toBe(NOW + 1000);
-    });
-
-    it('defaults the lifetime to 14 days', async () => {
+  describe('expiresAt (deprecated, ignored)', () => {
+    it('sends the no-deadline value when the descriptor sets none', async () => {
       const { define, lastEntry } = setup();
       const send = define({
         key: 'k',
         request: (_vars: null) => ({ url: 'https://x', data: {} }),
       });
       await send.mutate(null);
-      expect(lastEntry().descriptor.expiresAt).toBe(
-        NOW + 14 * 24 * 60 * 60 * 1000,
-      );
+      expect(lastEntry().descriptor.expiresAt).toBe(NO_DEADLINE);
     });
 
-    it('keeps an explicit expiresAt', async () => {
+    it("ignores the descriptor's expiresAt", async () => {
       const { define, lastEntry } = setup();
       const send = define({
         key: 'k',
@@ -877,7 +872,75 @@ describe('mutate', () => {
         }),
       });
       await send.mutate(null);
-      expect(lastEntry().descriptor.expiresAt).toBe(42);
+      expect(lastEntry().descriptor.expiresAt).toBe(NO_DEADLINE);
+    });
+
+    it('sends the same entry for a same-id mutate whatever expiresAt it sets', async () => {
+      const { define, enqueue } = setup();
+      let expiresAt: number | undefined = 1;
+      const send = define({
+        key: 'k',
+        request: (_vars: null) => ({ url: 'https://x', data: {}, expiresAt }),
+      });
+      await send.mutate(null, { id: 'same' });
+      expiresAt = 2;
+      await send.mutate(null, { id: 'same' });
+      expiresAt = undefined;
+      await send.mutate(null, { id: 'same' });
+      const [first, ...rest] = enqueue.mock.calls.map(([entry]) => entry);
+      rest.forEach((entry) => expect(entry).toEqual(first));
+      expect(rest).toHaveLength(2);
+    });
+
+    it('warns one time per client, in development, when a descriptor sets it', async () => {
+      const { define, warn } = setup();
+      const plain = define({
+        key: 'plain',
+        request: (_vars: null) => ({ url: 'https://x', data: {} }),
+      });
+      await plain.mutate(null);
+      expect(warn).not.toHaveBeenCalled();
+      const timed = (key: string) =>
+        define({
+          key,
+          request: (_vars: null) => ({
+            url: 'https://x',
+            data: {},
+            expiresAt: 42,
+          }),
+        });
+      await timed('a').mutate(null);
+      await timed('a').mutate(null);
+      await timed('b').mutate(null);
+      // The duplicate-key warning of the second define('a') is the other one.
+      const deprecations = warn.mock.calls.filter(([m]) =>
+        /expiresAt/.test(m),
+      );
+      expect(deprecations).toEqual([
+        [
+          'mutate: the descriptor of "a" sets expiresAt. expiresAt is deprecated and ignored: the library has no deadlines. To bound a request, call cancel(id). It leaves the types in the next major release.',
+        ],
+      ]);
+    });
+
+    it('does not warn outside development', async () => {
+      const global = globalThis as { __DEV__?: boolean };
+      global.__DEV__ = false;
+      try {
+        const { define, warn, lastEntry } = setup();
+        await define({
+          key: 'k',
+          request: (_vars: null) => ({
+            url: 'https://x',
+            data: {},
+            expiresAt: 42,
+          }),
+        }).mutate(null);
+        expect(warn).not.toHaveBeenCalled();
+        expect(lastEntry().descriptor.expiresAt).toBe(NO_DEADLINE);
+      } finally {
+        delete global.__DEV__;
+      }
     });
   });
 });

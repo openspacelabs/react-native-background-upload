@@ -97,7 +97,8 @@ export const addComment = uploads.define({
     store.dispatch(commentsLoaded({ noteId, content }));
   },
   onError: (error, vars, meta) => {
-    // error.errorKind: 'http' | 'network' | 'file' | 'expired' | 'truncated' | 'unknown'
+    // error.errorKind: 'http' | 'network' | 'file' | 'truncated' | 'unknown'
+    // ('expired' only from an earlier version; see "No deadlines")
   },
 });
 
@@ -137,7 +138,7 @@ TypeScript does not flag a misspelled key on an inferred arrow return.
 | `file` | Whole file body. Copied. Moved when `parts` is set. |
 | `parts` | Chunked over `file`: `[{ url, headers?, range: { start, end } }]`, bytes, end exclusive, tiling the file from 0. |
 | `accept` | Non-2xx responses to treat as success: `[{ status, bodyIncludes? }]`. |
-| `expiresAt` | Epoch ms. Default now + `lifetimeMs` (14 days). Past it: `error` with `errorKind: 'expired'`. |
+| `expiresAt` | Deprecated. Ignored: the library has no deadlines. See "No deadlines" under "Reliable delivery". |
 | `retry` | Per-request override of the `configure()` retry defaults: `backoff`, `terminalHttp.exempt`, and `transient` rules. See "Reliable delivery". |
 | `wifiOnly` | `true` waits for Wi-Fi before each attempt; `false` never waits. Overrides `setWifiOnly()` for this entry. Omit it to follow `setWifiOnly()`, including later toggles. |
 | `priority` | `'high'` or `'normal'` (default). On Android at most 4 requests transmit at once, and one of those slots is kept for `'high'`. Normal requests can use only the other 3, so a high-priority request, such as a small JSON POST that creates a session, gets a slot without waiting behind a backlog of file parts. It can still wait when other high-priority requests hold every slot. iOS ignores it for now. |
@@ -190,12 +191,11 @@ Nothing else deletes them.
 different `url` or `method` counts as a different body. `mutate()` with an
 id that exists:
 
-- Same body: resume. New headers, `expiresAt`, and `vars` replace the stored
-  ones.
+- Same body: resume. New headers and `vars` replace the stored ones.
 - Different body (`data`, `form`, `file`, or `parts`) and the entry is not
   running (queued, paused, awaiting-auth, or settled): the descriptor, staged
-  body, `vars`, headers, and `expiresAt` are replaced and the entry reopens.
-  It settles once more.
+  body, `vars`, and headers are replaced and the entry reopens. It settles
+  once more.
 - Different body, entry running: `mutate()` rejects with `E_RUNNING`.
 - A cancelled entry whose outcome is not yet acknowledged: a fresh
   generation. The old outcome's ack forgets the entry only when the
@@ -286,6 +286,24 @@ while the app was dead from being sent twice.
 
 # Reliable delivery
 
+**No deadlines.** The library sets no deadline on a request. It keeps an
+entry, and retries it, until the retry rules below settle it or the app
+calls `cancel(id)`.
+
+- `expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
+  deprecated and do nothing. `mutate()` and `configure()` accept any value
+  for them, and in development the first call that sets one logs a warning.
+  They leave the types in the next major release.
+- An app that needs a bound keeps its own clock and calls `cancel(id)`.
+- JS sends every new or re-queued request to native with a fixed far-future
+  deadline, so it cannot expire.
+- A live entry that an earlier version queued, and that is never queued
+  again, keeps its stored deadline until the native side stops reading it,
+  in the same release. After that it keeps going.
+- An entry that settled `expired` under an earlier version stays an `error`
+  row until `cancel()` or a same-id `mutate()`. If its outcome was not yet
+  acknowledged, the outcome still reaches `onError` after the upgrade.
+
 1. **Write-ahead.** Entry, descriptor, and staged body persist before any
    attempt. `mutate()` resolves after the row and every staged body copy are
    durably on disk (temp file, rename, then a sync of the directory), so the
@@ -309,9 +327,8 @@ while the app was dead from being sent twice.
    never gives up on its own; the app decides a poison policy from that
    number.
 3. **One outcome per settle cycle.** `pause()` produces none, for the whole
-   queue or for a set of keys. A paused entry past `expiresAt` settles
-   `error` with `errorKind: 'expired'` when it is resumed. A same-id
-   `mutate()` on a settled entry reopens it, and it settles once more.
+   queue or for a set of keys. A same-id `mutate()` on a settled entry
+   reopens it, and it settles once more.
 4. **Never before `mutate()` resolves.** Delivery for an id waits for the
    caller's promise. While native has not answered `enqueue`, the id's
    outcomes wait too. They stay journaled and unacknowledged, so none is
@@ -331,7 +348,7 @@ while the app was dead from being sent twice.
    ack, a `completed` or `cancelled` entry leaves `getRequests()` without a
    `state` event, and an `error` entry stays with its `error` row.
 7. **Completed entries are forgotten after ack.** Row and bytes go. An `error`
-   or `expired` entry keeps both until `cancel()` or a same-id `mutate()`.
+   entry keeps both until `cancel()` or a same-id `mutate()`.
 8. **Ordering holds per id only.** The outcomes of one id are delivered in
    order. One exception: when one id has held outcomes under two keys, the
    key defined first delivers first (rule 5). There is no ordering guarantee
@@ -343,13 +360,12 @@ Retry classes:
 | Attempt outcome | Action |
 | --- | --- |
 | 2xx, or an `accept` rule matches | settle `completed` |
-| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2) until `expiresAt` |
+| network failure, 5xx, 408, 429 | exponential backoff (base 1 s, max 2 h, jitter 0.2), with no limit on attempts or time |
 | 401, 403 | park as `awaiting-auth`; resume on `updateHeaders()` |
 | other 4xx matching a `retry.transient` rule (`status`, optional `bodyIncludes`), under the rule's `maxRetries` | as transient. The first matching rule in the list wins. `maxRetries: 3` retries three matching responses; the fourth settles. No `maxRetries` means no cap. See "Transient rule counts" below. A rule for 401, 403, 408 or 429 is rejected at the call |
 | other 4xx in `retry.terminalHttp.exempt` (default `[404]`), when no rule matched | as transient, with no cap |
 | other 4xx, or a rule past its `maxRetries` | settle `error` with `errorKind: 'http'`, response attached |
 | payload missing on disk | settle `error` with `errorKind: 'file'` |
-| `expiresAt` passed | settle `error` with `errorKind: 'expired'`; bytes kept |
 | response body over 1 MB with a `response` parser | `onError` with `errorKind: 'truncated'`; the entry is `completed` |
 
 **Transient rule counts.** The library counts the responses each rule
@@ -422,8 +438,7 @@ live, so its first delivery, at the boot replay, is 1.
 ### `mutate(vars, { id? }): Promise<{ id }>`
 
 Runs `request(vars)` once, merges `configure().headers()` under the
-descriptor's headers, validates the descriptor, defaults `expiresAt`, and
-persists the entry. Resolves with the id after the row and every staged body
+descriptor's headers, validates the descriptor, and persists the entry. Resolves with the id after the row and every staged body
 copy are on disk. Rejects on a malformed descriptor, an unknown descriptor
 field, a GET with a body, input native cannot send (`E_INVALID`), a missing
 file (`E_FILE_MISSING`), a storage failure (`E_STORAGE`), a running entry
@@ -444,7 +459,7 @@ reached its key before it; see rule 5 of "Reliable delivery".
 | Option | Notes |
 | --- | --- |
 | `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
-| `lifetimeMs` | Default `expiresAt` distance. Default 14 days. |
+| `lifetimeMs` | Deprecated. Ignored: the library has no deadlines. See "No deadlines" under "Reliable delivery". |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
 | `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
@@ -471,8 +486,7 @@ await Upload.resume({ keys: ['capture.upload'] }); // captures run
 
 Both states are persisted natively. Each entry that moves emits one `state`
 event (`paused`, then `queued`). No outcome is produced and the bytes are
-kept. A paused entry past `expiresAt` settles `error` with
-`errorKind: 'expired'` when it is resumed.
+kept. A paused entry waits with no time limit.
 
 Neither call rejects because the settings cannot be saved. On Android,
 either call can still reject `E_STORAGE` when an entry file cannot be saved.
@@ -899,7 +913,11 @@ behind a held one, as they do on a device. On release they all run in order,
 as usual, and a failure that `failNext()` queued goes to the first call that
 runs. `reset()` drops held calls and the calls behind them. `seedUnacknowledged()` and `seedRows()`
 model a journal and rows left by a dead session, so `configure()` replays
-them. `seedDiagnostics()` adds records for `takeDiagnostics()`, and
+them. The fake never expires an entry. To test the `expired` outcome an
+earlier version may have journaled, seed one with `deliveries: 0`, so its
+first delivery counts 1:
+`native.seedUnacknowledged([native.buildSettled(id, { kind: 'error', error: { errorKind: 'expired' } }, { deliveries: 0 })])`.
+`seedDiagnostics()` adds records for `takeDiagnostics()`, and
 `seedBootSnapshot({ v9Leftovers: { unownedUploads: 2 } })` adds a boot record
 with those counts, the others 0 and no ids.
 

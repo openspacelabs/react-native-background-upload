@@ -1,5 +1,28 @@
 ## Unreleased
 
+The library has no deadlines. It sets no deadline on a request: it keeps an
+entry, and retries it, until the retry rules settle it or the app calls
+`cancel(id)`. An app that needs a bound calls `cancel(id)` itself.
+`expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
+deprecated and ignored. They stay in the types, so code written for 11.3.0
+compiles and runs with no change, and they leave the types in the next
+major release. `mutate()` and `configure()` no longer reject a value for
+them that is not finite, zero or negative. In development, the first
+`mutate()` whose descriptor sets `expiresAt`, and the first `configure()`
+that sets `lifetimeMs`, warn one time per client (to `onWarning`, or
+`console.warn` when none is set).
+`configure()` no longer sends `lifetimeMs` to native. Every enqueue sends
+`expiresAt: 8640000000000000` (the largest valid `Date`), because native in
+11.3.0 and earlier rejects an entry without one. So every new or re-queued
+request cannot expire. A live entry that an earlier version queued, and
+that is never queued again, keeps its stored deadline until the native side
+stops reading it, in the same release; after that it keeps going. An entry
+that settled `expired` under an earlier version stays an `error` row until
+`cancel()` or a same-id `mutate()`, and an unacknowledged `expired` outcome
+still reaches `onError`. `errorKind: 'expired'` is deprecated. The fake
+native module never expired an entry and still does not. This JS change ships in
+the same release as the Android and iOS changes that remove expiry.
+
 Android now sets its HTTP timeouts: connect 15 s, read 60 s, write 60 s.
 Before, only the 24 h call cap was set, so OkHttp's 10 s defaults applied.
 A server that took more than 10 s to answer after the body was sent made the

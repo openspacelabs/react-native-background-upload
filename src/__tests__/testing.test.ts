@@ -101,11 +101,11 @@ describe('enqueue', () => {
 describe('queue controls', () => {
   it('records configure, setWifiOnly and updateHeaders', async () => {
     const fake = createFakeNative();
-    fake.configure({ lifetimeMs: 5 });
+    fake.configure({ notificationTitle: 'Up' });
     await fake.setWifiOnly(true);
     await fake.updateHeaders({ Authorization: 'Bearer u' });
     expect(fake.calls).toMatchObject({
-      configure: [{ lifetimeMs: 5 }],
+      configure: [{ notificationTitle: 'Up' }],
       setWifiOnly: [true],
       updateHeaders: [{ Authorization: 'Bearer u' }],
     });
@@ -248,6 +248,50 @@ describe('queue controls', () => {
     const fake = createFakeNative();
     await expect(fake.cancel('nope')).resolves.toBeUndefined();
     expect(fake.calls.cancel).toEqual(['nope']);
+  });
+});
+
+describe('no deadlines', () => {
+  it('never expires an entry, whatever expiresAt it carries', async () => {
+    jest.useFakeTimers({ now: 1_000 });
+    try {
+      const fake = createFakeNative();
+      const settled: unknown[] = [];
+      fake.onSettled((e) => {
+        settled.push(e);
+      });
+      await fake.enqueue(entry({ id: 'past' }));
+      await fake.pause({});
+      jest.advanceTimersByTime(30 * 24 * 60 * 60 * 1000);
+      await fake.resume({});
+      jest.advanceTimersByTime(30 * 24 * 60 * 60 * 1000);
+      expect(fake.getRequests()).toEqual([
+        expect.objectContaining({ id: 'past', state: 'queued' }),
+      ]);
+      expect(settled).toEqual([]);
+      await expect(fake.getUnacknowledgedEvents()).resolves.toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('stores an expired outcome from an earlier version for replay', async () => {
+    const fake = createFakeNative();
+    await fake.enqueue(entry({ id: 'old' }));
+    const event = fake.buildSettled('old', {
+      kind: 'error',
+      error: { errorKind: 'expired' },
+    });
+    fake.seedUnacknowledged([{ ...event, deliveries: 0 }]);
+    await expect(fake.getUnacknowledgedEvents()).resolves.toEqual([
+      expect.objectContaining({
+        eventId: event.eventId,
+        id: 'old',
+        kind: 'error',
+        error: { errorKind: 'expired', message: 'expired' },
+        deliveries: 1,
+      }),
+    ]);
   });
 });
 

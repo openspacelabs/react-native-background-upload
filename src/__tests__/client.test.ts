@@ -152,26 +152,93 @@ describe('client shape', () => {
 });
 
 describe('configure', () => {
-  it('forwards lifetimeMs, retry and the flattened android config', () => {
+  it('forwards retry and the flattened android config, and not lifetimeMs', () => {
     const client = createUploadClient();
     const retry = { terminalHttp: { exempt: [] } };
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     client.configure({
       lifetimeMs: 1000,
       retry,
       headers: () => ({}),
       android: { notificationTitle: 'Backing up', notificationChannel: 'ch' },
     });
+    warn.mockRestore();
     expect(native.configure).toHaveBeenCalledWith({
-      lifetimeMs: 1000,
       retry,
       notificationTitle: 'Backing up',
       notificationChannel: 'ch',
     });
   });
 
+  describe('lifetimeMs (deprecated, ignored)', () => {
+    let consoleWarn: jest.SpyInstance;
+    beforeEach(() => {
+      consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => consoleWarn.mockRestore());
+
+    // An ignored value must never be the reason a call is refused.
+    it.each([0, -1, NaN, Infinity, 1000, 'long'])(
+      'accepts lifetimeMs %p and applies the rest of the call',
+      (lifetimeMs) => {
+        const client = createUploadClient();
+        expect(() =>
+          client.configure({
+            lifetimeMs: lifetimeMs as number,
+            retry: { terminalHttp: { exempt: [] } },
+          }),
+        ).not.toThrow();
+        expect(native.configure).toHaveBeenCalledWith({
+          retry: { terminalHttp: { exempt: [] } },
+        });
+        expect(native.getUnacknowledgedEvents).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('does not change the expiresAt that mutate() sends', async () => {
+      const client = createUploadClient();
+      client.configure({ lifetimeMs: 1000 });
+      const send = client.define({
+        key: 'k',
+        request: (_v: null) => ({ url: 'https://x', data: 1 }),
+      });
+      await send.mutate(null);
+      expect(native.enqueue.mock.calls[0][0].descriptor.expiresAt).toBe(
+        8_640_000_000_000_000,
+      );
+    });
+
+    it('warns one time per client, in development, through onWarning', () => {
+      const onWarning = jest.fn();
+      const client = createUploadClient();
+      client.configure({ onWarning });
+      expect(onWarning).not.toHaveBeenCalled();
+      client.configure({ lifetimeMs: 1000, onWarning });
+      client.configure({ lifetimeMs: 2000, onWarning });
+      expect(onWarning.mock.calls).toEqual([
+        [
+          'configure: lifetimeMs is deprecated and ignored: the library has no deadlines. To bound a request, call cancel(id). It leaves the types in the next major release.',
+        ],
+      ]);
+      expect(consoleWarn).not.toHaveBeenCalled();
+    });
+
+    it('does not warn outside development', () => {
+      const global = globalThis as { __DEV__?: boolean };
+      global.__DEV__ = false;
+      try {
+        const onWarning = jest.fn();
+        createUploadClient().configure({ lifetimeMs: 1000, onWarning });
+        expect(onWarning).not.toHaveBeenCalled();
+      } finally {
+        delete global.__DEV__;
+      }
+    });
+  });
+
   it('validates retry the way mutate() does, naming configure', async () => {
     const client = createUploadClient();
-    client.configure({ lifetimeMs: 1000 });
+    client.configure({ headers: () => ({ A: '1' }) });
     native.configure.mockClear();
     expect(() =>
       client.configure({ retry: { transient: [{ status: 500 }] } }),
@@ -182,17 +249,15 @@ describe('configure', () => {
       client.configure({ retry: { terminalHttp: { exmpt: [] } } } as never),
     ).toThrow(/^configure: unknown retry\.terminalHttp field "exmpt"/);
     expect(native.configure).not.toHaveBeenCalled();
-    // A rejected call leaves the earlier configuration whole: the 1 s
-    // lifetime from the first call still sets expiresAt.
+    // A rejected call leaves the earlier configuration whole: the headers
+    // provider from the first call still applies.
     const d = client.define({
       key: 'k',
       request: (_v: null) => ({ url: 'https://x', data: 1 }),
     });
-    const before = Date.now();
     await d.mutate(null);
     const entry = native.enqueue.mock.calls[0][0];
-    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
-    expect(entry.descriptor.expiresAt).toBeLessThan(before + 1000 + 5000);
+    expect(entry.descriptor.headers).toEqual({ A: '1' });
     const retry = { transient: [{ status: 404, maxRetries: 48 }] };
     client.configure({ retry });
     expect(native.configure).toHaveBeenCalledWith(
@@ -206,49 +271,39 @@ describe('configure', () => {
       key: 'k',
       request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
     });
-    client.configure({ lifetimeMs: 1000, maxVarsBytes: 16 });
+    client.configure({ headers: () => ({ A: '1' }), maxVarsBytes: 16 });
     native.configure.mockClear();
     expect(() =>
-      client.configure({ lifetimeMs: 5, enqueueTimeoutMs: 0 }),
+      client.configure({ headers: () => ({ B: '2' }), enqueueTimeoutMs: 0 }),
     ).toThrow(/enqueueTimeoutMs/);
     expect(() =>
       client.configure({
-        lifetimeMs: 5,
+        headers: () => ({ B: '2' }),
         maxVarsBytes: 64,
         enqueueTimeoutMs: 5,
         retry: 7 as never,
       }),
     ).toThrow(/^configure: /);
     expect(() =>
-      client.configure({ lifetimeMs: 5, enqueueTimeoutMs: 5, maxVarsBytes: 0 }),
+      client.configure({
+        headers: () => ({ B: '2' }),
+        enqueueTimeoutMs: 5,
+        maxVarsBytes: 0,
+      }),
     ).toThrow(/maxVarsBytes/);
     expect(native.configure).not.toHaveBeenCalled();
-    // The first call's lifetime and vars cap still apply.
-    const before = Date.now();
+    // The first call's headers provider and vars cap still apply.
     await send.mutate({ s: 'a'.repeat(8) });
     const entry = native.enqueue.mock.calls.at(-1)![0];
-    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
-    expect(entry.descriptor.expiresAt).toBeLessThan(before + 1000 + 5000);
+    expect(entry.descriptor.headers).toEqual({ A: '1' });
     await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
       /is 17 bytes; the limit is 16/,
     );
   });
 
-  it('sends the 14 day default lifetime and no retry when neither is given', () => {
+  it('sends an empty object when no option is given', () => {
     createUploadClient().configure({});
-    expect(native.configure).toHaveBeenCalledWith({
-      lifetimeMs: 14 * 24 * 60 * 60 * 1000,
-    });
-    expect(native.configure.mock.calls[0][0]).not.toHaveProperty('retry');
-  });
-
-  it('rejects a non-positive lifetime', () => {
-    expect(() => createUploadClient().configure({ lifetimeMs: 0 })).toThrow(
-      /lifetimeMs/,
-    );
-    expect(() => createUploadClient().configure({ lifetimeMs: NaN })).toThrow(
-      /lifetimeMs/,
-    );
+    expect(native.configure).toHaveBeenCalledWith({});
   });
 
   it('rejects a non-positive maxVarsBytes and keeps it on the JS side', () => {
@@ -271,13 +326,11 @@ describe('configure', () => {
       request: (_v: { s: string }) => ({ url: 'https://x', data: 1 }),
     });
     client.configure({
-      lifetimeMs: 1000,
       maxVarsBytes: 16,
       headers: () => ({ A: '1' }),
     });
     expect(() =>
       client.configure({
-        lifetimeMs: 2000,
         enqueueTimeoutMs: 50,
         maxVarsBytes: 64,
         headers: () => ({ B: '2' }),
@@ -285,12 +338,9 @@ describe('configure', () => {
       }),
     ).toThrow(/onWarning/);
     expect(native.configure).toHaveBeenCalledTimes(1);
-    const before = Date.now();
     await send.mutate({ s: 'a'.repeat(8) });
     const entry = native.enqueue.mock.calls.at(-1)![0];
     expect(entry.descriptor.headers).toEqual({ A: '1' });
-    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
-    expect(entry.descriptor.expiresAt).toBeLessThan(before + 2000);
     await expect(send.mutate({ s: 'a'.repeat(9) })).rejects.toThrow(
       /the limit is 16/,
     );
@@ -312,7 +362,7 @@ describe('configure', () => {
   it('starts replay once; a second call updates settings without replaying', async () => {
     const client = createUploadClient();
     client.configure({});
-    client.configure({ lifetimeMs: 5 });
+    client.configure({ maxVarsBytes: 5 });
     await flush();
     expect(native.getUnacknowledgedEvents).toHaveBeenCalledTimes(1);
     expect(native.onSettled).toHaveBeenCalledTimes(1);
@@ -326,7 +376,7 @@ describe('configure', () => {
     expect(native.onSettled).not.toHaveBeenCalled();
   });
 
-  it('applies the headers provider and lifetime to later mutates', async () => {
+  it('applies the headers provider to later mutates', async () => {
     const client = createUploadClient();
     const send = client.define({
       key: 'k',
@@ -336,13 +386,10 @@ describe('configure', () => {
         headers: { B: '2' },
       }),
     });
-    client.configure({ lifetimeMs: 1000, headers: () => ({ A: '1' }) });
-    const before = Date.now();
+    client.configure({ headers: () => ({ A: '1' }) });
     await send.mutate(null);
     const entry = native.enqueue.mock.calls.at(-1)![0];
     expect(entry.descriptor.headers).toEqual({ A: '1', B: '2' });
-    expect(entry.descriptor.expiresAt).toBeGreaterThanOrEqual(before + 1000);
-    expect(entry.descriptor.expiresAt).toBeLessThan(before + 1000 + 5000);
   });
 });
 
@@ -662,7 +709,7 @@ describe('end to end', () => {
         url: 'https://x/3',
         dataJson: '{"n":3}',
         headers: { Authorization: 'Bearer t' },
-        expiresAt: expect.any(Number),
+        expiresAt: 8_640_000_000_000_000,
       },
     });
     fire('settled', {
@@ -934,7 +981,7 @@ describe('with a fake native', () => {
           method: 'PUT',
           data: { n: 3, note: null },
           headers: { Authorization: 'Bearer t' },
-          expiresAt: expect.any(Number),
+          expiresAt: 8_640_000_000_000_000,
         },
         raw: expect.objectContaining({ varsJson: '{"n":3}' }),
       },
@@ -995,6 +1042,34 @@ describe('with a fake native', () => {
     expect(client.getRequests({ id })).toEqual([
       expect.objectContaining({ state: 'error' }),
     ]);
+  });
+
+  it('replays an expired outcome that an earlier version journaled to onError', async () => {
+    const fake = createFakeNative();
+    const client = createUploadClient({ native: fake });
+    const onError = jest.fn();
+    const send = client.define({
+      key: 'item.send',
+      request: (_v: null) => ({ url: 'https://x' }),
+      onError,
+    });
+    const { id } = await send.mutate();
+    const event = fake.buildSettled(id, {
+      kind: 'error',
+      error: { errorKind: 'expired' },
+    });
+    fake.seedUnacknowledged([{ ...event, deliveries: 0 }]);
+
+    client.configure({});
+    await flush();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      { errorKind: 'expired', message: 'expired' },
+      null,
+      expect.objectContaining({ id, deliveries: 1 }),
+    );
+    expect(fake.ackedEventIds).toEqual([event.eventId]);
   });
 });
 
@@ -1142,11 +1217,14 @@ describe('a definition that arrives after configure()', () => {
     const send = client.define({ key: 'item.send', request, onSuccess });
     const ping = client.define({ key: 'ping', request });
 
-    client.configure({ definitions: [send, ping], lifetimeMs: 1000 });
+    client.configure({
+      definitions: [send, ping],
+      android: { notificationTitle: 'Up' },
+    });
     await acked;
     expect(onSuccess).toHaveBeenCalledTimes(1);
     // The list stays on the JS side.
-    expect(fake.calls.configure).toEqual([{ lifetimeMs: 1000 }]);
+    expect(fake.calls.configure).toEqual([{ notificationTitle: 'Up' }]);
 
     // A hot reload of a listed key replaces it without the list warning.
     client.define({ key: 'ping', request });
