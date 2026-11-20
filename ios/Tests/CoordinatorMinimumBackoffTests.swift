@@ -52,7 +52,7 @@ final class CoordinatorMinimumBackoffTests: XCTestCase {
     XCTAssertEqual(h.transport.live.count, expected, "\(name): the retry after 1 s", file: file, line: line)
   }
 
-  func testTheBackoffIsNeverUnderOneSecondAndNeverTraps() {
+  func testAZeroNegativeOrNonFiniteBackoffGivesOneSecond() {
     let values: [Double] = [0, -1, 0.5, .nan, .infinity, -.infinity]
     for base in values {
       for max in values {

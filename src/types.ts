@@ -95,6 +95,7 @@ export type Part = {
 };
 
 export type RetryPolicy = {
+  /** On iOS no retry waits less than 1 s, also when `baseMs` is smaller. */
   backoff: { baseMs: number; maxMs: number; jitter: number };
   /** HTTP statuses in the 4xx range that retry instead of settling. */
   terminalHttp: { exempt: number[] };

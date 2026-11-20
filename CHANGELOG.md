@@ -16,8 +16,9 @@ that needs a limit calls `cancel(id)` itself.
   (to `onWarning`, or `console.warn` when none is set).
 - Native accepts a request with or without `expiresAt`, in any form, and
   ignores it. `configure()` no longer sends `lifetimeMs` to native. JS still
-  sends a fixed far-future `expiresAt` with every enqueue; native does not
-  read it.
+  sends a fixed far-future `expiresAt` with every enqueue, because the
+  native code of 11.3.0 and earlier rejects a request without one. Native
+  in this version does not read it.
 - A 5xx, 408, 429, a network failure or a status in `exempt` now retries
   with no end. Each wait is bounded by the retry policy (`maxMs` plus its
   jitter).
@@ -37,7 +38,9 @@ that needs a limit calls `cancel(id)` itself.
   11.0.2 to 11.3.0; iOS: 8640000000000000, checked against 10.0.0 to
   11.3.0). A request that an earlier version queued, and that is not queued
   again, keeps its stored value, so an app that goes back to an earlier
-  version expires it as that version always did.
+  version expires it as that version always did. Android versions
+  below 11.0.2 cannot schedule their deadline wake for the new stored value,
+  so do not go back below 11.0.2 on Android.
 - `errorKind: 'expired'` is deprecated. The fake native module never expired
   an entry and still does not.
 

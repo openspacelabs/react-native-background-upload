@@ -296,7 +296,8 @@ calls `cancel(id)`.
   They leave the types in the next major release.
 - An app that needs a bound keeps its own clock and calls `cancel(id)`.
 - Native ignores `expiresAt` and never settles a request `expired`. JS still
-  sends a fixed far-future value in the field; native does not read it.
+  sends a fixed far-future value in the field, because the native code of
+  11.3.0 and earlier rejects a request without one.
 - A live entry that an earlier version queued keeps going, also when its
   stored deadline has passed.
 - An entry that settled `expired` under an earlier version stays an `error`
@@ -460,7 +461,7 @@ reached its key before it; see rule 5 of "Reliable delivery".
 | `definitions` | Optional. Every definition, as `define()` returned it. Listing a handle imports its module, so its `define()` runs before replay starts. In development, a later `define()` of a key that is not listed logs a warning. That key still receives its outcomes, and `mutate()` works for it. Throws when it is not an array of handles. |
 | `lifetimeMs` | Deprecated. Ignored: the library has no deadlines. See "No deadlines" under "Reliable delivery". |
 | `maxVarsBytes` | Cap on the JSON length of `vars`. Default 1 MB. `mutate()` rejects above it. JS-side only. |
-| `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. |
+| `retry` | `{ backoff?: { baseMs, maxMs, jitter }, terminalHttp?: { exempt }, transient?: Array<{ status, bodyIncludes?, maxRetries? }> }`. Each object is optional, but one you give must be complete. Defaults 1 s, 2 h, 0.2, `[404]`, `[]`. A descriptor's `retry` replaces each field it names. On iOS no retry waits less than 1 s, also when `baseMs` is smaller. |
 | `headers` | `() => Record<string, string>`, called at `mutate()`. The descriptor merges over it. |
 | `enqueueTimeoutMs` | Default 10 s. `mutate()` warns one time when native enqueue has not answered by then, and keeps waiting. It does not make `mutate()` reject. Enqueue includes the time to stage a copy of a `file` body and of form `path` parts, and it waits behind earlier enqueues, so a large file takes longer. |
 | `onWarning` | `(message, detail?) => void`. Receives every warning that the library's JavaScript raises, instead of `console.warn`: a slow enqueue, a slow or rejected handler, a failed ack, and the rest. Native warnings do not come here; read them with `takeDiagnostics()`. `detail` is the error or event, when there is one. Warnings raised before `configure()` go to `console.warn`. If the sink throws, the warning and the throw go to `console.warn`. |

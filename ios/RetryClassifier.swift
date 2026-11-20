@@ -72,7 +72,7 @@ enum RetryClassifier {
 
   /// `ms` when it is a finite number of at least minBackoffMs, else
   /// minBackoffMs. So a policy with 0, NaN or an infinity gives a wait of
-  /// 1 s, never none, and never traps in the conversion to Int.
+  /// 1 s, never none. A finite value above Int.max is not handled here.
   static func atLeastMinimum(_ ms: Double) -> Double {
     ms.isFinite && ms > Double(minBackoffMs) ? ms : Double(minBackoffMs)
   }
