@@ -85,7 +85,7 @@ extension QueueCoordinator {
     }
 
     let meta = TaskMap.Meta(
-      id: id, attempt: e.attempts, requestId: requestId,
+      id: id, incarnation: e.incarnation, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt,
       foreground: activity.isActive)
     let task: UploadTask
@@ -93,7 +93,8 @@ extension QueueCoordinator {
       task = try transport.upload(
         buildRequest(e, url: url, requestId: requestId), fromFile: body,
         wifiOnly: settings.wifiOnly(e.wifiOnly),
-        description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
+        description: ChunkedEngine.taskDescription(
+          id: id, attempt: e.attempts, generation: e.generation, incarnation: e.incarnation),
         beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) })
     } catch {
       // The session could not open the body. Gone since the check above: it
@@ -169,9 +170,12 @@ extension QueueCoordinator {
       return
     }
     // Only the current attempt of the current generation may drive the
-    // entry, or an older one the library replaced (see below).
-    guard case .request(let id, let generation, let attempt) = owner,
-          var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
+    // entry, or an older one the library replaced (see below). The task must
+    // belong to this use of the id: an earlier use (acked or cancelled, then
+    // used again) also starts at generation 1, attempt 1.
+    guard case .request(let id, let generation, let attempt, let incarnation) = owner,
+          var e = index.entry(id), !e.legacy, !e.isChunked, e.ownsSimpleTask(incarnation: incarnation),
+          e.generation == generation,
           e.attempts == attempt || (meta?.purpose == .superseded && attempt < e.attempts) else { return }
 
     let cancelled = RetryClassifier.isCancellation(c.error)
@@ -262,8 +266,9 @@ extension QueueCoordinator {
       // A task the library already replaced (a session move keeps the
       // attempt ordinal, so the ordinal alone cannot tell them apart).
       guard meta?.purpose != .superseded,
-            case .request(let id, let generation, let attempt) = owner,
-            var e = index.entry(id), !e.isChunked, e.generation == generation,
+            case .request(let id, let generation, let attempt, let incarnation) = owner,
+            var e = index.entry(id), !e.isChunked, e.ownsSimpleTask(incarnation: incarnation),
+            e.generation == generation,
             e.attempts == attempt, e.state == .queued || e.state == .running, !settings.isPaused(e.key),
             let url = e.url.flatMap(URL.init(string:)) else {
         taskMap.setPurpose(.superseded, forKey: key, id: owner.id)
@@ -291,12 +296,14 @@ extension QueueCoordinator {
       switch owner {
       case .part(let id, let part, let incarnation):
         self.chunked.partProgress(id: id, part: part, incarnation: incarnation, key: key, sent: sent)
-      case .request(let id, let generation, let attempt):
+      case .request(let id, let generation, let attempt, let incarnation):
         // A replacement shares its attempt with the task it replaced, so
         // only the task this process holds may report. Before reconcile no
-        // task is held yet, and none was replaced.
+        // task is held yet, and none was replaced: then the task's own
+        // identity, use of the id included, must match.
         guard !self.ready || self.liveTasks[key] != nil,
-              var e = self.index.entry(id), e.generation == generation, e.attempts == attempt,
+              var e = self.index.entry(id), e.ownsSimpleTask(incarnation: incarnation),
+              e.generation == generation, e.attempts == attempt,
               e.state == .queued || e.state == .running else { return }
         if e.state == .queued {
           e.state = .running

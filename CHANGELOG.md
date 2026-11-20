@@ -1,3 +1,27 @@
+## Unreleased
+
+Fixed (iOS): a late result from an earlier use of a request id could change
+a later request with the same id. An app may call `mutate()` with an id
+again after its row is gone (its outcome was acknowledged, or it was
+cancelled). The new request starts again at attempt 1, so a result of the
+earlier request that arrived late could match it. A late 2xx then completed
+the new request with the old response and cancelled its task, so the new
+body was not sent. A late 4xx failed it, a late 5xx counted as one of its
+failed attempts, and a late cancel could start a second task for it. Now
+each simple upload task carries a value that names the use of the id (the
+entry's `incarnation`, a new random value when the entry is created or its
+body is replaced). A result, progress event, delayed start or relaunch
+match from another use is ignored. iOS chunked parts already carried this
+value. What an app sees: a request is completed, failed or retried only by
+the results of its own tasks.
+
+A task started by 11.3.0 or earlier carries no value. A request created
+before the upgrade still accepts such a task when its id, generation and
+attempt match, so its task in flight during the upgrade is not sent again.
+For such a request, a late result from an even earlier use of the id, also
+started by the old version, can still change it, as before. A request
+created after the upgrade ignores every task with no value.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React
