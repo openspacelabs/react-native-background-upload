@@ -11,10 +11,8 @@ import type {
 } from './types';
 
 /**
- * The `expiresAt` that every enqueue sends. The library sets no deadline.
- * Native on 11.3.0 rejects an entry with no `expiresAt` number, so the field
- * still crosses. This value is the largest valid `Date`, so a native that
- * still reads it never reaches it.
+ * The `expiresAt` that every enqueue sends. The library sets no deadline,
+ * and native ignores the field. The value is the largest valid `Date`.
  */
 export const NO_DEADLINE_EXPIRES_AT = 8_640_000_000_000_000;
 

@@ -295,11 +295,10 @@ calls `cancel(id)`.
   for them, and in development the first call that sets one logs a warning.
   They leave the types in the next major release.
 - An app that needs a bound keeps its own clock and calls `cancel(id)`.
-- JS sends every new or re-queued request to native with a fixed far-future
-  deadline, so it cannot expire.
-- A live entry that an earlier version queued, and that is never queued
-  again, keeps its stored deadline until the native side stops reading it,
-  in the same release. After that it keeps going.
+- Native ignores `expiresAt` and never settles a request `expired`. JS still
+  sends a fixed far-future value in the field; native does not read it.
+- A live entry that an earlier version queued keeps going, also when its
+  stored deadline has passed.
 - An entry that settled `expired` under an earlier version stays an `error`
   row until `cancel()` or a same-id `mutate()`. If its outcome was not yet
   acknowledged, the outcome still reaches `onError` after the upgrade.
