@@ -7,10 +7,17 @@ package ai.openspace.backgroundupload
  * A queued or running entry with no run at all shows in entriesWithoutRun.
  * v9Leftovers counts the v9 work still on disk, and orphans the
  * directories with no entry file that are not v9: what the boot cleanup
- * left, and what it deleted. Zeros included.
+ * left, and what it deleted. Zeros included. delayedPastHorizon counts the
+ * delayed runs due more than [FAR_DELAY_MS] ahead. This version makes none
+ * with the default retry settings (a backoff waits 2 hours at most), so such
+ * a run is a wake an earlier version left, or a backoff whose maxMs is over
+ * a day.
  */
 internal object BootSnapshot {
   const val MESSAGE = "boot sweep"
+
+  /** A delayed run due further ahead than this holds a JobScheduler slot for long. */
+  const val FAR_DELAY_MS = 24L * 60 * 60 * 1000
 
   /**
    * [entries]: the entries the sweep schedules, as it found them, so an
@@ -41,7 +48,7 @@ internal object BootSnapshot {
       "runsByState" to runs.groupingBy { it.state }.eachCount(),
       "delayedRuns" to runs.count { it.delayed },
       "delayedPastHorizon" to runs.count { run ->
-        run.delayed && run.nextScheduleAt != null && run.nextScheduleAt - now > EXPIRY_WAKE_HORIZON_MS
+        run.delayed && run.nextScheduleAt != null && run.nextScheduleAt - now > FAR_DELAY_MS
       },
       "maxRunAttemptCount" to runs.maxOfOrNull { it.runAttemptCount },
     )

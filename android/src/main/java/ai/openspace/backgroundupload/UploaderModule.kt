@@ -160,7 +160,7 @@ class UploaderModule(context: ReactApplicationContext) :
   /**
    * Saves the notification configuration (read by headless workers) and the
    * retry defaults. Each call replaces the full configuration. lifetimeMs is
-   * not stored: JS already applied it to expiresAt.
+   * ignored: the library never expires a request.
    */
   override fun configure(options: ReadableMap) {
     NotificationConfig.save(reactApplicationContext, NotificationConfig.fromReadableMap(options))

@@ -103,7 +103,15 @@ data class QueueEntry(
   val attempts: Int,
   val bytesSent: Long,
   val totalBytes: Long,
-  val expiresAt: Long,
+  /**
+   * Not read. This version never expires an entry. 11.0.2 to 11.3.0 read
+   * this field as the time to settle the entry 'expired', and read a
+   * missing one as 0, which is already past. So a new or re-queued entry
+   * stores [NO_DEADLINE], and an app that goes back to such a version does
+   * not expire it. An entry from an earlier version that is not queued
+   * again keeps the value it had.
+   */
+  val expiresAt: Long = NO_DEADLINE,
   val createdAt: Long,
   val updatedAt: Long,
   /** Set while the entry waits out a backoff: queued for a long one, running for a short one. */
@@ -130,6 +138,11 @@ data class QueueEntry(
    */
   val transientHitsByRule: Map<String, Int>? = null,
 ) {
+  companion object {
+    /** The [expiresAt] a new or re-queued entry stores. 11.0.2 to 11.3.0 never reach it, and do no sum with it that overflows. */
+    const val NO_DEADLINE = Long.MAX_VALUE
+  }
+
   val isLive get() = state.isLive
   val isSettled get() = !state.isLive
 
