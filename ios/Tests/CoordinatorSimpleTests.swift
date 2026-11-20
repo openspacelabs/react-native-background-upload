@@ -630,6 +630,9 @@ final class CoordinatorSimpleTests: XCTestCase {
     h.complete(onlyTask(), status: 503)
     XCTAssertEqual(h.entry("a")?.state, .queued)
     XCTAssertEqual(onlyTask().beginAt, Date(timeIntervalSince1970: (h.clock + 1_000) / 1000))
+    h.advance(2 * 86_400_000)
+    h.advance(2 * 86_400_000)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "no timer settles the waiting entry")
     XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
