@@ -28,7 +28,6 @@ struct ParsedEnqueue {
   let body: Body
   let parts: [QueueEntry.Part]
   let accept: [UploadOutcome.AcceptRule]
-  let expiresAt: Double
   let retry: RetryOverride?
   /// nil when the descriptor has none: the entry follows the queue setting.
   let wifiOnly: Bool?
@@ -47,7 +46,9 @@ enum EnqueueParser {
   /// Parses the bridged `{ id, key, varsJson, descriptor }`. `varsJson` and
   /// `descriptor.dataJson` are JSON text, because React Native on iOS drops
   /// object keys whose value is null. dataJson "null" is the JSON body null.
-  /// NSNull counts as absent for the other optional fields.
+  /// NSNull counts as absent for the other optional fields. A descriptor
+  /// may still carry `expiresAt`. It is ignored, in any form: the library
+  /// never expires a request.
   static func parse(_ raw: [String: Any]) throws -> ParsedEnqueue {
     guard let id = raw["id"] as? String, !id.isEmpty else { throw ParseError(message: "missing 'id'") }
     guard let key = raw["key"] as? String, !key.isEmpty else { throw ParseError(message: "missing 'key'") }
@@ -61,9 +62,6 @@ enum EnqueueParser {
     guard d["data"] == nil else { throw ParseError(message: "'data' must cross as 'dataJson'") }
     let method = ((present(d["method"]) as? String) ?? "POST").uppercased()
     guard methods.contains(method) else { throw ParseError(message: "unknown method '\(method)'") }
-    guard let expiresAt = (present(d["expiresAt"]) as? NSNumber)?.doubleValue else {
-      throw ParseError(message: "missing 'expiresAt'")
-    }
 
     let url = present(d["url"]) as? String
     if let url { try requireURL(url, "url") }
@@ -98,7 +96,7 @@ enum EnqueueParser {
     return ParsedEnqueue(
       id: id, key: key, varsJSON: varsJSON, url: url,
       method: method, headers: try headers(present(d["headers"])), body: body, parts: parts,
-      accept: UploadOutcome.parseAcceptRules(present(d["accept"])), expiresAt: expiresAt,
+      accept: UploadOutcome.parseAcceptRules(present(d["accept"])),
       retry: RetryOverride.parse(present(d["retry"])), wifiOnly: wifiOnly,
       fingerprint: fingerprint(body, parts: parts, url: url, method: method))
   }

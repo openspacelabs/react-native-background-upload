@@ -90,16 +90,21 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `same body on a queued entry resumes with the new headers, vars, and expiry`() {
+  fun `same body on a queued entry resumes with the new headers and vars, and stores the downgrade expiresAt`() {
     controller.enqueue(parsed())
+    assertEquals(QueueEntry.NO_DEADLINE, store.load("e1")!!.expiresAt)
+    // An earlier version's entry, with its expiresAt long past.
+    store.save(store.load("e1")!!.copy(expiresAt = 5))
     val bodyFile = store.load("e1")!!.body!!.fileName
-    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", headers = mapOf("Authorization" to "Bearer new")), varsJson = """{"n":2}""", expiresAt = 5))
+    controller.enqueue(parsed(descriptor = desc(dataJson = """{"a":1}""", headers = mapOf("Authorization" to "Bearer new")), varsJson = """{"n":2}"""))
     val e = store.load("e1")!!
     assertEquals("Bearer new", e.descriptor!!.headers["Authorization"])
     assertEquals("""{"n":2}""", e.varsJson)
-    assertEquals(5, e.expiresAt)
-    assertEquals(1, e.generation)
+    assertEquals(QueueEntry.NO_DEADLINE, e.expiresAt) // so 11.0.2 to 11.3.0 do not expire it after a downgrade
+    assertEquals(EntryState.QUEUED, e.state)
+    assertEquals(1, e.generation) // the same body: queued again, not replaced
     assertEquals(bodyFile, e.body!!.fileName)
+    assertEquals(listOf("e1", "e1"), scheduler.scheduled)
   }
 
   @Test
@@ -176,7 +181,7 @@ class QueueControllerTest {
   fun `same body on an error entry reopens it with attempts 0`() {
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(state = EntryState.ERROR, attempts = 3, settledEventId = "ev"))
-    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
+    controller.enqueue(parsed())
     val e = store.load("e1")!!
     assertEquals(EntryState.QUEUED, e.state)
     assertEquals(2, e.generation)
@@ -187,10 +192,10 @@ class QueueControllerTest {
   fun `a reopened error entry starts its transient hits at zero, a live one keeps them`() {
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(state = EntryState.ERROR, transientHitsByRule = mapOf("404" to 3), settledEventId = "ev"))
-    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
+    controller.enqueue(parsed())
     assertEquals(null, store.load("e1")!!.transientHitsByRule)
     store.save(store.load("e1")!!.copy(transientHitsByRule = mapOf("404" to 1)))
-    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 2))
+    controller.enqueue(parsed())
     assertEquals(mapOf("404" to 1), store.load("e1")!!.transientHitsByRule)
   }
 
@@ -203,11 +208,11 @@ class QueueControllerTest {
     val counted = e.descriptor!!.parts!!.map { it.copy(transientHitsByRule = mapOf("400" to it.start.toInt() / 10 + 1)) }
     store.save(e.copy(descriptor = e.descriptor!!.copy(parts = counted)))
     // The same parts in the other order: each count follows its range start.
-    controller.enqueue(parsed(descriptor = forward.copy(parts = forward.parts!!.reversed()), expiresAt = FAR_FUTURE + 1))
+    controller.enqueue(parsed(descriptor = forward.copy(parts = forward.parts!!.reversed())))
     val live = store.load("e1")!!.descriptor!!.parts!!
     assertEquals(listOf(10L to mapOf("400" to 2), 0L to mapOf("400" to 1)), live.map { it.start to it.transientHitsByRule })
     store.save(store.load("e1")!!.copy(state = EntryState.ERROR, settledEventId = "ev"))
-    controller.enqueue(parsed(descriptor = forward, expiresAt = FAR_FUTURE + 2))
+    controller.enqueue(parsed(descriptor = forward))
     val reopened = store.load("e1")!!
     assertEquals(2, reopened.generation)
     assertEquals(listOf(null, null), reopened.descriptor!!.parts!!.map { it.transientHitsByRule })
@@ -217,7 +222,7 @@ class QueueControllerTest {
   fun `same body on a live entry keeps its attempts`() {
     controller.enqueue(parsed())
     store.save(store.load("e1")!!.copy(attempts = 3))
-    controller.enqueue(parsed(expiresAt = FAR_FUTURE + 1))
+    controller.enqueue(parsed())
     assertEquals(3, store.load("e1")!!.attempts)
   }
 
@@ -692,7 +697,7 @@ class QueueControllerTest {
     assertEquals(EntryState.AWAITING_AUTH, store.load("a")!!.state)
     assertEquals(EntryState.QUEUED, store.load("s")!!.state)
     assertTrue(scheduler.scheduled.containsAll(listOf("q", "r", "s")))
-    // The parked one waits for its expiry, which is too far ahead for a wake.
+    // The parked one gets no row, and a wake an earlier version left is cancelled.
     assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
     assertTrue("a" in scheduler.cancelledWakes)
   }
@@ -985,7 +990,7 @@ class QueueControllerTest {
   }
 
   @Test
-  fun `updateHeaders cancels the expiry wake of the entries it unparks`() {
+  fun `updateHeaders cancels a wake an earlier version left for the entries it unparks`() {
     store.save(entry(id = "p", state = EntryState.AWAITING_AUTH, parkedGeneration = 0))
     controller.updateHeaders(mapOf("Authorization" to "Bearer new"))
     assertEquals(listOf("p"), scheduler.cancelledWakes)
@@ -1144,21 +1149,85 @@ class QueueControllerTest {
     controller.sweep()
     assertEquals(EntryState.QUEUED, store.load("r")!!.state)
     assertEquals(setOf("r", "q"), scheduler.scheduled.toSet())
-    assertEquals(setOf("w" to now + 3_600_000, "p" to now + 50), scheduler.wakes.toSet())
+    assertEquals(listOf("w" to now + 3_600_000), scheduler.wakes)
   }
 
   @Test
-  fun `sweep cancels the stale wakes of due work and of a parked entry with a far expiry`() {
+  fun `sweep cancels the stale wakes of due work and of every parked entry, past expiresAt or not`() {
     store.save(entry(id = "q", state = EntryState.QUEUED))
     store.save(entry(id = "w", state = EntryState.QUEUED, nextAttemptAt = now + 3_600_000))
     store.save(entry(id = "far", state = EntryState.AWAITING_AUTH, expiresAt = FAR_FUTURE))
-    store.save(entry(id = "near", state = EntryState.AWAITING_AUTH, expiresAt = now + EXPIRY_WAKE_HORIZON_MS))
+    store.save(entry(id = "near", state = EntryState.AWAITING_AUTH, expiresAt = now + 60_000))
+    store.save(entry(id = "past", state = EntryState.AWAITING_AUTH, expiresAt = now - 60_000))
     controller.sweep()
-    assertEquals(setOf("q", "far"), scheduler.cancelledWakes.toSet())
-    assertEquals(
-      setOf("w" to now + 3_600_000, "near" to now + EXPIRY_WAKE_HORIZON_MS),
-      scheduler.wakes.toSet(),
+    assertEquals(setOf("q", "far", "near", "past"), scheduler.cancelledWakes.toSet())
+    assertEquals(listOf("w" to now + 3_600_000), scheduler.wakes)
+    assertEquals(listOf("q"), scheduler.scheduled)
+    assertEquals(listOf(EntryState.AWAITING_AUTH, EntryState.AWAITING_AUTH, EntryState.AWAITING_AUTH), listOf("far", "near", "past").map { store.load(it)!!.state })
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
+  fun `many parked entries with expiresAt 12 hours away make no WorkManager row, at park, resume or a later start`() {
+    // 11.3.0 gave each parked entry a wake at its expiresAt when that was
+    // less than 24 hours away: 250 rows here, more than the app's 20
+    // JobScheduler slots. Now a parked entry has no row at all.
+    val ops = WorkerOps(store, journal, settings, events, scheduler) { now }
+    val expiresAt = now + 12 * 60 * 60 * 1000L
+    for (n in 1..250) {
+      store.save(entry(id = "p$n", state = EntryState.RUNNING, expiresAt = expiresAt))
+      assertEquals(WorkerOps.ParkResult.PARKED, ops.park("p$n", 1, headerGeneration = 0))
+    }
+    controller.pause()
+    controller.resume()
+    controller.sweep() // the next app start
+    now = expiresAt + 60_000 // past every expiresAt
+    controller.sweep()
+    assertEquals(0, scheduler.wakes.size)
+    assertEquals(0, scheduler.scheduled.size)
+    assertEquals(250, store.all().count { it.state == EntryState.AWAITING_AUTH })
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
+  fun `an entry an earlier version saved with expiresAt in the past loads after a relaunch and is scheduled`() {
+    store.save(entry(id = "old"))
+    val file = File(store.entryDir("old"), "entry.json")
+    val text = file.readText()
+    assertTrue(text, text.contains("\"expiresAt\":${FAR_FUTURE}"))
+    file.writeText(text.replace("\"expiresAt\":${FAR_FUTURE}", "\"expiresAt\":${now - 60_000}"))
+    val relaunched = QueueStore(root, RequestIndex())
+    val loaded = relaunched.load("old")!!
+    assertEquals(now - 60_000, loaded.expiresAt) // kept as stored
+    QueueController(relaunched, journal, settings, events, scheduler, { false }, { now }).sweep()
+    assertEquals(EntryState.QUEUED, relaunched.load("old")!!.state)
+    assertEquals(listOf("old"), scheduler.scheduled)
+    assertEquals(emptyList<Pair<String, Long>>(), scheduler.wakes)
+    assertEquals(emptyList<EventJournal.SettledRecord>(), journal.unacknowledged())
+  }
+
+  @Test
+  fun `a new entry stores the downgrade expiresAt, and it reads back exact`() {
+    controller.enqueue(parsed())
+    assertTrue(File(store.entryDir("e1"), "entry.json").readText().contains("\"expiresAt\":${Long.MAX_VALUE}"))
+    assertEquals(Long.MAX_VALUE, QueueStore(root, RequestIndex()).load("e1")!!.expiresAt)
+  }
+
+  @Test
+  fun `an expired outcome an earlier version stored is still delivered unchanged after the upgrade`() {
+    val dir = tmp.newFolder("journal-11.3")
+    val stored = record("00000000-0000-0000-0000-0000000000e1", id = "x", kind = EventJournal.KIND_ERROR).copy(
+      errorKind = "expired", message = "expired before completion",
     )
+    EventJournal(dir, retryLater = { _, _ -> }).append(stored) // no JS listener then
+    store.save(entry(id = "x", state = EntryState.ERROR, settledEventId = "00000000-0000-0000-0000-0000000000e1"))
+    val upgraded = EventJournal(dir, retryLater = { _, _ -> })
+    QueueController(store, upgraded, settings, events, scheduler, { false }, { now }).sweep()
+    val delivered = upgraded.drain(listener).single()
+    assertEquals(stored.copy(deliveries = 1), delivered)
+    assertEquals(mapOf("errorKind" to "expired", "message" to "expired before completion"), delivered.toMap()["error"])
+    assertEquals(EntryState.ERROR, store.load("x")!!.state)
+    assertEquals(emptyList<String>(), scheduler.scheduled)
   }
 
   @Test

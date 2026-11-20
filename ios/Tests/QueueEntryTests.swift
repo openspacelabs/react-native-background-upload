@@ -6,7 +6,6 @@ final class EnqueueParserTests: XCTestCase {
   /// `descriptor` becomes `dataJson`.
   private func raw(_ descriptor: [String: Any], vars: Any = ["a": 1]) -> [String: Any] {
     var d = descriptor
-    if d["expiresAt"] == nil { d["expiresAt"] = 2_000_000_000_000.0 }
     if let data = d.removeValue(forKey: "data") { d["dataJson"] = jsonText(data) }
     return ["id": "id-1", "key": "k", "varsJson": jsonText(vars), "descriptor": d]
   }
@@ -56,6 +55,18 @@ final class EnqueueParserTests: XCTestCase {
     guard case .data(let json) = p.body else { return XCTFail("dataJson \"null\" is a body") }
     XCTAssertEqual(json, "null")
     invalid(raw(["url": "https://a.test/x", "data": NSNull(), "file": "/tmp/a"]))
+  }
+
+  /// The library never expires a request: expiresAt is ignored in any
+  /// form, and takes no part in the body fingerprint (the same-body
+  /// decision of a same-id call).
+  func testExpiresAtIsIgnoredInAnyForm() throws {
+    let base = try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": ["a": 1]]))
+    let values: [Any] = [0, -5, 1.0, "soon", NSNull(), 8_640_000_000_000_000.0, Double.greatestFiniteMagnitude, [1]]
+    for value in values {
+      let p = try EnqueueParser.parse(raw(["url": "https://a.test/x", "data": ["a": 1], "expiresAt": value]))
+      XCTAssertEqual(p.fingerprint, base.fingerprint, "\(value)")
+    }
   }
 
   func testObjectVarsOrDataAndBadJSONTextAreInvalid() {
@@ -199,7 +210,6 @@ final class EnqueueParserTests: XCTestCase {
 final class QueueEntryTests: XCTestCase {
   private func parsed(_ descriptor: [String: Any], id: String = "e1", vars: Any = ["v": 1]) -> ParsedEnqueue {
     var d = descriptor
-    if d["expiresAt"] == nil { d["expiresAt"] = 5_000.0 }
     if let data = d.removeValue(forKey: "data") { d["dataJson"] = jsonText(data) }
     return try! EnqueueParser.parse(["id": id, "key": "k", "varsJson": jsonText(vars), "descriptor": d])
   }
@@ -222,6 +232,7 @@ final class QueueEntryTests: XCTestCase {
     XCTAssertEqual(e.headerGeneration, 3)
     XCTAssertEqual(e.totalBytes, 20)
     XCTAssertEqual(e.bodyPath, "blob-1")
+    XCTAssertEqual(e.expiresAt, QueueEntry.noDeadline)
     let paused = QueueEntry.created(from: parsed(["url": "https://a.test"]), staged: staged,
                                     headerGeneration: 0, paused: true, now: 1)
     XCTAssertEqual(paused.state, .paused)
@@ -242,7 +253,7 @@ final class QueueEntryTests: XCTestCase {
     XCTAssertEqual(reset.parts[1].headers, ["X": "y"])
     XCTAssertEqual(reset.attempts, 0)
     XCTAssertEqual(reset.generation, 2)
-    XCTAssertEqual(reset.expiresAt, 9_000)
+    XCTAssertEqual(reset.expiresAt, QueueEntry.noDeadline, "the caller's expiresAt is ignored")
     XCTAssertEqual(reset.headers, ["Authorization": "new"])
     XCTAssertEqual(reset.varsJSON, #"{"v":2}"#)
     XCTAssertEqual(reset.createdAt, e.createdAt)

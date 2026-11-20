@@ -22,6 +22,38 @@ final class CoordinatorRelaunchTests: XCTestCase {
     XCTAssertEqual(h.entry("a")?.state, .running)
   }
 
+  /// An entry 11.3.0 queued, with an expiresAt that passed while the app
+  /// was not running, loads and is sent. A same-body call then stores the
+  /// value older versions never reach.
+  func testAnEntryAnEarlierVersionStoredWithAPastExpiresAtIsSent() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.storeExpiresAt("a", h.clock - 1)
+    let fresh = Harness(root: h.root)
+    XCTAssertEqual(fresh.entry("a")?.expiresAt, h.clock - 1, "loaded as stored")
+    fresh.boot()
+    XCTAssertEqual(fresh.entry("a")?.state, .running)
+    let task = try XCTUnwrap(fresh.transport.live.first)
+    _ = try fresh.enqueue(fresh.dataRaw(id: "a")).get()
+    XCTAssertEqual(fresh.store.load("a")?.expiresAt, QueueEntry.noDeadline)
+    fresh.complete(task, status: 201)
+    XCTAssertEqual(fresh.entry("a")?.state, .completed)
+  }
+
+  /// The relaunch wait gives up on a lost task and sends the entry again,
+  /// with a past expiresAt stored by an earlier version.
+  func testTheRelaunchReissueSendsAnEntryWithAStoredPastExpiresAt() throws {
+    h.boot()
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.storeExpiresAt("a", h.clock - 1)
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    fresh.advance(Double(QueueCoordinator.graceMs))
+    XCTAssertEqual(fresh.entry("a")?.state, .running)
+    XCTAssertEqual(fresh.entry("a")?.attempts, 2)
+    XCTAssertEqual(fresh.transport.live.count, 1)
+    XCTAssertTrue(fresh.sink.settled.isEmpty)
+  }
+
   func testRelaunchAdoptsTheLiveTaskAndItsCompletionSettles() throws {
     h.boot()
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
@@ -84,7 +116,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
   func testReconcileDropsKeysWhoseIdHasNoEntry() throws {
     h.boot()
     h.map.set(.init(id: "ghost", attempt: 1, generation: 1, purpose: .attempt), forKey: "any:77")
-    let live = FakeTask(key: "any:78", description: ChunkedEngine.taskDescription(id: "ghost2", attempt: 1, generation: 1))
+    let live = FakeTask(key: "any:78", description: ChunkedEngine.taskDescription(id: "ghost2", attempt: 1, generation: 1, incarnation: "i"))
     h.map.set(.init(id: "ghost2", attempt: 1, generation: 1, purpose: .attempt), forKey: live.key)
     let fresh = Harness(root: h.root)
     fresh.relaunch(daemonTasks: [live])
@@ -362,7 +394,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
 
   func testUnownedAndStaleTasksAreCancelled() throws {
     let v9 = FakeTask(key: "any:90", description: "bare-v9-id")
-    let orphan = FakeTask(key: "any:91", description: ChunkedEngine.taskDescription(id: "gone", attempt: 1, generation: 1))
+    let orphan = FakeTask(key: "any:91", description: ChunkedEngine.taskDescription(id: "gone", attempt: 1, generation: 1, incarnation: "i"))
     h.relaunch(daemonTasks: [v9, orphan])
     h.boot()
     XCTAssertTrue(v9.cancelled)
@@ -401,7 +433,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
       .init(url: "https://s3.test/part1", start: 0, end: 10, accepted: true),
       .init(url: "https://s3.test/part2", start: 10, end: 20, accepted: false),
       .init(url: "https://s3.test/part3", start: 20, end: 30, accepted: false),
-    ], expiresAt: h.expiresAt, incarnation: "v9inc")
+    ], incarnation: "v9inc")
     writeFile(v9Store.fileURL("cap-1", QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     writeFile(v9Store.fileURL("cap-1", "blob"), bytes: 30)
@@ -449,7 +481,7 @@ final class CoordinatorRelaunchTests: XCTestCase {
       ChunkedManifestV9.Part(url: "https://s3.test/part\(i + 1)", start: Int64(i * 10),
                              end: Int64(i * 10 + 10), accepted: accepted[i])
     }
-    let manifest = ChunkedManifestV9(id: "cap-1", parts: parts, expiresAt: h.expiresAt, incarnation: "v9inc")
+    let manifest = ChunkedManifestV9(id: "cap-1", parts: parts, incarnation: "v9inc")
     writeFile(v9Store.fileURL("cap-1", QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     writeFile(v9Store.fileURL("cap-1", "blob"), bytes: 30)

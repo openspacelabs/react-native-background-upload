@@ -32,7 +32,7 @@ enum LegacyImport {
         incarnation: manifest?.incarnation ?? UUID().uuidString, headers: [:], headerGeneration: 0,
         state: state, authParked: false, generation: 1, attempts: 0,
         bytesSent: 0, totalBytes: 0,
-        expiresAt: manifest?.expiresAt ?? e.timestamp, nextAttemptAt: nil, settledEventId: nil,
+        expiresAt: QueueEntry.noDeadline, nextAttemptAt: nil, settledEventId: nil,
         lastRequestId: nil, lastUrl: nil, lastPartIndex: e.partIndex, legacy: true,
         createdAt: e.timestamp, updatedAt: e.timestamp)
     }

@@ -2,8 +2,8 @@ import Foundation
 
 /// The v9 chunked manifest (`manifest.json`), kept only to read the files a
 /// v9 build left behind. Decode only; v10 never writes it. A same-id enqueue
-/// with the same parts adopts its accepted flags, incarnation and blob. The
-/// legacy row reads expiresAt and the byte counts. Other v9 keys are ignored.
+/// with the same parts adopts its accepted flags, incarnation and blob. Other
+/// v9 keys (expiresAt among them) are ignored.
 struct ChunkedManifestV9: Codable, Equatable {
   struct Part: Codable, Equatable {
     let url: String
@@ -16,7 +16,6 @@ struct ChunkedManifestV9: Codable, Equatable {
 
   let id: String
   var parts: [Part]
-  var expiresAt: Double
   var incarnation: String
 
   /// v9 wrote the moved bytes at this fixed name.

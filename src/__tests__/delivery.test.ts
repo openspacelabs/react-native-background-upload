@@ -867,6 +867,42 @@ describe('error', () => {
     expect(onSuccess).not.toHaveBeenCalled();
     expect(native.ackEvents).toHaveBeenCalledWith(['e1']);
   });
+
+  // The library no longer expires a request, but an outcome that an earlier
+  // version journaled and JS did not acknowledge still replays after the
+  // upgrade. It reaches onError as before.
+  it('replays an expired outcome journaled by an earlier version to onError, then acks', async () => {
+    const onError = jest.fn();
+    const onSuccess = jest.fn();
+    const error = {
+      errorKind: 'expired' as const,
+      message: 'expiresAt passed before the request completed',
+    };
+    const { start, native, stateEvents } = setup(
+      { k: { key: 'k', request: jest.fn(), onError, onSuccess } },
+      [
+        completed({
+          eventId: 'old',
+          kind: 'error',
+          state: 'error',
+          response: undefined,
+          error,
+          deliveries: 0,
+        }),
+      ],
+    );
+    start();
+    await flush();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      error,
+      { n: 1 },
+      expect.objectContaining({ id: 'u1', key: 'k' }),
+    );
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(stateEvents).toEqual([]);
+    expect(native.ackEvents).toHaveBeenCalledWith(['old']);
+  });
 });
 
 describe('cancelled', () => {

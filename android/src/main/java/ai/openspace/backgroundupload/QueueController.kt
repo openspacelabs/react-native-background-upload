@@ -432,7 +432,8 @@ class QueueController(
    *    orphans from a cancel race. Ack them.
    * 4. A completed or cancelled entry whose own record is gone: the ack
    *    landed but the forget did not. Forget it.
-   * 5. Schedule every queued entry, and the expiry wake of every parked one.
+   * 5. Schedule every queued entry. A parked entry gets no row, and a wake
+   *    an earlier version made for it is cancelled.
    *
    * 6. Delete the orphan directories that hold only copied bodies and are
    *    older than [QueueStore.ORPHAN_MIN_AGE_MS] ([QueueStore.removeOrphans]).
@@ -489,7 +490,7 @@ class QueueController(
           if (cur !== e) {
             if (trySave(cur)) changed += cur else continue
           }
-          if (!paused || cur.state == EntryState.AWAITING_AUTH) {
+          if (!paused) {
             toSchedule += cur
             found += e
           }
@@ -536,9 +537,8 @@ class QueueController(
 
   /**
    * Runs [entry] when it is queued. A backoff longer than a worker waits goes
-   * to the wake; a parked entry gets a wake at its expiry, so it settles
-   * 'expired' on time, once that expiry is near (see [EXPIRY_WAKE_HORIZON_MS]).
-   * Any other wake of the entry is stale, so it is cancelled.
+   * to the wake. A parked entry gets no row: updateHeaders() starts it. Any
+   * other wake of the entry is stale, so it is cancelled.
    */
   private fun scheduleRun(entry: QueueEntry, keepWake: Boolean = false) {
     val now = clock()
@@ -552,12 +552,7 @@ class QueueController(
           scheduler.schedule(entry)
         }
       }
-      EntryState.AWAITING_AUTH ->
-        if (expiryWakeIsNear(entry.expiresAt, now)) {
-          scheduler.scheduleWake(entry, entry.expiresAt, replace = !keepWake)
-        } else {
-          cancelStaleWake(entry.id)
-        }
+      EntryState.AWAITING_AUTH -> cancelStaleWake(entry.id)
       else -> Unit
     }
   }

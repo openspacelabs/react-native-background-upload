@@ -55,8 +55,12 @@ struct QueueEntry: Codable, Equatable {
   /// The body identity for the same-id rules. See EnqueueParser.fingerprint.
   var bodyFingerprint: String
   var parts: [Part]
-  /// The parts-plan identity. Rotates when the body is replaced. Part tasks
-  /// carry it, so a late callback from a replaced plan is dropped.
+  /// The parts-plan identity, and the identity of this use of the id. A new
+  /// random value at create and when the body is replaced, so no two uses of
+  /// an id share one. Part tasks and simple tasks carry it, so a late
+  /// callback from a replaced plan or from an earlier use of the id is
+  /// dropped. A same-body reopen keeps it: the generation tells those apart.
+  /// A v9 chunked upload that create() resumes keeps its v9 value.
   var incarnation: String
   /// The merged request headers. updateHeaders() patches them.
   var headers: [String: String]
@@ -80,7 +84,13 @@ struct QueueEntry: Codable, Equatable {
   var transientHitsByRule: [String: Int]? = nil
   var bytesSent: Int64
   var totalBytes: Int64
-  var expiresAt: Double // epoch ms
+  /// Epoch ms. Not read: this version never expires an entry. Versions
+  /// 10.0.0 to 11.3.0 settle an entry 'expired' once this time passes, and
+  /// their decoder requires the field. So a new or re-queued entry stores
+  /// noDeadline, and an app that goes back to such a version does not
+  /// expire it. An entry an earlier version stored, and that is not queued
+  /// again, keeps the value it had.
+  var expiresAt: Double
   var nextAttemptAt: Double? // epoch ms, set while a delayed retry waits
   var settledEventId: String?
   var lastRequestId: String?
@@ -90,6 +100,12 @@ struct QueueEntry: Codable, Equatable {
   var legacy: Bool
   let createdAt: Double
   var updatedAt: Double
+  /// true when this use of the id started in a build that writes
+  /// `incarnation` into every simple task. Then a simple task with no
+  /// incarnation comes from an earlier use. nil in an entry that 11.3.0 or
+  /// earlier created or saved: its tasks may carry no incarnation. Those
+  /// releases ignore the field and drop it at their next save of the entry.
+  var tasksCarryIncarnation: Bool? = nil
 }
 
 extension QueueEntry {
@@ -101,6 +117,23 @@ extension QueueEntry {
   }
 
   var isSettled: Bool { !isLive }
+
+  /// The expiresAt of a new or re-queued entry: the largest time a
+  /// JavaScript Date holds, 8.64e15 ms. Exact in a Double. In 10.0.0 to
+  /// 11.3.0 a time check against it is never true, and their expiry timer
+  /// caps its wait at 24 hours before its one Int conversion, so nothing
+  /// overflows.
+  static let noDeadline: Double = 8_640_000_000_000_000
+
+  /// Whether a simple task that carries `incarnation` (nil: none) belongs
+  /// to this use of the id. A task with a value must carry this entry's. A
+  /// task with none is from 11.3.0 or earlier. It matches only an entry such
+  /// a release created or saved, as every task did before, so a task in
+  /// flight across the upgrade still drives its entry and is not sent again.
+  func ownsSimpleTask(incarnation task: String?) -> Bool {
+    guard let task else { return tasksCarryIncarnation != true }
+    return task == incarnation
+  }
   var isChunked: Bool { bodyKind == .parts }
 
   var acceptedBytes: Int64 { parts.filter(\.accepted).reduce(0) { $0 + $1.size } }
@@ -158,22 +191,24 @@ extension QueueEntry {
   /// Rule 2: a new entry.
   static func created(from p: ParsedEnqueue, staged: StagedBody, headerGeneration: Int,
                       paused: Bool, now: Double, createdAt: Double? = nil) -> QueueEntry {
-    QueueEntry(
+    var e = QueueEntry(
       id: p.id, key: p.key, varsJSON: p.varsJSON, url: p.url, method: p.method, accept: p.accept, retry: p.retry,
       wifiOnly: p.wifiOnly, bodyKind: staged.kind, bodyPath: staged.relativePath,
       bodyContentType: staged.contentType, forceContentType: staged.forceContentType,
       bodyFingerprint: p.fingerprint, parts: p.parts, incarnation: UUID().uuidString,
       headers: p.headers, headerGeneration: headerGeneration,
       state: paused ? .paused : .queued, authParked: false, generation: 1, attempts: 0,
-      bytesSent: 0, totalBytes: staged.totalBytes, expiresAt: p.expiresAt,
+      bytesSent: 0, totalBytes: staged.totalBytes, expiresAt: noDeadline,
       nextAttemptAt: nil, settledEventId: nil, lastRequestId: nil, lastUrl: nil,
       lastPartIndex: nil, legacy: false, createdAt: createdAt ?? now, updatedAt: now)
+    e.tasksCarryIncarnation = true
+    return e
   }
 
-  /// Rule 3, same body: the new vars, headers, expiresAt and descriptor
-  /// fields replace the stored ones. The body, url, method, accepted parts,
-  /// generation and createdAt stay (a different url or method is a different
-  /// body). `resetBudget` (a reopen, which starts a new generation) also
+  /// Rule 3, same body: the new vars, headers and descriptor fields replace
+  /// the stored ones, and expiresAt becomes noDeadline. The body, url,
+  /// method, accepted parts, generation and createdAt stay (a different url
+  /// or method is a different body). `resetBudget` (a reopen, which starts a new generation) also
   /// resets attempts, part rejections and every transient count: attempts
   /// count one generation. A live entry keeps its counts, the parts' included.
   func resumed(with p: ParsedEnqueue, resetBudget: Bool, now: Double) -> QueueEntry {
@@ -181,7 +216,7 @@ extension QueueEntry {
     next.key = p.key
     next.varsJSON = p.varsJSON
     next.headers = p.headers
-    next.expiresAt = p.expiresAt
+    next.expiresAt = Self.noDeadline
     next.accept = p.accept
     next.retry = p.retry
     next.wifiOnly = p.wifiOnly

@@ -229,7 +229,7 @@ final class ChunkedCoordinator {
     let blobExists = e.bodyPath.map { FileIO.exists(q.store.fileURL(id, $0)) } ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: q.policy(e),
-      fileExists: blobExists, now: q.now(), expiresAt: e.expiresAt, hits: e.transientHits(part: part)))
+      fileExists: blobExists, hits: e.transientHits(part: part)))
     switch verdict {
     case .accepted:
       break // handled above
@@ -251,8 +251,6 @@ final class ChunkedCoordinator {
         response: q.response(c), partIndex: part)))
     case .fileMissing:
       q.settle(id, .fileError("the chunked source blob is missing", partIndex: part))
-    case .expired:
-      q.settle(id, .expired)
     }
   }
 
@@ -367,16 +365,12 @@ final class ChunkedCoordinator {
   }
 
   /// The entry when its parts may get tasks now. Otherwise nil, and an
-  /// entry that is done, expired or has a short blob is settled.
+  /// entry that is done or has a short blob is settled.
   private func runnable(_ id: String) -> QueueEntry? {
     guard q.ready, let e = q.index.entry(id), e.isChunked, e.state == .running,
           !q.settings.isPaused(e.key) else { return nil }
     if e.allAccepted {
       q.settle(id, .completed(RawResponseRecord(bodyTruncated: false)))
-      return nil
-    }
-    if q.now() >= e.expiresAt {
-      q.settle(id, .expired)
       return nil
     }
     // A blob shorter than a part can never finish: report it now.
@@ -398,7 +392,7 @@ final class ChunkedCoordinator {
   ///
   /// Each call checks the entry again and computes "pending minus in
   /// flight" again. So a part never gets a second task, and a cancel, pause,
-  /// replace, settle or expiry between two slices stops the build.
+  /// replace or settle between two slices stops the build.
   func refill(_ id: String) {
     guard let e = runnable(id) else { return }
     let flight = Set((inFlight[id] ?? [:]).keys)
@@ -575,10 +569,6 @@ final class ChunkedCoordinator {
     n.parts[part].rejections += 1
     let delay = RetryClassifier.backoffMs(
       attempt: n.parts[part].rejections, policy: q.policy(n), random: q.random)
-    if q.now() + Double(delay) >= n.expiresAt {
-      q.settle(n.id, .expired)
-      return
-    }
     q.commit(n, emit: false)
     _ = enqueueParts(n.id, [(index: part, delayMs: delay)])
   }
