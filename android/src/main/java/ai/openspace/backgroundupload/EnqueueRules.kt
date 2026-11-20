@@ -97,7 +97,6 @@ object EnqueueRules {
       attempts = 0,
       bytesSent = runParts?.let { ChunkedParts.acceptedBytes(it) } ?: 0L,
       totalBytes = staged.body.totalBytes,
-      expiresAt = p.expiresAt,
       createdAt = now,
       updatedAt = now,
       headerGeneration = headerGeneration,
@@ -121,7 +120,7 @@ object EnqueueRules {
   )
 
   /**
-   * Same body. New headers, expiresAt, vars, accept, retry, wifiOnly,
+   * Same body. New headers, vars, accept, retry, wifiOnly,
    * priority, and notification flag replace the stored ones; the body and
    * accepted parts stay. A settled entry reopens with a fresh generation,
    * attempts 0 (attempts count the current generation), and no transient
@@ -155,7 +154,8 @@ object EnqueueRules {
       state = if (running) EntryState.RUNNING else initialState(paused),
       attempts = if (reopen) 0 else existing.attempts,
       bytesSent = parts?.let { ChunkedParts.acceptedBytes(it) } ?: if (running) existing.bytesSent else 0L,
-      expiresAt = p.expiresAt,
+      // Not read here. Written so that a downgrade does not expire the entry.
+      expiresAt = QueueEntry.NO_DEADLINE,
       updatedAt = now,
       nextAttemptAt = null,
       backoffStreak = 0,

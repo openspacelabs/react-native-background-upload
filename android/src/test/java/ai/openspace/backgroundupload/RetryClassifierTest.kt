@@ -2,7 +2,6 @@ package ai.openspace.backgroundupload
 
 import ai.openspace.backgroundupload.RetryClassifier.Verdict
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -155,18 +154,6 @@ class RetryClassifierTest {
     repeat(1_000) {
       assertTrue(RetryClassifier.backoffMs(jittered, 30, random) <= 7_200_000)
     }
-  }
-
-  @Test
-  fun `nextAttemptAt clamps to expiresAt`() {
-    assertEquals(3_000, RetryClassifier.nextAttemptAt(now = 1_000, backoffMs = 2_000, expiresAt = 10_000))
-    assertEquals(10_000, RetryClassifier.nextAttemptAt(now = 1_000, backoffMs = 7_200_000, expiresAt = 10_000))
-  }
-
-  @Test
-  fun `expiry is inclusive of the deadline`() {
-    assertFalse(RetryClassifier.isExpired(4_999, 5_000))
-    assertTrue(RetryClassifier.isExpired(5_000, 5_000))
   }
 
   @Test

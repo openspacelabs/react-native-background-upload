@@ -24,7 +24,6 @@ class EntryParsingTest {
     assertEquals("e1", p.id)
     assertEquals("note", p.key)
     assertEquals("""{"b":2,"a":null}""", p.varsJson) // key order and null values survive
-    assertEquals(9_000L, p.expiresAt)
     assertEquals("POST", p.descriptor.method)
     assertEquals(text, p.descriptor.dataJson)
     assertEquals(StagedBody.JSON, p.descriptor.bodyKind)
@@ -170,9 +169,22 @@ class EntryParsingTest {
   }
 
   @Test
+  fun `a descriptor parses with expiresAt missing, in the past, or of any type`() {
+    listOf(
+      JavaOnlyMap.of("url", "https://example.com/items"),
+      base(), // 9 s after 1970: long past
+      JavaOnlyMap.of("url", "https://example.com/items", "expiresAt", 0.0),
+      JavaOnlyMap.of("url", "https://example.com/items", "expiresAt", -1.0),
+      JavaOnlyMap.of("url", "https://example.com/items", "expiresAt", "soon"),
+      JavaOnlyMap.of("url", "https://example.com/items", "expiresAt", null),
+    ).forEach { d ->
+      assertEquals("$d", "https://example.com/items", EntryParsing.parse(entryMap(d)).descriptor.url)
+    }
+  }
+
+  @Test
   fun `what native can not run is rejected`() {
     val cases = listOf(
-      JavaOnlyMap.of("url", "https://example.com"), // no expiresAt
       JavaOnlyMap.of("expiresAt", 1.0), // no url and no parts
       base("dataJson", "1", "file", "/a"), // two body kinds
       base("method", "GET", "dataJson", "1"), // GET with a body

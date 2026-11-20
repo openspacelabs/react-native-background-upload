@@ -1,3 +1,43 @@
+## Unreleased
+
+Android now sets its HTTP timeouts: connect 15 s, read 60 s, write 60 s.
+Before, only the 24 h call cap was set, so OkHttp's 10 s defaults applied.
+A server that took more than 10 s to answer after the body was sent made the
+phone give up while the server still stored the request. The phone then sent
+it again, and the server could store it twice. The 24 h call cap is
+unchanged.
+
+Behavior change: the read timeout now allows 60 s of silence after the
+body, before the attempt fails as a transport failure. A dead connection is
+found after 60 s, not 10 s, and holds its transfer slot for that time. The
+connect timeout is now 15 s per address, not 10 s.
+
+Android now uses a response that OkHttp finished reading before a stop (a
+system stop, or `pause()`) took effect. Before, that response was thrown
+away. Now it goes through the usual rules: an accepted response settles the
+entry, and an accepted chunked part keeps its accepted flag. A response that
+OkHttp has not finished reading when the stop takes effect is still thrown
+away, as before. `cancel()` is unchanged: a cancelled entry still settles
+`cancelled`.
+
+Android never expires a request. Its native code ignores the descriptor's
+`expiresAt` and `configure()`'s `lifetimeMs`. It accepts an entry with or
+without `expiresAt`, also one in the past, and a `configure()` call with or
+without `lifetimeMs`. A request waits and retries until the server accepts
+it, it settles as an error (for example a status the retry rules do not
+cover, or a missing file), or the app cancels it. Before, Android settled an
+entry `error` with `errorKind: 'expired'` once `expiresAt` passed, and gave
+each parked (`awaiting-auth`) entry a WorkManager wake at its `expiresAt`
+when that was less than 24 hours away. A parked entry now has no WorkManager
+row. It waits for `updateHeaders()` or a same-id `mutate()`. An app that
+needs a limit calls `cancel(id)` itself. Entries that an earlier version
+queued keep going and are sent, also when their `expiresAt` has passed. An
+`expired` outcome that an earlier version stored and the app has not yet
+acknowledged is still delivered, unchanged. A new entry, and an entry
+queued again by a same-id `mutate()`, stores `expiresAt` as
+9223372036854775807 (the largest 64-bit integer), so an app that goes back
+to 11.0.2 to 11.3.0 does not expire it.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

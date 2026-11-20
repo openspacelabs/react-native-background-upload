@@ -16,6 +16,9 @@ import java.net.URI
  * because React Native on iOS drops object keys whose value is null. Native
  * keeps the text as it came: it is the body that goes out. A dataJson of
  * "null" is the JSON body null, a real body.
+ *
+ * A descriptor may still carry `expiresAt`. Native ignores it: the library
+ * never expires a request.
  */
 object EntryParsing {
   class InvalidEntryException(message: String) : IllegalArgumentException(message)
@@ -25,7 +28,6 @@ object EntryParsing {
     val key: String,
     val varsJson: String,
     val descriptor: Descriptor,
-    val expiresAt: Long,
   )
 
   private val METHODS = setOf("POST", "PUT", "PATCH", "DELETE", "GET")
@@ -36,8 +38,7 @@ object EntryParsing {
     val varsJson = entry.string("varsJson") ?: invalid("varsJson is required")
     if (!JsonBridge.isJson(varsJson)) invalid("varsJson is not JSON text")
     val d = entry.map("descriptor") ?: invalid("descriptor is required")
-    val expiresAt = d.number("expiresAt")?.toLong() ?: invalid("descriptor.expiresAt is required")
-    return Parsed(id, key, varsJson, descriptor(d), expiresAt)
+    return Parsed(id, key, varsJson, descriptor(d))
   }
 
   fun descriptor(d: ReadableMap): Descriptor {

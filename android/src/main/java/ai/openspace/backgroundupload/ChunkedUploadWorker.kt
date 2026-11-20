@@ -66,7 +66,6 @@ internal class ChunkedTransfer(private val run: EntryRun) {
       val latest = run.ops.latest(run.entryId, run.generation)
       val stored = latest.descriptor!!.parts!![index]
       if (stored.accepted) return
-      if (RetryClassifier.isExpired(run.host.now(), latest.expiresAt)) throw EntryRun.ExpiredException()
 
       // A range past EOF can never be sent. length() is 0 for a missing file;
       // that case falls through to the attempt, which classifies it as file.
@@ -90,6 +89,8 @@ internal class ChunkedTransfer(private val run: EntryRun) {
       )
       when (val r = a.result) {
         is EntryRun.AttemptResult.Accepted -> {
+          // No suspension before this save: the part may have landed as the
+          // run was stopped (see awaitLanded).
           markAccepted(index, a.entry.descriptor!!.parts!![index])
           return
         }
@@ -100,7 +101,7 @@ internal class ChunkedTransfer(private val run: EntryRun) {
         EntryRun.AttemptResult.Transient -> {
           onPartProgress(index, 0L)
           streak++
-          run.backoffOrRelease(a.policy, streak, a.entry.expiresAt)
+          run.backoffOrRelease(a.policy, streak)
         }
         is EntryRun.AttemptResult.Terminal -> {
           onPartProgress(index, 0L)

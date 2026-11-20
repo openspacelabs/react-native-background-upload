@@ -94,7 +94,6 @@ object LegacyImport {
       attempts = 0,
       bytesSent = 0,
       totalBytes = 0,
-      expiresAt = at,
       createdAt = at,
       updatedAt = at,
       generation = 1,
