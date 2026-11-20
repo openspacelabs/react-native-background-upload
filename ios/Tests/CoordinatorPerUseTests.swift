@@ -410,6 +410,7 @@ final class CoordinatorPerUseTests: XCTestCase {
     let old = try JSONDecoder().decode(Entry113.self, from: saved)
     XCTAssertEqual(old.incarnation, entry.incarnation)
     XCTAssertEqual(old.attempts, 1)
+    XCTAssertEqual(old.expiresAt, 8_640_000_000_000_000, "a time 11.3.0 never reaches")
     // The key adds no field: an 11.3.0 key of a part already had
     // `incarnation`, and 11.3.0 resolves a key with no partIndex as a
     // simple attempt whatever its incarnation.

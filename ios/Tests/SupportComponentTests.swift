@@ -282,7 +282,7 @@ final class LegacyImportTests: XCTestCase {
     ChunkedManifestV9(id: id, parts: [
       .init(url: "https://s3.test/1", start: 0, end: 5, accepted: true),
       .init(url: "https://s3.test/2", start: 5, end: 12, accepted: false),
-    ], expiresAt: 99, incarnation: "inc")
+    ], incarnation: "inc")
   }
 
   func testJournalOnly() {
@@ -294,6 +294,7 @@ final class LegacyImportTests: XCTestCase {
     XCTAssertEqual(rows.map(\.id), ["t2", "t1"])
     XCTAssertEqual(rows.map(\.state), [.cancelled, .completed], "the latest v9 outcome wins")
     XCTAssertTrue(rows.allSatisfy { $0.legacy && $0.key == "legacy" && $0.varsJSON == "null" })
+    XCTAssertTrue(rows.allSatisfy { $0.expiresAt == QueueEntry.noDeadline }, "an older version never expires them")
     XCTAssertNil(rows[0].bodyPath)
   }
 

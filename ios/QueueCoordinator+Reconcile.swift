@@ -145,7 +145,6 @@ extension QueueCoordinator {
     }
 
     for e in index.entries() where e.isLive && !e.legacy {
-      armExpiry(e)
       guard e.state == .queued || e.state == .running else { continue }
       if e.isChunked {
         chunked.reconcile(e.id, tasks: partTasks[e.id] ?? [])

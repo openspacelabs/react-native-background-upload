@@ -344,16 +344,25 @@ final class Harness {
   }
 
   func entry(_ id: String) -> QueueEntry? { coordinator.index.entry(id) }
+
+  /// Writes `expiresAt` into the stored and indexed entry, as an earlier
+  /// version would have stored it. Native never writes such a value now: a
+  /// new or re-queued entry stores QueueEntry.noDeadline.
+  func storeExpiresAt(_ id: String, _ value: Double) {
+    queue.sync {
+      guard var e = coordinator.index.entry(id) else { return XCTFail("no entry \(id)") }
+      e.expiresAt = value
+      do { try store.save(e) } catch { XCTFail("cannot save \(id): \(error)") }
+      coordinator.index.upsert(e)
+    }
+  }
   func row(_ id: String) -> [String: Any]? { coordinator.rows().first { $0["id"] as? String == id } }
 
   // MARK: - Builders
 
-  var expiresAt: Double { clock + 14 * 24 * 3_600_000 }
-
+  /// No expiresAt unless the test sets one: native ignores it.
   func raw(id: String, key: String = "k", vars: Any = ["n": 1], descriptor: [String: Any]) -> [String: Any] {
-    var d = descriptor
-    if d["expiresAt"] == nil { d["expiresAt"] = expiresAt }
-    return ["id": id, "key": key, "varsJson": jsonText(vars), "descriptor": d]
+    ["id": id, "key": key, "varsJson": jsonText(vars), "descriptor": descriptor]
   }
 
   /// `data` crosses as its JSON text, as the JS layer sends it.

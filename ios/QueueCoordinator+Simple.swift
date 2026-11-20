@@ -28,10 +28,6 @@ extension QueueCoordinator {
     guard var e = index.entry(id), !e.legacy, e.state == .queued,
           !settings.isPaused(e.key) else { return }
     let t = now()
-    if t >= e.expiresAt {
-      settle(id, .expired)
-      return
-    }
     guard ready else {
       // Reconcile has not matched the daemon's tasks yet. Keep the queued
       // state and the wait on disk; reconcile issues it. A wait follows an
@@ -222,7 +218,7 @@ extension QueueCoordinator {
     let fileExists = store.bodyURL(e).map(FileIO.exists) ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: policy(e),
-      fileExists: fileExists, now: now(), expiresAt: e.expiresAt, hits: e.transientHits(part: nil)))
+      fileExists: fileExists, hits: e.transientHits(part: nil)))
     switch verdict {
     case .accepted:
       settle(id, .completed(response(c)))
@@ -244,8 +240,6 @@ extension QueueCoordinator {
         errorKind: "http", message: "HTTP \(c.statusCode ?? 0)", response: response(c))))
     case .fileMissing:
       settle(id, .fileError("the staged body is missing"))
-    case .expired:
-      settle(id, .expired)
     }
   }
 
@@ -318,8 +312,8 @@ extension QueueCoordinator {
 
   // MARK: - Retry and auth
 
-  /// Backoff from the attempt count. A wait that would pass expiresAt
-  /// settles 'expired' now instead of scheduling.
+  /// Backoff from the attempt count. The entry retries until a result
+  /// settles it or the app cancels it: there is no deadline.
   ///
   /// A floor under the backoff, as a safety net: the next attempt never
   /// begins within baseMs of the previous one's start, however that one
@@ -335,10 +329,6 @@ extension QueueCoordinator {
     let endedBeforeStart = start.map { now() < $0 } ?? false
     if let start {
       delay = max(delay, endedBeforeStart ? Int(base) : Int((start + base - now()).rounded(.up)))
-    }
-    if now() + Double(delay) >= e.expiresAt {
-      settle(e.id, .expired)
-      return
     }
     var n = e
     n.state = .queued
@@ -361,7 +351,8 @@ extension QueueCoordinator {
     }
   }
 
-  /// awaiting-auth: no task, one `state` event. updateHeaders() resumes it.
+  /// awaiting-auth: no task, one `state` event. updateHeaders(), a same-id
+  /// mutate() or cancel() ends it; nothing else does.
   func park(_ e: QueueEntry) {
     cancelTasks(e.id, purpose: .superseded)
     chunked.stop(e.id)
@@ -370,8 +361,6 @@ extension QueueCoordinator {
     n.authParked = true
     n.nextAttemptAt = nil
     commit(n)
-    // The timer may have passed while the entry ran.
-    armExpiry(n)
   }
 
   func response(_ c: TaskCompletion) -> RawResponseRecord {

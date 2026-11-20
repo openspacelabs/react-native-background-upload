@@ -83,7 +83,13 @@ struct QueueEntry: Codable, Equatable {
   var transientHitsByRule: [String: Int]? = nil
   var bytesSent: Int64
   var totalBytes: Int64
-  var expiresAt: Double // epoch ms
+  /// Epoch ms. Not read: this version never expires an entry. Versions
+  /// 10.0.0 to 11.3.0 settle an entry 'expired' once this time passes, and
+  /// their decoder requires the field. So a new or re-queued entry stores
+  /// noDeadline, and an app that goes back to such a version does not
+  /// expire it. An entry an earlier version stored, and that is not queued
+  /// again, keeps the value it had.
+  var expiresAt: Double
   var nextAttemptAt: Double? // epoch ms, set while a delayed retry waits
   var settledEventId: String?
   var lastRequestId: String?
@@ -110,6 +116,13 @@ extension QueueEntry {
   }
 
   var isSettled: Bool { !isLive }
+
+  /// The expiresAt of a new or re-queued entry: the largest time a
+  /// JavaScript Date holds, 8.64e15 ms. Exact in a Double. In 10.0.0 to
+  /// 11.3.0 a time check against it is never true, and their expiry timer
+  /// caps its wait at 24 hours before its one Int conversion, so nothing
+  /// overflows.
+  static let noDeadline: Double = 8_640_000_000_000_000
 
   /// Whether a simple task that carries `incarnation` (nil: none) belongs
   /// to this use of the id. A task with a value must carry this entry's. A
@@ -184,15 +197,16 @@ extension QueueEntry {
       bodyFingerprint: p.fingerprint, parts: p.parts, incarnation: UUID().uuidString,
       headers: p.headers, headerGeneration: headerGeneration,
       state: paused ? .paused : .queued, authParked: false, generation: 1, attempts: 0,
-      bytesSent: 0, totalBytes: staged.totalBytes, expiresAt: p.expiresAt,
+      bytesSent: 0, totalBytes: staged.totalBytes, expiresAt: noDeadline,
       nextAttemptAt: nil, settledEventId: nil, lastRequestId: nil, lastUrl: nil,
       lastPartIndex: nil, legacy: false, createdAt: createdAt ?? now, updatedAt: now)
     e.tasksCarryIncarnation = true
     return e
   }
 
-  /// Rule 3, same body: the new vars, headers, expiresAt and descriptor
-  /// fields replace the stored ones. The body, url, method, accepted parts,
+  /// Rule 3, same body: the new vars, headers and descriptor fields replace
+  /// the stored ones, and expiresAt becomes noDeadline. The body, url,
+  /// method, accepted parts,
   /// generation and createdAt stay (a different url or method is a different
   /// body). `resetBudget` (a reopen, which starts a new generation) also
   /// resets attempts, part rejections and every transient count: attempts
@@ -202,7 +216,7 @@ extension QueueEntry {
     next.key = p.key
     next.varsJSON = p.varsJSON
     next.headers = p.headers
-    next.expiresAt = p.expiresAt
+    next.expiresAt = Self.noDeadline
     next.accept = p.accept
     next.retry = p.retry
     next.wifiOnly = p.wifiOnly

@@ -221,7 +221,7 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertNil(h.row("f"))
     guard case .failure(let bad) = h.enqueue(["id": "b", "key": "k", "descriptor": ["url": "https://a.test"]])
     else { return XCTFail() }
-    XCTAssertEqual(bad.code, "E_INVALID", "no expiresAt")
+    XCTAssertEqual(bad.code, "E_INVALID", "no varsJson")
   }
 
   // MARK: - Cancel
@@ -281,7 +281,7 @@ final class CoordinatorSimpleTests: XCTestCase {
     let manifest = ChunkedManifestV9(id: id, parts: [
       .init(url: "https://s3.test/part1", start: 0, end: 10, accepted: true),
       .init(url: "https://s3.test/part2", start: 10, end: 20, accepted: false),
-    ], expiresAt: h.clock + 60_000, incarnation: "v9inc")
+    ], incarnation: "v9inc")
     writeFile(h.store.fileURL(id, QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     writeFile(h.store.fileURL(id, ChunkedManifestV9.blobName), bytes: 20)
@@ -396,7 +396,7 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertTrue(h.store.setAsideDirectories().isEmpty, "nothing left aside")
   }
 
-  // MARK: - Retry, backoff, expiry
+  // MARK: - Retry and backoff
 
   func testTransientSchedulesADelayedTask() throws {
     _ = try h.enqueue(h.dataRaw(id: "a")).get()
@@ -548,76 +548,152 @@ final class CoordinatorSimpleTests: XCTestCase {
     }
   }
 
-  func testBackoffPastExpiresAtSettlesExpired() throws {
+  // MARK: - No deadline
+
+  // The library never expires a request. A descriptor may still carry
+  // `expiresAt`; native ignores it.
+
+  func testAnEntryWithAPastExpiresAtIsSent() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock - 1])).get()
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    h.complete(onlyTask(), status: 201)
+    XCTAssertEqual(h.entry("a")?.state, .completed)
+  }
+
+  func testATransientFailurePastExpiresAtRetriesOnTheNormalBackoff() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 500])).get()
     h.complete(onlyTask(), status: 503)
-    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
-    XCTAssertEqual(error["errorKind"] as? String, "expired")
-    XCTAssertTrue(FileIO.exists(h.store.dir("a")), "bytes stay")
-  }
-
-  func testExpiryTimerSettlesAWaitingEntry() throws {
-    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(h.entry("a")?.nextAttemptAt, h.clock + 1_000)
+    h.advance(1_000)
     h.complete(onlyTask(), status: 503)
+    XCTAssertEqual(h.entry("a")?.nextAttemptAt, h.clock + 2_000, "backoff doubles")
     let waiting = onlyTask()
-    h.advance(60_200)
-    XCTAssertEqual(h.entry("a")?.state, .error)
-    XCTAssertTrue(waiting.cancelled)
-    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+    h.advance(2 * 86_400_000)
+    h.advance(2 * 86_400_000)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "no timer settles a waiting entry")
+    XCTAssertFalse(waiting.cancelled)
+    XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
-  func testExpiryLeavesARunningAttemptToItsOwnResult() throws {
+  func testAnAttemptRunningPastExpiresAtRunsToItsOwnResult() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
     let task = onlyTask()
     h.advance(60_200)
-    XCTAssertEqual(h.entry("a")?.state, .running, "not settled mid-flight")
+    XCTAssertEqual(h.entry("a")?.state, .running)
     XCTAssertFalse(task.cancelled)
-    h.complete(task, status: 400)
-    let error = try XCTUnwrap(h.sink.settled.last?["error"] as? [String: Any])
-    XCTAssertEqual(error["errorKind"] as? String, "http", "a real response keeps its kind")
-
-    _ = try h.enqueue(h.dataRaw(id: "b", extra: ["expiresAt": h.clock + 60_000])).get()
-    let second = onlyTask()
-    h.advance(60_200)
-    h.complete(second, status: 503)
-    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired",
-                   "a transient result past expiresAt is expired")
+    h.complete(task, status: 503)
+    XCTAssertEqual(h.entry("a")?.state, .queued, "a transient result retries")
+    XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
-  func testAnExpiredEntryThatParksStillExpires() throws {
+  /// A parked entry has no retry of its own. With no deadline it waits
+  /// until the app pushes headers, calls mutate() with the same id, or
+  /// cancels it.
+  func testAParkedEntryPastExpiresAtStaysParkedUntilNewHeaders() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
     let task = onlyTask()
     h.advance(60_200) // passes while running
     h.complete(task, status: 401)
     XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
-    h.advance(100)
-    XCTAssertEqual(h.entry("a")?.state, .error)
-    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+    h.advance(2 * 86_400_000)
+    h.advance(2 * 86_400_000)
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    XCTAssertTrue(h.transport.live.isEmpty, "it waits with no task")
+    XCTAssertTrue(h.sink.settled.isEmpty)
+    h.updateHeaders(["Authorization": "new"])
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertEqual(onlyTask().header("Authorization"), "new")
   }
 
-  func testPausedEntryCrossingExpiresAtSettlesAtResume() throws {
+  func testAPausedEntryPastExpiresAtIsSentAtResume() throws {
     _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 60_000])).get()
     _ = try h.enqueue(h.dataRaw(id: "b", extra: ["expiresAt": h.clock + 60_000])).get()
     h.complete(h.transport.live.first { $0.taskDescription?.contains("\"b\"") == true }!, status: 401)
     h.pause()
     h.advance(60_200)
-    XCTAssertEqual(h.entry("a")?.state, .paused, "a pause does not expire")
+    XCTAssertEqual(h.entry("a")?.state, .paused)
     XCTAssertEqual(h.entry("b")?.state, .paused)
-    XCTAssertTrue(h.sink.settled.isEmpty)
     h.resume()
-    XCTAssertEqual(h.entry("a")?.state, .error)
-    XCTAssertEqual(h.entry("b")?.state, .error, "a parked entry too")
-    XCTAssertEqual(h.sink.settled.compactMap { ($0["error"] as? [String: Any])?["errorKind"] as? String },
-                   ["expired", "expired"])
-    XCTAssertTrue(h.transport.live.isEmpty, "nothing issues")
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertEqual(h.transport.live.count, 1, "a is sent")
+    XCTAssertEqual(h.entry("b")?.state, .awaitingAuth, "a parked entry goes back to its park")
+    XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
-  func testExpiredAtIssue() throws {
+  // An entry an earlier version stored keeps its expiresAt until it is
+  // queued again. These tests write a past one into the stored entry.
+
+  func testAStoredPastExpiresAtDoesNotEndTheBackoff() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.storeExpiresAt("a", h.clock - 1)
+    h.complete(onlyTask(), status: 503)
+    XCTAssertEqual(h.entry("a")?.state, .queued)
+    XCTAssertEqual(onlyTask().beginAt, Date(timeIntervalSince1970: (h.clock + 1_000) / 1000))
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  func testAStoredPastExpiresAtIsSentAtResume() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
     h.pause()
-    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 10])).get()
-    h.clock += 20
+    h.storeExpiresAt("a", h.clock - 1)
     h.resume()
+    XCTAssertEqual(h.entry("a")?.state, .running)
+    XCTAssertEqual(h.transport.live.count, 1)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  func testAStoredPastExpiresAtDoesNotSettleAParkedEntry() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.complete(onlyTask(), status: 401)
+    h.storeExpiresAt("a", h.clock - 1)
+    h.advance(2 * 86_400_000)
+    h.advance(2 * 86_400_000)
+    XCTAssertEqual(h.entry("a")?.state, .awaitingAuth)
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  /// A new entry, and an entry queued again by a same-id call, stores the
+  /// largest JS Date. 10.0.0 to 11.3.0 never reach it, so an app that goes
+  /// back to one of them does not expire the entry.
+  func testNewAndRequeuedEntriesStoreAnExpiresAtOlderVersionsNeverReach() throws {
+    func stored(_ id: String) -> Double? { h.store.load(id)?.expiresAt }
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock - 1])).get()
+    XCTAssertEqual(stored("a"), QueueEntry.noDeadline, "create")
+    h.storeExpiresAt("a", h.clock - 1)
+    _ = try h.enqueue(h.dataRaw(id: "a", extra: ["expiresAt": h.clock + 5])).get()
+    XCTAssertEqual(stored("a"), QueueEntry.noDeadline, "same body, live")
+    XCTAssertEqual(h.transport.created.count, 1, "the same body: expiresAt takes no part in the decision")
+    h.complete(onlyTask(), status: 401)
+    h.storeExpiresAt("a", h.clock - 1)
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(stored("a"), QueueEntry.noDeadline, "same body, parked")
+    h.complete(onlyTask(), status: 400)
     XCTAssertEqual(h.entry("a")?.state, .error)
+    h.storeExpiresAt("a", h.clock - 1)
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    XCTAssertEqual(stored("a"), QueueEntry.noDeadline, "reopen")
+    h.complete(onlyTask(), status: 400)
+    h.storeExpiresAt("a", h.clock - 1)
+    _ = try h.enqueue(h.dataRaw(id: "a", data: ["x": 2])).get()
+    XCTAssertEqual(stored("a"), QueueEntry.noDeadline, "a different body")
+  }
+
+  /// An `expired` outcome that 11.3.0 journaled and the app has not acked
+  /// is delivered as it was.
+  func testAStoredExpiredOutcomeIsDelivered() throws {
+    _ = try h.enqueue(h.dataRaw(id: "a")).get()
+    h.queue.sync {
+      h.coordinator.settle("a", .error(OutcomeErrorRecord(
+        errorKind: "expired", message: "expiresAt passed before the request completed")))
+    }
+    let fresh = Harness(root: h.root)
+    fresh.boot()
+    let event = try XCTUnwrap(fresh.unacknowledged().first)
+    let error = try XCTUnwrap(event["error"] as? [String: Any])
+    XCTAssertEqual(error["errorKind"] as? String, "expired")
+    XCTAssertEqual(error["message"] as? String, "expiresAt passed before the request completed")
+    XCTAssertEqual(fresh.row("a")?["state"] as? String, "error")
   }
 
   func testFileMissingAtCompletionIsTerminal() throws {
@@ -1078,14 +1154,14 @@ final class CoordinatorSimpleTests: XCTestCase {
     XCTAssertEqual(h.store.loadSettings(), QueueSettings())
   }
 
-  func testKeyPausedEntryCrossingExpiresAtSettlesAtItsResume() throws {
+  func testAKeyPausedEntryPastExpiresAtIsSentAtItsResume() throws {
     _ = try h.enqueue(h.dataRaw(id: "cap", key: "capture", extra: ["expiresAt": h.clock + 60_000])).get()
     h.pause(keys: ["capture"])
     h.advance(60_200)
     XCTAssertEqual(h.entry("cap")?.state, .paused)
     h.resume(keys: ["capture"])
-    XCTAssertEqual(h.entry("cap")?.state, .error)
-    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(h.transport.live.count, 1)
   }
 
   func testKeyPauseKeepsAuthParkingAcrossResume() throws {

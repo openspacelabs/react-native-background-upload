@@ -22,9 +22,6 @@ enum Outcome {
   case error(OutcomeErrorRecord)
   case cancelled(reason: String)
 
-  static let expired = Outcome.error(OutcomeErrorRecord(
-    errorKind: "expired", message: "expiresAt passed before the request completed"))
-
   static func fileError(_ message: String, partIndex: Int? = nil) -> Outcome {
     .error(OutcomeErrorRecord(errorKind: "file", message: message, partIndex: partIndex))
   }
@@ -92,7 +89,6 @@ final class QueueCoordinator {
   var ready = false
   /// Every task this process created or adopted, by TaskMap key.
   var liveTasks: [String: (id: String, task: UploadTask)] = [:]
-  var expiryTokens: [String: UUID] = [:]
   /// When each simple entry's latest task begins (its begin date, or when it
   /// was made), by id. In memory only: the floor in scheduleRetry.
   var attemptStarts: [String: Double] = [:]
@@ -274,9 +270,8 @@ final class QueueCoordinator {
 
   /// An entry is paused when the global gate is on or its key is paused.
   /// A live entry that should be paused stops and moves to 'paused'. A
-  /// paused entry that should not be moves back: past expiresAt it settles
-  /// expired (a pause does not expire an entry; the resume does), else to
-  /// awaiting-auth when it was parked, else to queued and issues.
+  /// paused entry that should not be moves back: to awaiting-auth when it
+  /// was parked, else to queued and issues.
   func applyPauseGate(_ e: QueueEntry) {
     guard e.isLive, !e.legacy else { return }
     let gated = settings.isPaused(e.key)
@@ -288,14 +283,9 @@ final class QueueCoordinator {
       n.nextAttemptAt = nil
       commit(n)
     } else if !gated, e.state == .paused {
-      if now() >= e.expiresAt {
-        settle(e.id, .expired)
-        return
-      }
       var n = e
       n.state = e.authParked ? .awaitingAuth : .queued
       commit(n)
-      armExpiry(n)
       if n.state == .queued { issue(n.id) }
     }
   }
@@ -608,39 +598,6 @@ final class QueueCoordinator {
       id: e.id, key: e.key, requestId: requestId ?? "", attempt: attempt, url: url,
       method: e.method, partIndex: partIndex, statusCode: c.statusCode, headers: c.headers,
       body: c.body, error: c.error, accepted: accepted, at: now())))
-  }
-
-  // MARK: - Expiry
-
-  /// One in-process timer per live entry at expiresAt + 100 ms. A later arm
-  /// replaces the token, so a resume that moved expiresAt makes the old timer
-  /// a no-op. Long waits re-arm daily. It settles a queued or awaiting-auth
-  /// entry. It leaves a paused one to resume(), and a running one to the
-  /// result of its attempt: a real response keeps its own error kind, and a
-  /// transient one becomes 'expired' (scheduleRetry, retryPart). An entry
-  /// that parks after that is armed again by park().
-  func armExpiry(_ e: QueueEntry) {
-    guard e.isLive, !e.legacy else { return }
-    let token = UUID()
-    expiryTokens[e.id] = token
-    let delay = Int(min(max(e.expiresAt - now(), 0) + 100, 86_400_000))
-    schedule(delay) { [weak self] in
-      guard let self, self.expiryTokens[e.id] == token else { return }
-      self.expiryTokens[e.id] = nil
-      guard let current = self.index.entry(e.id), current.isLive, !current.legacy else { return }
-      guard self.now() >= current.expiresAt else {
-        self.armExpiry(current)
-        return
-      }
-      switch current.state {
-      case .paused, .running: return
-      default: self.settle(current.id, .expired)
-      }
-    }
-  }
-
-  func disarmExpiry(_ id: String) {
-    expiryTokens[id] = nil
   }
 
   /// Applies `next` in memory, then saves it. The caller's value never

@@ -22,6 +22,33 @@ For such a request, a late result from an even earlier use of the id, also
 started by the old version, can still change it, as before. A request
 created after the upgrade ignores every task with no value.
 
+iOS never expires a request. Before, iOS settled a request `error` with
+`errorKind: 'expired'` once its `expiresAt` passed: from an in-process timer,
+at the next attempt, at `resume()` of a paused request, or in place of a
+retry whose wait would end after it. That ended requests the server had not
+received, also when the server was down for a short time. Now the native
+code ignores the descriptor's `expiresAt` and `configure()`'s `lifetimeMs`.
+The native module accepts a request with or without `expiresAt`, in any
+form, also one in the past. Before, a request without a numeric `expiresAt`
+was rejected with `E_INVALID`. `expiresAt` takes no part in the same-body
+decision of a same-id `mutate()`. What an app sees: a request waits and
+retries until the server accepts it, a response or a missing file settles it
+as an error, or the app calls `cancel(id)`. A 5xx, 408, 429, network failure
+or status in `exempt` now retries with no end. Each wait is at most `maxMs`
+plus its jitter. An app that needs a limit calls `cancel(id)` itself.
+
+On iOS a request parked in `awaiting-auth` (after a 401 or 403) has no
+retry of its own. Before, the deadline ended it. Now it stays parked until
+the app calls `updateHeaders()`, calls `mutate()` with the same id, or calls
+`cancel(id)`. If the app does none of these, the request stays parked.
+
+Requests that an earlier version queued are sent, also when their
+`expiresAt` has passed. An `expired` outcome that an earlier version stored,
+and that the app has not acknowledged, is still delivered, unchanged. New
+and re-queued requests store an `expiresAt` of 8640000000000000 (the largest
+JS `Date`). Versions 10.0.0 to 11.3.0 read this field and never reach that
+time, so an app that goes back to one of them does not expire the request.
+
 ## 11.3.0
 
 Added `useRequests(filter?)` and `useRequestsWithProgress(filter?)`, React

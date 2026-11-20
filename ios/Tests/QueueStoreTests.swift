@@ -182,7 +182,7 @@ final class QueueStoreTests: XCTestCase {
   func testDormantManifestReadAndRemove() throws {
     let manifest = ChunkedManifestV9(
       id: "v9", parts: [.init(url: "https://s3.test/1", start: 0, end: 5, accepted: true)],
-      expiresAt: 10, incarnation: "old")
+      incarnation: "old")
     writeFile(store.fileURL("v9", QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     XCTAssertEqual(store.loadV9Manifest("v9"), manifest)

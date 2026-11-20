@@ -1,7 +1,9 @@
 import Foundation
 
-/// Decides what one attempt's result means: the spec's retry, auth and
-/// lifetime table (section 6.1). Pure: no I/O, no session state.
+/// Decides what one attempt's result means: the spec's retry and auth
+/// table (section 6.1). Pure: no I/O, no session state. There is no
+/// deadline: a transient result stays transient however long the request
+/// has waited.
 enum RetryClassifier {
   enum Class: Equatable {
     case accepted
@@ -11,7 +13,6 @@ enum RetryClassifier {
     case terminalHttp
     /// The payload is gone. A retry can never succeed.
     case fileMissing
-    case expired
   }
 
   struct Input {
@@ -21,8 +22,6 @@ enum RetryClassifier {
     var accept: [UploadOutcome.AcceptRule]
     var policy: RetryPolicy
     var fileExists: Bool
-    var now: Double
-    var expiresAt: Double
     /// The count so far per rule identity (`TransientRule.identity`): the
     /// entry's for a simple request, the part's for a chunked one.
     var hits: [String: Int] = [:]
@@ -30,15 +29,7 @@ enum RetryClassifier {
 
   /// A cancellation (NSURLErrorCancelled) never reaches here: the caller
   /// handles it from the task's recorded purpose.
-  /// Past expiresAt only a transient result becomes `expired`; a real
-  /// response keeps its own class.
   static func classify(_ i: Input) -> Class {
-    let verdict = classifyResult(i)
-    if case .transient = verdict, i.now >= i.expiresAt { return .expired }
-    return verdict
-  }
-
-  private static func classifyResult(_ i: Input) -> Class {
     if i.error == nil, let code = i.statusCode,
        UploadOutcome.isAccepted(code, body: i.body, accept: i.accept) {
       return .accepted

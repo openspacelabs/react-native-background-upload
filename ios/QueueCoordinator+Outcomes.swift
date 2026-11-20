@@ -84,7 +84,6 @@ extension QueueCoordinator {
       retryJournal(event.eventId, delayMs: Self.journalRetryMs)
       if live { sink?.emitSettled(event.bridged) }
     }
-    disarmExpiry(id)
     throttle.reset(id)
     attemptStarts[id] = nil
   }
@@ -109,7 +108,6 @@ extension QueueCoordinator {
     n.authParked = false
     cancelTasks(e.id, purpose: .superseded)
     chunked.stop(e.id)
-    disarmExpiry(e.id)
     commit(n, emit: false)
     return n
   }
@@ -136,7 +134,6 @@ extension QueueCoordinator {
       try? journal.removeForId(id)
       pendingJournal = pendingJournal.filter { $0.value.id != id }
     }
-    disarmExpiry(id)
     throttle.reset(id)
     attemptStarts[id] = nil
   }
@@ -165,7 +162,6 @@ extension QueueCoordinator {
     cancelTasks(id, purpose: .superseded)
     chunked.stop(id)
     index.remove(id)
-    disarmExpiry(id)
     throttle.reset(id)
     attemptStarts[id] = nil
     if let aside { store.discard(aside) }

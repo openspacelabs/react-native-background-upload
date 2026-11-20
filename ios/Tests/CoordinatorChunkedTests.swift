@@ -156,7 +156,7 @@ final class CoordinatorChunkedTests: XCTestCase {
     h = fresh
     var again = raw
     var d = try XCTUnwrap(again["descriptor"] as? [String: Any])
-    d["expiresAt"] = h.expiresAt + 1
+    d["expiresAt"] = h.clock - 1 // ignored
     again["descriptor"] = d
     _ = try h.enqueue(again).get()
     XCTAssertEqual(h.entry("cap")?.parts[1].transientHitsByRule, ["400": 1], "a live re-mutate keeps it")
@@ -614,15 +614,41 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
   }
 
-  func testExpiryBetweenSlicesSettlesAndBuildsNothingMore() throws {
+  func testAPartFailurePastExpiresAtRetriesThePart() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap", extra: ["expiresAt": h.clock + 500])).get()
+    h.drainAll()
+    h.complete(try XCTUnwrap(partTask(1)), status: 503)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    let retry = try XCTUnwrap(partTask(1))
+    XCTAssertNotNil(retry.beginAt, "after the backoff")
+    h.advance(60_000)
+    h.complete(retry, status: 503)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertNotNil(partTask(1))
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  // An entry an earlier version stored keeps its expiresAt until it is
+  // queued again. These tests write a past one into the stored entry.
+
+  func testAStoredPastExpiresAtDoesNotStopTheBuildBetweenSlices() throws {
     h.holdSlices = true
     try enqueueSixPartsInThreeSlices()
-    h.clock += 15 * 24 * 3_600_000
+    h.storeExpiresAt("cap", h.clock - 1)
     h.runHeldSlices()
-    XCTAssertEqual(h.entry("cap")?.state, .error)
-    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
-    XCTAssertEqual(h.transport.created.count, 2)
-    XCTAssertTrue(h.transport.live.isEmpty)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
+    XCTAssertTrue(h.sink.settled.isEmpty)
+  }
+
+  func testAStoredPastExpiresAtDoesNotEndAPartRetry() throws {
+    _ = try h.enqueue(h.chunkedRaw(id: "cap")).get()
+    h.drainAll()
+    h.storeExpiresAt("cap", h.clock - 1)
+    h.complete(try XCTUnwrap(partTask(1)), status: 503)
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertNotNil(partTask(1)?.beginAt, "the part waits its backoff")
+    XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
   /// Slice 1 has tasks and TaskMap keys; the process dies with the rest
@@ -870,25 +896,57 @@ final class CoordinatorChunkedTests: XCTestCase {
     XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5])
   }
 
+  /// The blob became shorter than a part while the app was dead: the
+  /// launch refill settles the entry, and the adopted tasks stop unsent.
   func testAnAdoptedTaskWhoseEntrySettlesAtLaunchIsNotResumed() throws {
     let (fresh, survivors) = try crashAfterTheFirstSlice()
-    fresh.clock = h.clock + 15 * 24 * 3_600_000
+    let blob = try XCTUnwrap(fresh.entry("cap").flatMap { e in e.bodyPath.map { fresh.store.fileURL("cap", $0) } })
+    try Data(count: 5).write(to: blob)
     fresh.boot()
-    XCTAssertEqual(fresh.entry("cap")?.state, .error, "expired")
+    XCTAssertEqual(fresh.entry("cap")?.state, .error)
+    XCTAssertEqual((fresh.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "file")
     XCTAssertTrue(survivors.allSatisfy(\.cancelled))
     XCTAssertFalse(survivors.contains(where: \.resumed), "a stopped task sends nothing")
   }
 
-  func testAnExpiredEntryDueForReplacementOnActivationSettlesExpired() throws {
+  func testAnAdoptedPlanWithAStoredPastExpiresAtRunsAtLaunch() throws {
+    let (fresh, survivors) = try crashAfterTheFirstSlice()
+    fresh.storeExpiresAt("cap", h.clock - 1)
+    fresh.boot()
+    fresh.drainAll()
+    XCTAssertEqual(fresh.entry("cap")?.state, .running)
+    XCTAssertTrue(survivors.allSatisfy(\.resumed))
+    XCTAssertEqual(parts(fresh.transport.created), [2, 3, 4, 5])
+  }
+
+  /// The blob became shorter than a part before an activation: the
+  /// replace slice settles the entry, the old tasks stop, and no new part
+  /// task is made.
+  func testAnEntryThatSettlesInsideAReplaceSliceGetsNoNewPartTask() throws {
     try enqueueSixPartsInThreeSlices()
     h.drainAll()
     let old = h.transport.live
-    h.clock += 15 * 24 * 3_600_000
+    let blob = try XCTUnwrap(h.entry("cap").flatMap { e in e.bodyPath.map { h.store.fileURL("cap", $0) } })
+    try Data(count: 5).write(to: blob)
     activate()
+    h.drainAll()
     XCTAssertEqual(h.entry("cap")?.state, .error)
-    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "expired")
+    XCTAssertEqual((h.sink.settled.last?["error"] as? [String: Any])?["errorKind"] as? String, "file")
     XCTAssertTrue(old.allSatisfy(\.cancelled))
     XCTAssertEqual(h.transport.created.count, 6, "no new part task")
+  }
+
+  func testAPlanWithAStoredPastExpiresAtIsReplacedOnActivation() throws {
+    try enqueueSixPartsInThreeSlices()
+    h.drainAll()
+    let old = h.transport.live
+    h.storeExpiresAt("cap", h.clock - 1)
+    activate()
+    h.drainAll()
+    XCTAssertEqual(h.entry("cap")?.state, .running)
+    XCTAssertTrue(old.allSatisfy(\.cancelled))
+    XCTAssertEqual(parts(h.transport.live), [0, 1, 2, 3, 4, 5], "foreground tasks in their place")
+    XCTAssertTrue(h.sink.settled.isEmpty)
   }
 
   func testTheBackgroundCompletionHandlerWaitsForQueuedSlices() throws {
