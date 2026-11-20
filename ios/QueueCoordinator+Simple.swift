@@ -28,10 +28,6 @@ extension QueueCoordinator {
     guard var e = index.entry(id), !e.legacy, e.state == .queued,
           !settings.isPaused(e.key) else { return }
     let t = now()
-    if t >= e.expiresAt {
-      settle(id, .expired)
-      return
-    }
     guard ready else {
       // Reconcile has not matched the daemon's tasks yet. Keep the queued
       // state and the wait on disk; reconcile issues it. A wait follows an
@@ -85,7 +81,7 @@ extension QueueCoordinator {
     }
 
     let meta = TaskMap.Meta(
-      id: id, attempt: e.attempts, requestId: requestId,
+      id: id, incarnation: e.incarnation, attempt: e.attempts, requestId: requestId,
       headerGeneration: settings.headerGeneration, generation: e.generation, purpose: .attempt,
       foreground: activity.isActive)
     let task: UploadTask
@@ -93,7 +89,8 @@ extension QueueCoordinator {
       task = try transport.upload(
         buildRequest(e, url: url, requestId: requestId), fromFile: body,
         wifiOnly: settings.wifiOnly(e.wifiOnly),
-        description: ChunkedEngine.taskDescription(id: id, attempt: e.attempts, generation: e.generation),
+        description: ChunkedEngine.taskDescription(
+          id: id, attempt: e.attempts, generation: e.generation, incarnation: e.incarnation),
         beginAt: beginAt.map { Date(timeIntervalSince1970: $0 / 1000) })
     } catch {
       // The session could not open the body. Gone since the check above: it
@@ -169,9 +166,12 @@ extension QueueCoordinator {
       return
     }
     // Only the current attempt of the current generation may drive the
-    // entry, or an older one the library replaced (see below).
-    guard case .request(let id, let generation, let attempt) = owner,
-          var e = index.entry(id), !e.legacy, !e.isChunked, e.generation == generation,
+    // entry, or an older one the library replaced (see below). The task must
+    // belong to this use of the id: an earlier use (acked or cancelled, then
+    // used again) also starts at generation 1, attempt 1.
+    guard case .request(let id, let generation, let attempt, let incarnation) = owner,
+          var e = index.entry(id), !e.legacy, !e.isChunked, e.ownsSimpleTask(incarnation: incarnation),
+          e.generation == generation,
           e.attempts == attempt || (meta?.purpose == .superseded && attempt < e.attempts) else { return }
 
     let cancelled = RetryClassifier.isCancellation(c.error)
@@ -218,7 +218,7 @@ extension QueueCoordinator {
     let fileExists = store.bodyURL(e).map(FileIO.exists) ?? false
     let verdict = RetryClassifier.classify(RetryClassifier.Input(
       statusCode: c.statusCode, body: c.body, error: c.error, accept: e.accept, policy: policy(e),
-      fileExists: fileExists, now: now(), expiresAt: e.expiresAt, hits: e.transientHits(part: nil)))
+      fileExists: fileExists, hits: e.transientHits(part: nil)))
     switch verdict {
     case .accepted:
       settle(id, .completed(response(c)))
@@ -240,8 +240,6 @@ extension QueueCoordinator {
         errorKind: "http", message: "HTTP \(c.statusCode ?? 0)", response: response(c))))
     case .fileMissing:
       settle(id, .fileError("the staged body is missing"))
-    case .expired:
-      settle(id, .expired)
     }
   }
 
@@ -262,8 +260,9 @@ extension QueueCoordinator {
       // A task the library already replaced (a session move keeps the
       // attempt ordinal, so the ordinal alone cannot tell them apart).
       guard meta?.purpose != .superseded,
-            case .request(let id, let generation, let attempt) = owner,
-            var e = index.entry(id), !e.isChunked, e.generation == generation,
+            case .request(let id, let generation, let attempt, let incarnation) = owner,
+            var e = index.entry(id), !e.isChunked, e.ownsSimpleTask(incarnation: incarnation),
+            e.generation == generation,
             e.attempts == attempt, e.state == .queued || e.state == .running, !settings.isPaused(e.key),
             let url = e.url.flatMap(URL.init(string:)) else {
         taskMap.setPurpose(.superseded, forKey: key, id: owner.id)
@@ -291,12 +290,14 @@ extension QueueCoordinator {
       switch owner {
       case .part(let id, let part, let incarnation):
         self.chunked.partProgress(id: id, part: part, incarnation: incarnation, key: key, sent: sent)
-      case .request(let id, let generation, let attempt):
+      case .request(let id, let generation, let attempt, let incarnation):
         // A replacement shares its attempt with the task it replaced, so
         // only the task this process holds may report. Before reconcile no
-        // task is held yet, and none was replaced.
+        // task is held yet, and none was replaced: then the task's own
+        // identity, use of the id included, must match.
         guard !self.ready || self.liveTasks[key] != nil,
-              var e = self.index.entry(id), e.generation == generation, e.attempts == attempt,
+              var e = self.index.entry(id), e.ownsSimpleTask(incarnation: incarnation),
+              e.generation == generation, e.attempts == attempt,
               e.state == .queued || e.state == .running else { return }
         if e.state == .queued {
           e.state = .running
@@ -311,27 +312,24 @@ extension QueueCoordinator {
 
   // MARK: - Retry and auth
 
-  /// Backoff from the attempt count. A wait that would pass expiresAt
-  /// settles 'expired' now instead of scheduling.
+  /// Backoff from the attempt count. The entry retries until a result
+  /// settles it or the app cancels it: there is no deadline.
   ///
   /// A floor under the backoff, as a safety net: the next attempt never
-  /// begins within baseMs of the previous one's start, however that one
-  /// ended. One that ended before its own start (the daemon dropped a
-  /// delayed task at once, in a way taskCompletedLocked did not catch) gets
-  /// no task for baseMs, so such failures cannot spin. That wait is in this
+  /// begins within baseMs (at least minBackoffMs) of the previous one's
+  /// start, however that one ended. One that ended before its own start
+  /// (the daemon dropped a delayed task at once, in a way
+  /// taskCompletedLocked did not catch) gets no task for baseMs, so such
+  /// failures cannot spin. That wait is in this
   /// process, and bounded, so a clock that moved cannot stall the retry.
   /// The floor is in memory only: a relaunch starts without it.
   func scheduleRetry(_ e: QueueEntry) {
-    let base = policy(e).baseMs
+    let base = RetryClassifier.atLeastMinimum(policy(e).baseMs)
     var delay = RetryClassifier.backoffMs(attempt: max(e.attempts, 1), policy: policy(e), random: random)
     let start = attemptStarts[e.id]
     let endedBeforeStart = start.map { now() < $0 } ?? false
     if let start {
       delay = max(delay, endedBeforeStart ? Int(base) : Int((start + base - now()).rounded(.up)))
-    }
-    if now() + Double(delay) >= e.expiresAt {
-      settle(e.id, .expired)
-      return
     }
     var n = e
     n.state = .queued
@@ -354,7 +352,8 @@ extension QueueCoordinator {
     }
   }
 
-  /// awaiting-auth: no task, one `state` event. updateHeaders() resumes it.
+  /// awaiting-auth: no task, one `state` event. updateHeaders(), a same-id
+  /// mutate() or cancel() ends it; nothing else does.
   func park(_ e: QueueEntry) {
     cancelTasks(e.id, purpose: .superseded)
     chunked.stop(e.id)
@@ -363,8 +362,6 @@ extension QueueCoordinator {
     n.authParked = true
     n.nextAttemptAt = nil
     commit(n)
-    // The timer may have passed while the entry ran.
-    armExpiry(n)
   }
 
   func response(_ c: TaskCompletion) -> RawResponseRecord {

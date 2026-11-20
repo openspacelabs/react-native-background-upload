@@ -86,8 +86,9 @@ struct QueueSettings: Codable, Equatable {
   /// The queue setting unless the entry pins its own.
   func wifiOnly(_ entryWifiOnly: Bool?) -> Bool { entryWifiOnly ?? wifiOnly }
 
-  /// configure(options). iOS reads `retry` only: JS turns lifetimeMs into
-  /// each entry's expiresAt, and the Android notification keys are Android's.
+  /// configure(options). iOS reads `retry` only. `lifetimeMs` is ignored:
+  /// the library never expires a request. The notification keys are
+  /// Android's.
   mutating func apply(configure options: [String: Any]) {
     retry = RetryOverride.parse(options["retry"])
   }

@@ -122,24 +122,29 @@ extension QueueCoordinator {
       switch owner {
       case .part(let id, let part, let incarnation)? where runnable && entry?.isChunked == true:
         partTasks[id, default: []].append(.init(task: task, part: part, incarnation: incarnation))
-      case .request(let id, let generation, let attempt)?
-        where runnable && entry?.isChunked == false && entry?.generation == generation
-          && entry?.attempts == attempt && !simpleLive.contains(id):
+      case .request(let id, let generation, let attempt, let incarnation)?
+        where runnable && entry?.isChunked == false && entry?.ownsSimpleTask(incarnation: incarnation) == true
+          && entry?.generation == generation && entry?.attempts == attempt && !simpleLive.contains(id):
         simpleLive.insert(id)
         liveTasks[task.key] = (id, task)
       default:
-        // No v10 owner (a v9 task), an older generation or attempt, a
-        // duplicate, or an entry that must have no task. Drop its callback.
+        // No v10 owner (a v9 task), an older generation or attempt, an
+        // earlier use of the id, a duplicate, or an entry that must have no
+        // task. Drop its callback.
         taskMap.setPurpose(.superseded, forKey: task.key, id: owner?.id ?? "")
         task.cancel()
       }
     }
-    // A key whose id has no entry belongs to nothing. A live task keeps its
-    // key until its cancel callback, which reads the purpose.
-    taskMap.removeAll { key, meta in !liveKeys.contains(key) && index.entry(meta.id) == nil }
+    // A key whose id has no entry belongs to nothing, and a simple key of an
+    // earlier use of the id belongs to nothing now. A live task keeps its key
+    // until its cancel callback, which reads the purpose.
+    taskMap.removeAll { key, meta in
+      guard !liveKeys.contains(key) else { return false }
+      guard let e = index.entry(meta.id) else { return true }
+      return meta.partIndex == nil && meta.generation != nil && !e.ownsSimpleTask(incarnation: meta.incarnation)
+    }
 
     for e in index.entries() where e.isLive && !e.legacy {
-      armExpiry(e)
       guard e.state == .queued || e.state == .running else { continue }
       if e.isChunked {
         chunked.reconcile(e.id, tasks: partTasks[e.id] ?? [])
@@ -170,7 +175,8 @@ extension QueueCoordinator {
   /// completion is handled.
   private func withoutTask(_ e: QueueEntry) {
     let pending = taskMap.keys(where: {
-      $0.id == e.id && $0.generation == e.generation && $0.attempt == e.attempts
+      $0.id == e.id && e.ownsSimpleTask(incarnation: $0.incarnation)
+        && $0.generation == e.generation && $0.attempt == e.attempts
     })
     guard !pending.isEmpty else {
       // No task was ever made for a waiting attempt: it never ran, so it

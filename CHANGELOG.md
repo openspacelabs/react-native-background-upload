@@ -1,27 +1,45 @@
 ## Unreleased
 
-The library has no deadlines. It sets no deadline on a request: it keeps an
-entry, and retries it, until the retry rules settle it or the app calls
-`cancel(id)`. An app that needs a bound calls `cancel(id)` itself.
-`expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
-deprecated and ignored. They stay in the types, so code written for 11.3.0
-compiles and runs with no change, and they leave the types in the next
-major release. `mutate()` and `configure()` no longer reject a value for
-them that is not finite, zero or negative. In development, the first
-`mutate()` whose descriptor sets `expiresAt`, and the first `configure()`
-that sets `lifetimeMs`, warn one time per client (to `onWarning`, or
-`console.warn` when none is set).
-`configure()` no longer sends `lifetimeMs` to native. Every enqueue sends
-`expiresAt: 8640000000000000` (the largest valid `Date`), because native in
-11.3.0 and earlier rejects an entry without one. So every new or re-queued
-request cannot expire. A live entry that an earlier version queued, and
-that is never queued again, keeps its stored deadline until the native side
-stops reading it, in the same release; after that it keeps going. An entry
-that settled `expired` under an earlier version stays an `error` row until
-`cancel()` or a same-id `mutate()`, and an unacknowledged `expired` outcome
-still reaches `onError`. `errorKind: 'expired'` is deprecated. The fake
-native module never expired an entry and still does not. This JS change ships in
-the same release as the Android and iOS changes that remove expiry.
+The library has no deadlines, on Android, on iOS and in JS. It never expires
+a request. Before, a request settled `error` with `errorKind: 'expired'` once
+its `expiresAt` passed, also when the server was only down for a time. Now a
+request waits and retries until the server accepts it, a response or a
+missing file settles it as an error, or the app calls `cancel(id)`. An app
+that needs a limit calls `cancel(id)` itself.
+
+- `expiresAt` on a descriptor and `lifetimeMs` in `configure()` are
+  deprecated and ignored. They stay in the types, so code written for 11.3.0
+  compiles and runs with no change. They leave the types in the next major
+  release. `mutate()` and `configure()` no longer reject a value for them. In
+  development, the first `mutate()` whose descriptor sets `expiresAt`, and
+  the first `configure()` that sets `lifetimeMs`, warn one time per client
+  (to `onWarning`, or `console.warn` when none is set).
+- Native accepts a request with or without `expiresAt`, in any form, and
+  ignores it. `configure()` no longer sends `lifetimeMs` to native. JS still
+  sends a fixed far-future `expiresAt` with every enqueue; native does not
+  read it.
+- A 5xx, 408, 429, a network failure or a status in `exempt` now retries
+  with no end. Each wait is bounded by the retry policy (`maxMs` plus its
+  jitter).
+- A request parked in `awaiting-auth` (after a 401 or 403) has no retry of
+  its own on either platform. Before, the deadline ended it. Now it stays
+  parked until the app calls `updateHeaders()`, calls `mutate()` with the
+  same id, or calls `cancel(id)`. On Android a parked request no longer gets
+  a WorkManager wake at its `expiresAt`, so it holds no WorkManager row.
+- Requests that an earlier version queued keep going and are sent, also when
+  their `expiresAt` has passed. An `expired` outcome that an earlier version
+  stored and the app has not acknowledged is still delivered, unchanged. A
+  row that settled `expired` under an earlier version stays an `error` row
+  until `cancel()` or a same-id `mutate()`.
+- Downgrade: the stored entry keeps its `expiresAt` field, because earlier
+  versions read it. New and re-queued requests store a value that those
+  versions never reach (Android: 9223372036854775807, checked against
+  11.0.2 to 11.3.0; iOS: 8640000000000000, checked against 10.0.0 to
+  11.3.0). A request that an earlier version queued, and that is not queued
+  again, keeps its stored value, so an app that goes back to an earlier
+  version expires it as that version always did.
+- `errorKind: 'expired'` is deprecated. The fake native module never expired
+  an entry and still does not.
 
 Android now sets its HTTP timeouts: connect 15 s, read 60 s, write 60 s.
 Before, only the 24 h call cap was set, so OkHttp's 10 s defaults applied.
@@ -43,23 +61,36 @@ OkHttp has not finished reading when the stop takes effect is still thrown
 away, as before. `cancel()` is unchanged: a cancelled entry still settles
 `cancelled`.
 
-Android never expires a request. Its native code ignores the descriptor's
-`expiresAt` and `configure()`'s `lifetimeMs`. It accepts an entry with or
-without `expiresAt`, also one in the past, and a `configure()` call with or
-without `lifetimeMs`. A request waits and retries until the server accepts
-it, it settles as an error (for example a status the retry rules do not
-cover, or a missing file), or the app cancels it. Before, Android settled an
-entry `error` with `errorKind: 'expired'` once `expiresAt` passed, and gave
-each parked (`awaiting-auth`) entry a WorkManager wake at its `expiresAt`
-when that was less than 24 hours away. A parked entry now has no WorkManager
-row. It waits for `updateHeaders()` or a same-id `mutate()`. An app that
-needs a limit calls `cancel(id)` itself. Entries that an earlier version
-queued keep going and are sent, also when their `expiresAt` has passed. An
-`expired` outcome that an earlier version stored and the app has not yet
-acknowledged is still delivered, unchanged. A new entry, and an entry
-queued again by a same-id `mutate()`, stores `expiresAt` as
-9223372036854775807 (the largest 64-bit integer), so an app that goes back
-to 11.0.2 to 11.3.0 does not expire it.
+Fixed (iOS): a late result from an earlier use of a request id could change
+a later request with the same id. An app may call `mutate()` with an id
+again after its row is gone (its outcome was acknowledged, or `cancel(id)`
+removed it). The new request starts again at attempt 1, so a result of the
+earlier request that arrived late could match it. A late 2xx then completed
+the new request with the old response and cancelled its task, so the new
+body was not sent. A late 4xx failed it, a late 5xx counted as one of its
+failed attempts, and a late cancel could start a second task for it. Now
+each simple upload task carries a value that names the use of the id (the
+entry's `incarnation`, a new random value when the entry is created or its
+body is replaced). A result, progress event, delayed start or relaunch
+match from another use is ignored. iOS chunked parts already carried this
+value. What an app sees: a request is completed, failed or retried only by
+the results of its own tasks.
+
+A task started by 11.3.0 or earlier carries no value. A request created
+before the upgrade still accepts such a task when its id, generation and
+attempt match, so its task in flight during the upgrade is not sent again.
+For such a request, a late result from an even earlier use of the id, also
+started by the old version, can still change it, as before. A request
+created after the upgrade ignores every task with no value.
+
+Fixed (iOS): a retry could start with no wait. A retry policy with
+`baseMs` or `maxMs` of 0 or less could give retries with no wait. After a
+failed save, two retry paths then tried again with no network request in
+between, in a tight loop. A NaN or infinite `baseMs` could crash the app
+when a retry was scheduled. Now no retry on iOS waits less than 1 s: a
+computed wait under 1 s, or one that is not a finite number, becomes 1 s.
+What an app sees: with the default policy, the first retry now
+waits 1 to 1.2 s (before: 0.8 to 1.2 s). Later waits do not change.
 
 ## 11.3.0
 

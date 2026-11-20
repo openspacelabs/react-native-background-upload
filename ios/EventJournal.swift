@@ -17,7 +17,9 @@ struct RawResponseRecord: Codable, Equatable {
 }
 
 struct OutcomeErrorRecord: Codable, Equatable {
-  var errorKind: String // http | network | file | expired | unknown
+  /// http | network | file | unknown. 'expired' only in an outcome an
+  /// earlier version stored: it is delivered as it was.
+  var errorKind: String
   var message: String
   var response: RawResponseRecord?
   var partIndex: Int?

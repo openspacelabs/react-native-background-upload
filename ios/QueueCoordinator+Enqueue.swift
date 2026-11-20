@@ -73,7 +73,6 @@ extension QueueCoordinator {
     store.removeV9Manifest(p.id)
     store.sweep(e)
     publish(e)
-    armExpiry(e)
     return (p.id, !settings.isPaused(p.key))
   }
 
@@ -104,7 +103,6 @@ extension QueueCoordinator {
         n.bytesSent = n.isChunked ? n.acceptedBytes : 0
         try saveOrThrow(n)
         publish(n)
-        armExpiry(n)
         return (p.id, !paused)
 
       case .awaitingAuth:
@@ -115,7 +113,6 @@ extension QueueCoordinator {
         n.state = paused ? .paused : .queued
         try saveOrThrow(n)
         publish(n)
-        armExpiry(n)
         return (p.id, !paused)
 
       case .queued, .running, .paused:
@@ -127,7 +124,6 @@ extension QueueCoordinator {
         n.authParked = false
         try saveOrThrow(n)
         publish(n)
-        armExpiry(n)
         if paused != (n.state == .paused) {
           // A new key that another scope pauses, or no longer pauses.
           applyPauseGate(n)
@@ -170,7 +166,6 @@ extension QueueCoordinator {
     store.removeV9Manifest(p.id)
     store.sweep(n) // deletes the old body
     publish(n)
-    armExpiry(n)
     return (p.id, !paused)
   }
 

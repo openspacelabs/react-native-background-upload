@@ -55,7 +55,7 @@ final class DiagnosticLogTests: XCTestCase {
   private func writeV9Upload(_ store: QueueStore, _ id: String, blobBytes: Int) throws -> Int64 {
     let manifest = ChunkedManifestV9(id: id, parts: [
       .init(url: "https://s3.test/part1", start: 0, end: Int64(blobBytes), accepted: false),
-    ], expiresAt: 1, incarnation: "v9inc")
+    ], incarnation: "v9inc")
     writeFile(store.fileURL(id, QueueStore.manifestName),
               String(data: try JSONEncoder().encode(manifest), encoding: .utf8)!)
     writeFile(store.fileURL(id, ChunkedManifestV9.blobName), bytes: blobBytes)

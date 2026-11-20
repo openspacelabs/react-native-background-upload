@@ -5,14 +5,13 @@ final class RetryClassifierTests: XCTestCase {
   private func classify(_ status: Int? = nil, body: String? = nil, error: NSError? = nil,
                         accept: [UploadOutcome.AcceptRule] = [], exempt: [Int] = [404],
                         transient: [UploadOutcome.TransientRule] = [], hits: [String: Int] = [:],
-                        fileExists: Bool = true, now: Double = 0,
-                        expiresAt: Double = 100) -> RetryClassifier.Class {
+                        fileExists: Bool = true) -> RetryClassifier.Class {
     var policy = RetryPolicy.defaults
     policy.exempt = exempt
     policy.transient = transient
     return RetryClassifier.classify(.init(
       statusCode: status, body: body, error: error, accept: accept, policy: policy,
-      fileExists: fileExists, now: now, expiresAt: expiresAt, hits: hits))
+      fileExists: fileExists, hits: hits))
   }
 
   private let bodyStopped = UploadOutcome.TransientRule(status: 400, bodyIncludes: "\"error\":\"Bad Request\"", maxRetries: 2)
@@ -74,8 +73,6 @@ final class RetryClassifierTests: XCTestCase {
     XCTAssertEqual(classify(429, transient: [.init(status: 429, maxRetries: 1)], hits: ["429": 5]), .transient(rule: nil))
     XCTAssertEqual(classify(401, transient: [.init(status: 401)]), .auth)
     XCTAssertEqual(classify(409, body: "dup", accept: [.init(status: 409)], transient: [.init(status: 409)]), .accepted)
-    XCTAssertEqual(classify(400, body: #"{"error":"Bad Request"}"#, transient: [bodyStopped], now: 200, expiresAt: 100), .expired,
-                   "a rule's retry past expiresAt still expires")
   }
 
   private struct IdentityVector: Decodable {
@@ -131,26 +128,15 @@ final class RetryClassifierTests: XCTestCase {
     XCTAssertEqual(classify(error: NSError(domain: "Other", code: 1)), .transient(rule: nil))
   }
 
-  func testPastExpiresAtOnlyATransientResultIsExpired() {
-    XCTAssertEqual(classify(200, now: 100, expiresAt: 100), .accepted)
-    XCTAssertEqual(classify(503, now: 100, expiresAt: 100), .expired)
-    XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut),
-                            now: 200, expiresAt: 100), .expired)
-    XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist),
-                            fileExists: true, now: 200, expiresAt: 100), .expired)
-    XCTAssertEqual(classify(401, now: 101, expiresAt: 100), .auth, "a real response keeps its class")
-    XCTAssertEqual(classify(400, now: 101, expiresAt: 100), .terminalHttp)
-    XCTAssertEqual(classify(error: NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist),
-                            fileExists: false, now: 200, expiresAt: 100), .fileMissing)
-  }
-
   func testBackoff() {
     let p = RetryPolicy.defaults
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 0.5 }), 1_000)
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 2, policy: p, random: { 0.5 }), 2_000)
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 3, policy: p, random: { 0.5 }), 4_000)
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 40, policy: p, random: { 0.5 }), 7_200_000, "capped at max")
-    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 0 }), 800, "jitter low bound")
+    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 0 }), 1_000,
+                   "jitter low bound, raised to the 1 s minimum")
+    XCTAssertEqual(RetryClassifier.backoffMs(attempt: 2, policy: p, random: { 0 }), 1_600, "jitter low bound")
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 1, policy: p, random: { 1 }), 1_200, "jitter high bound")
     XCTAssertEqual(RetryClassifier.backoffMs(attempt: 0, policy: p, random: { 0.5 }), 1_000, "attempt < 1 clamps")
     var noJitter = p
