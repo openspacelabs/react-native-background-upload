@@ -280,6 +280,11 @@ internal class EntryRun(
       return Attempt(entry, url, policy, result)
     }
 
+    // The response can arrive on a stopped job (see awaitLanded). From here to
+    // ops.settle in run(), or to markAccepted for a part, nothing may suspend:
+    // a suspension on a stopped job throws, and the response is lost. The
+    // "lands as the run is stopped" tests in EntryRunTest pin this.
+
     // A part counts on its own, so each part gets a rule's full maxRetries.
     val hits = (if (part != null) part.transientHitsByRule else entry.transientHitsByRule) ?: emptyMap()
     var verdict = RetryClassifier.classifyResponse(

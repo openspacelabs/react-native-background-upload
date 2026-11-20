@@ -1,5 +1,6 @@
 package ai.openspace.backgroundupload
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -18,7 +19,7 @@ import okio.buffer
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
-import kotlin.coroutines.resumeWithException
+import java.util.concurrent.atomic.AtomicReference
 
 // Throttling interval of the raw progress callback. ProgressThrottle limits
 // the JS events above this.
@@ -97,38 +98,84 @@ fun rangeRequestBody(file: File, start: Long, end: Long): RequestBody = object :
   }
 }
 
-private suspend fun awaitResponse(client: OkHttpClient, request: Request): UploadResponse =
-  suspendCancellableCoroutine { continuation ->
-    val call = client.newCall(request)
-    continuation.invokeOnCancellation { call.cancel() }
-    call.enqueue(object : Callback {
-      override fun onFailure(call: Call, e: IOException) =
-        continuation.resumeWithException(e)
+private suspend fun awaitResponse(client: OkHttpClient, request: Request): UploadResponse {
+  val call = client.newCall(request)
+  return awaitLanded(
+    register = { onResult ->
+      call.enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = onResult(Result.failure(e))
 
-      override fun onResponse(call: Call, response: Response) {
-        val result = try {
-          response.use { res -> // close the response asap
-            // The body unchanged: an empty body stays empty. A substituted
-            // reason phrase would make accept `bodyIncludes` rules match text
-            // the server never sent. The cap applies while it streams in.
-            val body = res.body?.let {
-              BodyCap.read(it.source(), BodyCap.SETTLED_MAX_BYTES, it.contentType()?.charset() ?: Charsets.UTF_8)
+        override fun onResponse(call: Call, response: Response) {
+          val result = try {
+            response.use { res -> // close the response asap
+              // The body unchanged: an empty body stays empty. A substituted
+              // reason phrase would make accept `bodyIncludes` rules match text
+              // the server never sent. The cap applies while it streams in.
+              val body = res.body?.let {
+                BodyCap.read(it.source(), BodyCap.SETTLED_MAX_BYTES, it.contentType()?.charset() ?: Charsets.UTF_8)
+              }
+              UploadResponse(
+                res.code,
+                body?.text.orEmpty(),
+                res.headers.toMultimap().mapValues { it.value.joinToString(", ") },
+                body?.truncated ?: false,
+              )
             }
-            UploadResponse(
-              res.code,
-              body?.text.orEmpty(),
-              res.headers.toMultimap().mapValues { it.value.joinToString(", ") },
-              body?.truncated ?: false,
-            )
+          } catch (e: IOException) {
+            onResult(Result.failure(e))
+            return
           }
-        } catch (e: IOException) {
-          continuation.resumeWithException(e)
-          return
+          onResult(Result.success(result))
         }
-        continuation.resumeWith(Result.success(result))
+      })
+    },
+    cancel = { call.cancel() },
+  )
+}
+
+/**
+ * Waits for one callback result and keeps a result that landed before a stop.
+ *
+ * [register] starts the work and gets the callback for its result. [cancel]
+ * stops the work. A stop (WorkManager stops the worker, pause() or cancel()
+ * cancels its work) with no result cancels the work and throws.
+ *
+ * Why: a plain suspendCancellableCoroutine drops a value when the stop comes
+ * after the resume and before the coroutine runs again. Its docs say it "will
+ * not resume successfully, even if CancellableContinuation.resume was already
+ * invoked". For an upload, that throws away a response OkHttp already read,
+ * and the request is sent again (at once after a system stop, at resume()
+ * after a pause). So the result is saved before the resume, and a stop
+ * returns it when it is there. A response not yet read when the stop lands
+ * is still lost: the stop cancels the call.
+ *
+ * A failure that landed first is thrown as it is (kotlinx delivers it).
+ *
+ * The caller's job is then cancelled, but plain code still runs. Each caller
+ * must reach its save (ops.settle for a simple entry, markAccepted for a part)
+ * with no suspension in between, because a suspension on a cancelled job
+ * throws. EntryRunTest pins this for both callers.
+ */
+internal suspend fun <T : Any> awaitLanded(
+  register: (onResult: (Result<T>) -> Unit) -> Unit,
+  cancel: () -> Unit,
+): T {
+  val landed = AtomicReference<T?>(null)
+  try {
+    return suspendCancellableCoroutine { continuation ->
+      // Runs at a stop, also after a resume that waits for dispatch. A cancel
+      // after the response was read and closed does nothing.
+      continuation.invokeOnCancellation { cancel() }
+      register { result ->
+        result.getOrNull()?.let { landed.set(it) }
+        continuation.resumeWith(result)
       }
-    })
+    }
+  } catch (stop: CancellationException) {
+    landed.get()?.let { return it }
+    throw stop
   }
+}
 
 private fun throttled(onProgress: (Long) -> Unit): (Long) -> Unit {
   var lastProgressReport = 0L
