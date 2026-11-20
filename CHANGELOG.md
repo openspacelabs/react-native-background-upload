@@ -1,4 +1,4 @@
-## Unreleased
+## 11.4.0
 
 The library has no deadlines, on Android, on iOS and in JS. It never expires
 a request. Before, a request settled `error` with `errorKind: 'expired'` once
